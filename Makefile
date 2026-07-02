@@ -39,6 +39,11 @@ WINE_SENTINEL   := $(BUILD_DIR)/wine-native/tools/winegcc/winegcc
 .PHONY: all
 all: hap
 
+# FORCE: 伪目标，永远"过期"，让 make 总是进入 recipe
+# recipe 内部的 find -newer 才是真正的增量判断
+.PHONY: FORCE
+FORCE:
+
 # 确保 stamps 目录存在
 $(STAMPS):
 	mkdir -p $(STAMPS)
@@ -53,7 +58,7 @@ $(STAMPS)/arm64-v8a $(STAMPS)/x86_64:
 .PHONY: deps
 deps: $(STAMPS)/deps
 
-$(STAMPS)/deps: $(SCRIPTS)/build_deps.sh $(SCRIPTS)/env.sh | $(STAMPS)
+$(STAMPS)/deps: $(SCRIPTS)/build_deps.sh $(SCRIPTS)/env.sh FORCE | $(STAMPS)
 	@if [ -f $@ ] && [ -f $(DEPS_SENTINEL) ] && \
 	    ! find $(ROOT)/thirdparty/freetype \
 	           $(ROOT)/thirdparty/libffi \
@@ -82,7 +87,7 @@ $(STAMPS)/deps: $(SCRIPTS)/build_deps.sh $(SCRIPTS)/env.sh | $(STAMPS)
 .PHONY: wine
 wine: $(STAMPS)/wine-$(CONFIG)
 
-$(STAMPS)/wine-$(CONFIG): $(SCRIPTS)/build_wine.sh $(SCRIPTS)/env.sh $(STAMPS)/deps | $(STAMPS)
+$(STAMPS)/wine-$(CONFIG): $(SCRIPTS)/build_wine.sh $(SCRIPTS)/env.sh $(STAMPS)/deps FORCE | $(STAMPS)
 	@if [ -f $@ ] && [ -f $(WINE_SENTINEL) ] && \
 	    ! find $(ROOT)/thirdparty/wine \
 	           -newer $@ -type f \
@@ -103,7 +108,7 @@ $(STAMPS)/wine-$(CONFIG): $(SCRIPTS)/build_wine.sh $(SCRIPTS)/env.sh $(STAMPS)/d
 .PHONY: box64
 box64: $(STAMPS)/box64-arm64-v8a-$(DEVICE_TYPE)
 
-$(STAMPS)/box64-arm64-v8a-$(DEVICE_TYPE): $(SCRIPTS)/build_box64.sh $(SCRIPTS)/env.sh | $(STAMPS)
+$(STAMPS)/box64-arm64-v8a-$(DEVICE_TYPE): $(SCRIPTS)/build_box64.sh $(SCRIPTS)/env.sh FORCE | $(STAMPS)
 	@if [ "$(NATIVE_ARCH)" = "x86_64" ]; then \
 	    echo "  [box64] skip (x86_64)"; \
 	    mkdir -p $(dir $@) && touch $@; \
@@ -132,7 +137,7 @@ define native_rule
 .PHONY: native-$(1)
 native-$(1): $$(STAMPS)/$(1)/native
 
-$$(STAMPS)/$(1)/native: $(SCRIPTS)/build_native.sh $(SCRIPTS)/env.sh | $$(STAMPS)/$(1)
+$$(STAMPS)/$(1)/native: $(SCRIPTS)/build_native.sh $(SCRIPTS)/env.sh FORCE | $$(STAMPS)/$(1)
 	@sentinel="$(NATIVE_SENTINEL_$(subst -,_,$(1)))"; \
 	if [ -f $$@ ] && [ -f "$$$$sentinel" ] && \
 	    ! find $(ROOT)/thirdparty/wayland \
