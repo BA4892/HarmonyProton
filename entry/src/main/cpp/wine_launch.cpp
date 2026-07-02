@@ -60,6 +60,12 @@ static bool IsWineserverSocketReady() {
 
 #ifdef PAD_MODE
 static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
+    // 通过 fdList 传递 audio bootstrap fd (仅 explorer 需要音频)
+    NativeChildProcess_Fd audioFdNode;
+    audioFdNode.fdName = const_cast<char*>("wine_audio_bootstrap");
+    audioFdNode.fd = audioBootstrapFd;
+    audioFdNode.next = nullptr;
+
     // -- wineserver via NCP --
     {
         std::string wsEntryParams = p->winehuaBin + "|wineserver|-f|-p|--no-auto-close";
@@ -106,7 +112,6 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
 #endif
         NativeChildProcess_Args childArgs = {};
         childArgs.entryParams = const_cast<char*>(entryParams.c_str());
-        childArgs.fdList.head = nullptr;
         NativeChildProcess_Options options = {};
         options.isolationMode = NCP_ISOLATION_MODE_NORMAL;
         int32_t childPid = -1;
@@ -154,6 +159,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
 #endif
         NativeChildProcess_Args exArgs = {};
         exArgs.entryParams = const_cast<char*>(exEntry.c_str());
+        exArgs.fdList.head = (audioBootstrapFd >= 0) ? &audioFdNode : nullptr;
         NativeChildProcess_Options exOpts = {};
         exOpts.isolationMode = NCP_ISOLATION_MODE_NORMAL;
         int32_t exPid = -1;

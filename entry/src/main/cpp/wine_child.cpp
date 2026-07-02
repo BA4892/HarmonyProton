@@ -127,16 +127,24 @@ extern "C" void Main(NativeChildProcess_Args args)
     OH_LOG_INFO(LOG_APP, "[WineChild] binDir=%{public}s argc=%{public}d argv[0]=%{public}s",
                 binDir, argc, argc > 0 ? argv[0] : "(none)");
 
-    // 2. 设置 WINESERVERSOCKET (从父进程传来的 fd)
-    if (args.fdList.head) {
-        int sockFd = args.fdList.head->fd;
-        char sockEnv[64];
-        snprintf(sockEnv, sizeof(sockEnv), "%d", sockFd);
-        setenv("WINESERVERSOCKET", sockEnv, 1);
-        OH_LOG_INFO(LOG_APP, "[WineChild] WINESERVERSOCKET=%{public}s", sockEnv);
-    } else {
-        OH_LOG_WARN(LOG_APP, "[WineChild] NO fdList.head, WINESERVERSOCKET NOT SET! "
-                    "Child will try server_connect() -> start_server() -> posix_spawn to find wineserver");
+    // 2. 从父进程 fdList 读取 fds (按 fdName 区分)
+    for (auto* node = args.fdList.head; node; node = node->next) {
+        if (node->fdName && strcmp(node->fdName, "wine_audio_bootstrap") == 0) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%d", node->fd);
+            setenv("WINE_OHOS_AUDIO_ENABLE", "1", 1);
+            setenv("WINE_OHOS_AUDIO_BOOTSTRAP_FD", buf, 1);
+            setenv("WINE_OHOS_AUDIO_PROTOCOL_VERSION", "1", 1);
+            OH_LOG_INFO(LOG_APP, "[WineChild] audio bootstrap fd=%{public}d", node->fd);
+        } else if (node->fdName && strcmp(node->fdName, "wineserver_sock") == 0) {
+            char sockEnv[64];
+            snprintf(sockEnv, sizeof(sockEnv), "%d", node->fd);
+            setenv("WINESERVERSOCKET", sockEnv, 1);
+            OH_LOG_INFO(LOG_APP, "[WineChild] WINESERVERSOCKET=%{public}s (via Broker)", sockEnv);
+        } else {
+            OH_LOG_INFO(LOG_APP, "[WineChild] fdList fd=%{public}d name=%{public}s (unrecognized, ignoring)",
+                        node->fd, node->fdName ? node->fdName : "(null)");
+        }
     }
 
     // 3. 设置 Wine 环境变量
