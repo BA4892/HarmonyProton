@@ -31,6 +31,7 @@ add_library(entry SHARED
     audio_stream.cpp
     graphics_broker.cpp
     napi_init.cpp
+	    wine_mmap_test.cpp
 	    wine_process.cpp
 	    wine_env.cpp
 	    wine_launch.cpp
