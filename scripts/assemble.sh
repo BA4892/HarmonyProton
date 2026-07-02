@@ -102,6 +102,14 @@ assemble_pad() {
         _pick_arm64_native "libwayland-server.so.0" "libwayland-server.so"
         _pick_arm64_native "libffi.so.8"         "libffi.so"
 
+        # box64.so → libs/arm64-v8a/ (ARM64 原生翻译器)
+        if [ -f "$BUILD_DIR/box64_build/box64.so" ]; then
+            cp "$BUILD_DIR/box64_build/box64.so" "$NATIVE_LIBS/"
+            log "    box64.so → libs/arm64-v8a/"
+        else
+            warn "box64.so 未找到！请先执行: bash scripts/build_box64.sh"
+        fi
+
         # ntdll.so → rawfile
         cp "$BUILD_DIR/wine-ohos/dlls/ntdll/ntdll.so" "$wine_data/bin/"
 
@@ -235,6 +243,9 @@ fi
 # ============================================================
 # 以下为 PC 模式 HNP 布局 (不变)
 # ============================================================
+
+# 清理 Pad 构建残留的 rawfile (避免打進 PC HAP)
+rm -f "$WINEHUA/entry/src/main/resources/rawfile/wine-data.zip"
 
 # staging 目录每次重建
 rm -rf "$STAGING_DIR"
