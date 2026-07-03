@@ -163,22 +163,22 @@ assemble_pad() {
 
     # -- 2. PE DLL + 数据文件 → rawfile (两种架构共用) --
     # x86_64-windows/
-    for dll in "$BUILD_DIR/wine-native/dlls/"*/x86_64-windows/*.dll; do
+    for dll in "$BUILD_DIR/wine-ohos/dlls/"*/x86_64-windows/*.dll; do
         cp "$dll" "$wine_data/bin/x86_64-windows/"
     done
-    for drv in "$BUILD_DIR/wine-native/dlls/"*/x86_64-windows/*.drv; do
+    for drv in "$BUILD_DIR/wine-ohos/dlls/"*/x86_64-windows/*.drv; do
         cp "$drv" "$wine_data/bin/x86_64-windows/"
     done
-    for exe in "$BUILD_DIR/wine-native/dlls/"*/x86_64-windows/*.exe; do
+    for exe in "$BUILD_DIR/wine-ohos/dlls/"*/x86_64-windows/*.exe; do
         cp "$exe" "$wine_data/bin/x86_64-windows/"
     done
-    for sys in "$BUILD_DIR/wine-native/dlls/"*/x86_64-windows/*.sys; do
+    for sys in "$BUILD_DIR/wine-ohos/dlls/"*/x86_64-windows/*.sys; do
         cp "$sys" "$wine_data/bin/x86_64-windows/"
     done
     log "  x86_64-windows → $(ls "$wine_data/bin/x86_64-windows" | wc -l) files"
 
     # *.exe stubs → rawfile
-    for exe in "$BUILD_DIR/wine-native/programs/"*/x86_64-windows/*.exe; do
+    for exe in "$BUILD_DIR/wine-ohos/programs/"*/x86_64-windows/*.exe; do
         cp "$exe" "$wine_data/bin/"
     done
     # graphics smoke test (OHOS 交叉编译产物, 不在 build-native/)
@@ -190,11 +190,11 @@ assemble_pad() {
     # fonts
     cp "$WINE_SRC/fonts/"*.ttf "$wine_data/share/wine/fonts/"
     # NLS
-    cp "$BUILD_DIR/wine-native/nls/"*.nls "$wine_data/share/wine/nls/"
+    cp "$BUILD_DIR/wine-ohos/nls/"*.nls "$wine_data/share/wine/nls/"
     # winmd
-    cp "$BUILD_DIR/wine-native/include/"*.winmd "$wine_data/share/wine/winmd/"
+    cp "$BUILD_DIR/wine-ohos/include/"*.winmd "$wine_data/share/wine/winmd/"
     # wine.inf (含 OHOS font substitutes)
-    cp "$BUILD_DIR/wine-native/loader/wine.inf" "$wine_data/share/wine/"
+    cp "$BUILD_DIR/wine-ohos/loader/wine.inf" "$wine_data/share/wine/"
     sed -i '/^\[MCI\]$/i\
 ;; OHOS font substitutes\
 HKLM,%FontSubStr%,"System",,"HarmonyOS Sans"\
@@ -307,22 +307,22 @@ log "  x86_64-unix: $(ls "$BIN/x86_64-unix" | wc -l) .so files"
 
 # ---- x86_64-windows/ (PE DLL + .drv + .exe + .sys) ----
 mkdir -p "$BIN/x86_64-windows"
-for dll in "$BUILD_DIR/wine-native/dlls/"*/x86_64-windows/*.dll; do
+for dll in "$BUILD_DIR/wine-ohos/dlls/"*/x86_64-windows/*.dll; do
     cp "$dll" "$BIN/x86_64-windows/"
 done
-for drv in "$BUILD_DIR/wine-native/dlls/"*/x86_64-windows/*.drv; do
+for drv in "$BUILD_DIR/wine-ohos/dlls/"*/x86_64-windows/*.drv; do
     cp "$drv" "$BIN/x86_64-windows/"
 done
-for exe in "$BUILD_DIR/wine-native/dlls/"*/x86_64-windows/*.exe; do
+for exe in "$BUILD_DIR/wine-ohos/dlls/"*/x86_64-windows/*.exe; do
     cp "$exe" "$BIN/x86_64-windows/"
 done
-for sys in "$BUILD_DIR/wine-native/dlls/"*/x86_64-windows/*.sys; do
+for sys in "$BUILD_DIR/wine-ohos/dlls/"*/x86_64-windows/*.sys; do
     cp "$sys" "$BIN/x86_64-windows/"
 done
 log "  x86_64-windows: $(ls "$BIN/x86_64-windows" | wc -l) DLL/DRV/EXE/SYS files"
 
 # ---- *.exe stubs ----
-for exe in "$BUILD_DIR/wine-native/programs/"*/x86_64-windows/*.exe; do
+for exe in "$BUILD_DIR/wine-ohos/programs/"*/x86_64-windows/*.exe; do
     cp "$exe" "$BIN/"
 done
 log "  *.exe stubs: $(ls "$BIN"/*.exe 2>/dev/null | wc -l) files"
@@ -430,11 +430,11 @@ else
 fi
 
 log "  fonts: $(ls "$HNP_LAYOUT/share/wine/fonts" | wc -l) .ttf files"
-cp "$BUILD_DIR/wine-native/nls/"*.nls "$HNP_LAYOUT/share/wine/nls/"
+cp "$BUILD_DIR/wine-ohos/nls/"*.nls "$HNP_LAYOUT/share/wine/nls/"
 mkdir -p "$HNP_LAYOUT/share/wine/winmd"
-cp "$BUILD_DIR/wine-native/include/"*.winmd "$HNP_LAYOUT/share/wine/winmd/"
+cp "$BUILD_DIR/wine-ohos/include/"*.winmd "$HNP_LAYOUT/share/wine/winmd/"
 log "  winmd: $(ls "$HNP_LAYOUT/share/wine/winmd" | wc -l) .winmd files"
-cp "$BUILD_DIR/wine-native/loader/wine.inf" "$HNP_LAYOUT/share/wine/"
+cp "$BUILD_DIR/wine-ohos/loader/wine.inf" "$HNP_LAYOUT/share/wine/"
 
 # OHOS: 无 fontconfig, Wine 内置字体 glyph metrics 不足.
 # 将 Windows 默认字体映射到 HarmonyOS 系统字体.

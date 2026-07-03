@@ -10,31 +10,46 @@ WINE_CFLAGS="-g -O2 -D__MUSL__ -D_GNU_SOURCE -D__ANDROID__ -D__OHOS__ -DWINE_UNI
     -fPIC -fasynchronous-unwind-tables $PAD_CFLAGS"
 
 build_native_tools() {
-    log "--- Native 构建 (winegcc + PE DLLs) ---"
+    log "--- Native 构建 (winegcc 等 host 工具) ---"
     mkdir -p "$BUILD_DIR/wine-native"
     cd "$BUILD_DIR/wine-native"
     if [ ! -f "Makefile" ]; then
-        # 用 cache variables 模拟 Wayland 检测, 避免在 host 上安装 libwayland-dev 等
+        # 用 cache variables 骗过 configure, 避免 host 安装 wayland/xkbcommon/freetype/GL
+        # 这些库仅供 winewayland.drv/winex11.drv 等 DLL 编译使用
+        # 但我们只编译 tools/ 下的纯 host 工具, 不编任何 DLL, 不需要实际头文件/库
         export ac_cv_header_wayland_client_h=yes
         export ac_cv_lib_wayland_client_wl_display_connect=yes
-        export WAYLAND_CLIENT_CFLAGS="-I/usr/local/include"
-        export WAYLAND_CLIENT_LIBS="-L/usr/local/lib/x86_64-linux-gnu -lwayland-client"
         export ac_cv_header_xkbcommon_xkbcommon_h=yes
         export ac_cv_lib_xkbcommon_xkb_context_new=yes
-        export ac_cv_lib_soname_xkbcommon="libxkbcommon.so.0"
-        export XKBCOMMON_CFLAGS="-I/usr/include"
-        export XKBCOMMON_LIBS="-lxkbcommon"
         export ac_cv_header_xkbcommon_xkbregistry_h=yes
         export ac_cv_lib_xkbregistry_rxkb_context_new=yes
-        export ac_cv_lib_soname_xkbregistry="libxkbregistry.so.0"
-        export XKBREGISTRY_CFLAGS="-I/usr/include"
-        export XKBREGISTRY_LIBS="-lxkbregistry"
+        export ac_cv_header_ft2build_h=yes
+        export ac_cv_lib_soname_freetype="libfreetype.so.6"
+        export FREETYPE_CFLAGS="-I/usr/include/freetype2"
+        export FREETYPE_LIBS="-lfreetype"
         export WAYLAND_SCANNER=/usr/local/bin/wayland-scanner
         "$WINE_SRC/configure" --enable-win64 --disable-tests \
             --without-x --without-alsa \
             --without-opengl --without-vulkan
     fi
-    make -j$JOBS
+    # 只编译 OHOS 交叉构建实际需要的 host 工具 (~44 .o 文件)
+    # 不编 DLL (PE/fake-module 和 Unix .so), 砍掉 ~90% 编译时间
+    # 也不需要在 host 上安装 wayland/xkbcommon/freetype/GL dev 包
+    # 只编译 OHOS 交叉构建实际需要的 host 工具
+    # winegcc/winebuild/wrc/widl: 交叉编译 PE DLL
+    # wine: 加载器 (locale.nls 等数据文件)
+    # makedep/make_xftmpl/wmc: Makefile 依赖/资源生成
+    # sfnt2fon: 字体 .fon 生成 (唯一需要 host freetype 的工具)
+    make -j$JOBS \
+        tools/winegcc/winegcc \
+        tools/winebuild/winebuild \
+        tools/wrc/wrc \
+        tools/widl/widl \
+        tools/wine/wine \
+        tools/makedep \
+        tools/make_xftmpl \
+        tools/wmc/wmc \
+        tools/sfnt2fon/sfnt2fon
 }
 
 build_ohos_unix() {
