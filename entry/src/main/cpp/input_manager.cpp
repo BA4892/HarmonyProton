@@ -328,6 +328,23 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
                 }
                 Enqueue(InputEvent::PTR_BUTTON, 0, nullptr, 0, 0, button, WL_POINTER_BUTTON_STATE_PRESSED);
             }
+
+            //  键盘焦点跟随点击 (P0-1 + P0-3)
+            // winewayland.drv: keyboard_enter → WM_WAYLAND_SET_FOREGROUND
+            // → NtUserSetForegroundWindowInternal → Wine 前台窗口切换
+            if (!keyboardEntered_.load() || keyboardFocusedToplevel_.load() != tl) {
+                wl_resource* kbdSurf = ws->GetSurfaceForToplevel(tl);
+                if (kbdSurf) {
+                    if (keyboardEntered_.load() && keyboardFocusedToplevel_.load() != tl)
+                        Enqueue(InputEvent::KBD_LEAVE, 0, nullptr, 0, 0, 0, 0);
+                    keyboardFocusedToplevel_ = tl;
+                    keyboardFocusedSurface_ = kbdSurf;
+                    keyboardEntered_ = true;
+                    Enqueue(InputEvent::KBD_ENTER, tl, kbdSurf, 0, 0, 0, 0);
+                    EnqueueModifiers();
+                    OH_LOG_INFO(LOG_APP, "[Input] PTR PRESS + KBD ENTER tl=%{public}u (focus follows click)", tl);
+                }
+            }
             break;
         }
         case ACT_RELEASE: {
@@ -560,11 +577,18 @@ void InputManager::FlushQueue() {
         switch (ev.type) {
             case InputEvent::PTR_ENTER:   InjectPointerEnter(ev.tl, ev.surface, ev.x, ev.y); break;
             case InputEvent::PTR_LEAVE:   InjectPointerLeave(); break;
-            case InputEvent::PTR_MOTION:
-                OH_LOG_INFO(LOG_APP, "[Input] Flush-MOTION sx=%{public}.1f sy=%{public}.1f",
-                            wl_fixed_to_double(ev.x), wl_fixed_to_double(ev.y));
+            case InputEvent::PTR_MOTION: {
+                //  Wayland 标准: xdg_toplevel.move 期间 compositor 接管 motion,
+                // 不转发给 Wine (协议规定 surface loses device focus)
+                if (WaylandServer::GetInstance()->ProcessMoveGrabMotion(ev.x, ev.y))
+                    break;
                 InjectPointerMotion(ev.x, ev.y); break;
-            case InputEvent::PTR_BUTTON:  InjectPointerButton(ev.btn_or_key, ev.state); break;
+            }
+            case InputEvent::PTR_BUTTON:
+                //  交互式移动结束: Release 时结束 grab 并转发给 Wine
+                if (ev.state == WL_POINTER_BUTTON_STATE_RELEASED)
+                    WaylandServer::GetInstance()->EndMoveGrab();
+                InjectPointerButton(ev.btn_or_key, ev.state); break;
             case InputEvent::PTR_AXIS:    InjectPointerAxis(ev.axis, ev.axis_value); break;
             case InputEvent::KBD_ENTER:   InjectKeyboardEnter(ev.tl, ev.surface); break;
             case InputEvent::KBD_LEAVE:   InjectKeyboardLeave(); break;

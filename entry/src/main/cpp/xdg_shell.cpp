@@ -48,7 +48,11 @@ static void tl_set_app_id(wl_client*, wl_resource* tlRes, const char* appId) {
     // 确保只有真正的全屏桌面 toplevel 才成为 root。
 }
 static void tl_show_window_menu(wl_client*, wl_resource*, wl_resource*, uint32_t, int32_t, int32_t) {}
-static void tl_move(wl_client*, wl_resource*, wl_resource*, uint32_t) {}
+static void tl_move(wl_client*, wl_resource* tlRes, wl_resource* /*seat*/, uint32_t serial) {
+    auto* td = static_cast<ToplevelData*>(wl_resource_get_user_data(tlRes));
+    if (!td || td->toplevelId == 0) return;
+    WaylandServer::GetInstance()->StartMoveGrab(td->toplevelId, serial);
+}
 static void tl_resize(wl_client*, wl_resource*, wl_resource*, uint32_t, uint32_t) {}
 static void fire_limits_event(SurfaceData* sd) {
     if (!sd || sd->toplevelId == 0) return;

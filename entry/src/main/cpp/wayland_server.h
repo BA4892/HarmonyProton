@@ -120,6 +120,12 @@ public:
     // toplevelId -> wl_surface 映射 (供 Seat::InjectPointerEnter 查找)
     wl_resource* GetSurfaceForToplevel(uint32_t toplevelId);
 
+    // 交互式窗口移动 (xdg_toplevel.move) — 由 xdg_shell 和 InputManager 调用
+    bool IsMoveGrabActive() const { return moveGrabToplevelId_ != 0; }
+    void StartMoveGrab(uint32_t toplevelId, uint32_t serial);
+    void EndMoveGrab();
+    bool ProcessMoveGrabMotion(wl_fixed_t wx, wl_fixed_t wy);
+
 private:
     WaylandServer() = default;
     void EventLoop();
@@ -156,6 +162,10 @@ private:
     // Desktop 合成模式
     bool desktopMode_ = false;
     uint32_t desktopRootToplevelId_ = 0;
+    // 交互式窗口移动 (xdg_toplevel.move)
+    uint32_t moveGrabToplevelId_ = 0;
+    uint32_t moveGrabSerial_ = 0;
+    int32_t moveGrabLastWineX_ = 0, moveGrabLastWineY_ = 0;  // 上一帧 Wine 逻辑坐标
     // subsurface 合成层 (不写入 toplevelPixels_, 避免污染)
     struct SubsurfaceLayer {
         wl_resource* surface = nullptr;

@@ -424,8 +424,15 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
             copyTight(self->toplevelPixels_[sd->toplevelId]);
             self->toplevelW_[sd->toplevelId] = contentW;
             self->toplevelH_[sd->toplevelId] = contentH;
-            self->toplevelX_[sd->toplevelId] = screenX;
-            self->toplevelY_[sd->toplevelId] = screenY;
+            // Wayland 标准语义: set_window_geometry 只描述 buffer 内容区域,
+            // 窗口桌面位置由 compositor 管理。仅首次 commit 时用 geoX/geoY 设初始位置。
+            if (self->toplevelX_.count(sd->toplevelId) == 0) {
+                self->toplevelX_[sd->toplevelId] = screenX;
+                self->toplevelY_[sd->toplevelId] = screenY;
+                OH_LOG_INFO(LOG_APP, "[MW-MOVE] initial pos tl=%{public}u (%{public}d,%{public}d)",
+                    sd->toplevelId, screenX, screenY);
+            }
+            // 后续 commit: 忽略 geoX/geoY, compositor 位置为权威
             self->toplevelDirty_[sd->toplevelId] = true;
             // 新 toplevel 加到 Z-order 顶层
             if (self->IsDesktopMode() && sd->toplevelId != self->desktopRootToplevelId_) {
@@ -716,6 +723,57 @@ void WaylandServer::RaiseToplevel(uint32_t id) {
     if (it != toplevelZOrder_.end()) toplevelZOrder_.erase(it);
     toplevelZOrder_.push_back(id);
     toplevelDirty_[desktopRootToplevelId_] = true;
+}
+
+// -- 交互式窗口移动 (xdg_toplevel.move) --
+void WaylandServer::StartMoveGrab(uint32_t toplevelId, uint32_t serial) {
+    std::lock_guard<std::mutex> lk(toplevelMutex_);
+    moveGrabToplevelId_ = toplevelId;
+    moveGrabSerial_ = serial;
+    moveGrabLastWineX_ = 0;
+    moveGrabLastWineY_ = 0;
+    OH_LOG_INFO(LOG_APP, "[MW-MOVE] start interactive move tl=%{public}u serial=%{public}u",
+                toplevelId, serial);
+}
+
+void WaylandServer::EndMoveGrab() {
+    OH_LOG_INFO(LOG_APP, "[MW-MOVE] end interactive move tl=%{public}u", moveGrabToplevelId_);
+    std::lock_guard<std::mutex> lk(toplevelMutex_);
+    moveGrabToplevelId_ = 0;
+    moveGrabSerial_ = 0;
+    moveGrabLastWineX_ = 0;
+    moveGrabLastWineY_ = 0;
+}
+
+bool WaylandServer::ProcessMoveGrabMotion(wl_fixed_t wx, wl_fixed_t wy) {
+    std::lock_guard<std::mutex> lk(toplevelMutex_);
+    uint32_t tl = moveGrabToplevelId_;
+    if (tl == 0) return false;
+    auto xit = toplevelX_.find(tl);
+    if (xit == toplevelX_.end()) return false;
+
+    int32_t rx = wl_fixed_to_int(wx) + xit->second;
+    int32_t ry = wl_fixed_to_int(wy) + toplevelY_[tl];
+
+    if (moveGrabLastWineX_ == 0 && moveGrabLastWineY_ == 0) {
+        // 首帧: 只记录位置, 不移动
+        moveGrabLastWineX_ = rx;
+        moveGrabLastWineY_ = ry;
+        return true;
+    }
+
+    int32_t dx = rx - moveGrabLastWineX_;
+    int32_t dy = ry - moveGrabLastWineY_;
+    if (dx != 0 || dy != 0) {
+        xit->second += dx;
+        toplevelY_[tl] += dy;
+        moveGrabLastWineX_ = rx;
+        moveGrabLastWineY_ = ry;
+        toplevelDirty_[desktopRootToplevelId_] = true;
+        OH_LOG_INFO(LOG_APP, "[MW-MOVE] grab move tl=%{public}u dx=%{public}d dy=%{public}d newPos=(%{public}d,%{public}d)",
+                    tl, dx, dy, xit->second, toplevelY_[tl]);
+    }
+    return true;
 }
 
 void WaylandServer::FireToplevelEvent(uint32_t id, const char* event, const char* jsonData) {
