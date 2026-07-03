@@ -32,7 +32,8 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
                                       const std::string& sockName,
                                       const std::string& libPath,
                                       const std::string& binDir,
-                                      int audioBootstrapFd) {
+                                      int audioBootstrapFd,
+                                      const std::string& homeDir) {
     std::string shareDir = binDir + "/../share";
     std::string xkbDir = shareDir + "/X11/xkb";
     std::string runtimeLibPath = binDir + ":" + binDir + "/x86_64-unix:" + binDir + "/../lib/x86_64";
@@ -50,7 +51,7 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
     std::vector<std::string> env = {
         "XDG_RUNTIME_DIR=" + sockDir,
         "WAYLAND_DISPLAY=" + sockName,
-        "HOME=/storage/Users/currentUser/Download/app.hackeris.winehua",
+        "HOME=" + homeDir,
         "WINEPREFIX=" WINE_PREFIX,
         "WINEDATADIR=" + shareDir + "/wine",
 #ifdef PAD_MODE

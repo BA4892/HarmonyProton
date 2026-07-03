@@ -75,7 +75,8 @@ napi_value RunWineExe(napi_env env, napi_callback_info info) {
         LogGraphicsBackendStateForLaunch("Wine");
     }
 
-    std::vector<std::string> envStrs = BuildWineEnv(sockDir, sockName, libPath, binDir, audioBootstrapFd);
+    std::string homeDir = "/storage/Users/currentUser/Download";
+    std::vector<std::string> envStrs = BuildWineEnv(sockDir, sockName, libPath, binDir, audioBootstrapFd, homeDir);
     if (restoreGraphicsBackend) {
         winehua::GraphicsBroker::GetInstance().SetRequestedBackend(previousBackend);
         OH_LOG_INFO(LOG_APP, "[Wine] restored graphics backend after env setup");

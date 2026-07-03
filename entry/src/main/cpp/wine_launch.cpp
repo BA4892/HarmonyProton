@@ -68,7 +68,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
 
     // -- wineserver via NCP --
     {
-        std::string wsEntryParams = p->winehuaBin + "|wineserver|-f|-p|--no-auto-close";
+        std::string wsEntryParams = p->homeDir + "|" + p->winehuaBin + "|wineserver|-f|-p|--no-auto-close";
         OH_LOG_INFO(LOG_APP, "[Launch-Async] wineserver args=%{public}s", wsEntryParams.c_str());
         NativeChildProcess_Args wsArgs = {};
         wsArgs.entryParams = const_cast<char*>(wsEntryParams.c_str());
@@ -93,6 +93,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
     if (gStateTsfn)
         napi_call_threadsafe_function(gStateTsfn, strdup("wineboot-starting"), napi_tsfn_blocking);
 
+    gBrokerHomeDir = p->homeDir;
     StartBrokerServer();
     setenv("PROCESSBROKER", WINE_BROKER_SOCKET, 1);
 
@@ -106,9 +107,9 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
     if (!prefixReady) {
         OH_LOG_INFO(LOG_APP, "[Launch-Async] prefix not ready, running wineboot --init...");
 #ifdef __aarch64__
-        std::string entryParams = p->winehuaBin + "|wineboot|--init";
+        std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|wineboot|--init";
 #else
-        std::string entryParams = p->winehuaBin + "|wine|wineboot|--init";
+        std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|wine|wineboot|--init";
 #endif
         NativeChildProcess_Args childArgs = {};
         childArgs.entryParams = const_cast<char*>(entryParams.c_str());
@@ -153,9 +154,9 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
         char desktopArg[128];
         snprintf(desktopArg, sizeof(desktopArg), "/desktop=shell,%dx%d", dw, dh);
 #ifdef __aarch64__
-        std::string exEntry = p->winehuaBin + "|explorer|" + desktopArg;
+        std::string exEntry = p->homeDir + "|" + p->winehuaBin + "|explorer|" + desktopArg;
 #else
-        std::string exEntry = p->winehuaBin + "|wine|explorer|" + desktopArg;
+        std::string exEntry = p->homeDir + "|" + p->winehuaBin + "|wine|explorer|" + desktopArg;
 #endif
         NativeChildProcess_Args exArgs = {};
         exArgs.entryParams = const_cast<char*>(exEntry.c_str());
@@ -253,12 +254,12 @@ void LaunchThreadFunc(LaunchParams* p) {
     winehua::GraphicsBroker::GetInstance().EnsureStarted(p->sockDir);
 
     int audioBootstrapFd = CreateAudioBootstrapFd(p->sockDir);
-    p->envStrs = BuildWineEnv(p->sockDir, p->sockName, p->libPath, p->winehuaBin, audioBootstrapFd);
+    p->envStrs = BuildWineEnv(p->sockDir, p->sockName, p->libPath, p->winehuaBin,
+                               audioBootstrapFd, p->homeDir);
     for (auto& s : p->envStrs) p->envp.push_back((char*)s.c_str());
     p->envp.push_back(nullptr);
 
     mkdir(WINE_PREFIX, 0755);
-    mkdir("/storage/Users/currentUser/Download/app.hackeris.winehua", 0755);
 
     if (gStateTsfn)
         napi_call_threadsafe_function(gStateTsfn, strdup("wineserver-starting"), napi_tsfn_blocking);

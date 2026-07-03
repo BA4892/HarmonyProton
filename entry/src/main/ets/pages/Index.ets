@@ -1,6 +1,6 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import testNapi from 'libentry.so';
-import { fileIo as fs } from '@kit.CoreFileKit';
+import { fileIo as fs, fileUri, picker } from '@kit.CoreFileKit';
 import { zlib } from '@kit.BasicServicesKit';
 
 const DOMAIN = 0x0000;
@@ -262,12 +262,10 @@ struct Index {
   }
 
   private doInit = async (): Promise<void> => {
-    // 确保 HOME 目录存在 (Z: 映射目标)
-    const zHome = '/storage/Users/currentUser/Download/app.hackeris.winehua';
-    if (!fs.accessSync(zHome)) {
-      fs.mkdirSync(zHome, true);
-      hilog.info(DOMAIN, 'wine', 'auto-init: created HOME=%{public}s', zHome);
-    }
+    // HOME 目录 (Z: 映射目标), 通过 DocumentViewPicker 获取 Download 路径
+    const documentViewPicker = new picker.DocumentViewPicker();
+    let documentSaveResult = await documentViewPicker.save({ pickerMode: picker.DocumentPickerMode.DOWNLOAD });
+    const zHome = new fileUri.FileUri(documentSaveResult[0]).path + '/';
     // Pad: 检查是否需要解压 wine 数据文件
     hilog.info(DOMAIN, 'wine', 'auto-init: check PC path=%{public}s', WINE_BIN_PC);
     const isPC = fs.accessSync(WINE_BIN_PC);
@@ -284,7 +282,7 @@ struct Index {
       this.statusText = '启动服务失败';
       return;
     }
-    testNapi.launchClient(BOX64, [], SOCK, `${BIN_DIR}:${WINE_LIB}`);
+    testNapi.launchClient(BOX64, [], SOCK, `${BIN_DIR}:${WINE_LIB}`, zHome);
   }
 
   private doReset = (): void => {

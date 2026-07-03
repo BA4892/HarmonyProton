@@ -108,22 +108,30 @@ static napi_value StartServer(napi_env env, napi_callback_info info) {
 }
 
 static napi_value LaunchClient(napi_env env, napi_callback_info info) {
-    size_t argc = 4;
-    napi_value args[4];
+    size_t argc = 5;
+    napi_value args[5] = {};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
 
     auto* p = new LaunchParams();
 
-    char buf[1024] = {};
+    char buf[2048] = {};
     napi_get_value_string_utf8(env, args[0], buf, sizeof(buf), nullptr);
     p->exePath = buf;
     napi_get_value_string_utf8(env, args[2], buf, sizeof(buf), nullptr);
     p->sockPath = buf;
     napi_get_value_string_utf8(env, args[3], buf, sizeof(buf), nullptr);
     p->libPath = buf;
+    if (argc >= 5) {
+        napi_get_value_string_utf8(env, args[4], buf, sizeof(buf), nullptr);
+        p->homeDir = buf;
+    }
+    // 向后兼容: 旧调用未传 homeDir 时使用默认路径
+    if (p->homeDir.empty()) {
+        p->homeDir = "/storage/Users/currentUser/Download";
+    }
 
-    OH_LOG_INFO(LOG_APP, "[Launch] exe=%{public}s sock=%{public}s lib=%{public}s (async)",
-                p->exePath.c_str(), p->sockPath.c_str(), p->libPath.c_str());
+    OH_LOG_INFO(LOG_APP, "[Launch] exe=%{public}s sock=%{public}s lib=%{public}s home=%{public}s (async)",
+                p->exePath.c_str(), p->sockPath.c_str(), p->libPath.c_str(), p->homeDir.c_str());
 
     // 保证可执行
     if (access(p->exePath.c_str(), X_OK) != 0) chmod(p->exePath.c_str(), 0755);

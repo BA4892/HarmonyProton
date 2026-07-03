@@ -54,7 +54,7 @@ static void* stderr_reader_thread(void* arg) {
 #define LOG_DOMAIN 0x0000
 #define LOG_TAG "WineChild"
 
-static void setup_wine_env(const char* binDir)
+static void setup_wine_env(const char* binDir, const char* homeDir)
 {
     std::string shareDir = std::string(binDir) + "/../share";
     std::string libDir = std::string(binDir) + "/x86_64-unix";
@@ -71,7 +71,8 @@ static void setup_wine_env(const char* binDir)
     setenv("LD_LIBRARY_PATH", libDir.c_str(), 1);
 #endif
 
-    setenv("HOME", "/storage/Users/currentUser/Download/app.hackeris.winehua", 1);
+    if (homeDir && homeDir[0])
+        setenv("HOME", homeDir, 1);
     setenv("XDG_RUNTIME_DIR", WINE_PREFIX, 1);
     setenv("WAYLAND_DISPLAY", "wine-wayland", 1);
     setenv("WINEPREFIX", WINE_PREFIX, 1);
@@ -110,11 +111,12 @@ extern "C" void Main(NativeChildProcess_Args args)
     OH_LOG_INFO(LOG_APP, "[WineChild] Main() ENTER pid=%{public}d entryParams=%{public}s",
                 getpid(), args.entryParams ? args.entryParams : "(null)");
 
-    // 1. 解析 entryParams: "binDir|arg0|arg1|..."
+    // 1. 解析 entryParams: "homeDir|binDir|arg0|arg1|..."
     const char* entryParams = args.entryParams ? args.entryParams : "";
     char* buf = strdup(entryParams);
-    char* binDir = strtok(buf, "|");
-    if (!binDir) { OH_LOG_ERROR(LOG_APP, "[WineChild] entryParams parse failed"); free(buf); return; }
+    char* homeDir = strtok(buf, "|");
+    char* binDir = strtok(nullptr, "|");
+    if (!binDir) { OH_LOG_ERROR(LOG_APP, "[WineChild] entryParams parse failed (no binDir)"); free(buf); return; }
 
     // 统计 argc, argv
     int argc = 0;
@@ -124,8 +126,8 @@ extern "C" void Main(NativeChildProcess_Args args)
         argv[argc++] = tok;
     argv[argc] = nullptr;
 
-    OH_LOG_INFO(LOG_APP, "[WineChild] binDir=%{public}s argc=%{public}d argv[0]=%{public}s",
-                binDir, argc, argc > 0 ? argv[0] : "(none)");
+    OH_LOG_INFO(LOG_APP, "[WineChild] homeDir=%{public}s binDir=%{public}s argc=%{public}d argv[0]=%{public}s",
+                homeDir ? homeDir : "(null)", binDir, argc, argc > 0 ? argv[0] : "(none)");
 
     // 2. 从父进程 fdList 读取 fds (按 fdName 区分)
     for (auto* node = args.fdList.head; node; node = node->next) {
@@ -148,7 +150,7 @@ extern "C" void Main(NativeChildProcess_Args args)
     }
 
     // 3. 设置 Wine 环境变量
-    setup_wine_env(binDir);
+    setup_wine_env(binDir, homeDir);
 
     // 确保 WINEPREFIX 目录存在
     mkdir(WINE_PREFIX, 0755);
@@ -253,14 +255,15 @@ extern "C" void Main(NativeChildProcess_Args args)
 }
 
 // wineserver 子进程入口
-// entryParams: "binDir|wineserver|-f" (binDir 用于 chdir)
+// entryParams: "homeDir|binDir|wineserver|-f"... (homeDir 跳过)
 extern "C" void WineserverMain(NativeChildProcess_Args args)
 {
     OH_LOG_INFO(LOG_APP, "[WineChild] WineserverMain() ENTER pid=%{public}d", getpid());
 
     const char* ep = args.entryParams ? args.entryParams : "";
     char* buf = strdup(ep);
-    char* binDir = strtok(buf, "|");
+    strtok(buf, "|");              // skip homeDir
+    char* binDir = strtok(nullptr, "|");
     if (!binDir) { free(buf); return; }
 
     OH_LOG_INFO(LOG_APP, "[WineChild] ws step1: setting env...");

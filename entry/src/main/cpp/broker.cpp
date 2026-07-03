@@ -14,6 +14,9 @@
 #include "wait_utils.h"
 #include "wine_constants.h"
 
+// 由 LaunchPadMode 在启动 Broker 前设置
+std::string gBrokerHomeDir;
+
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -89,8 +92,10 @@ static void HandleRequest(int conn_fd)
     }
 
     // 4) 构造 NativeChildProcess 参数
-    // 复制 entryParams: StartNativeChildProcess 是异步的，参数需要存活直到调用返回
-    char* entryParamsCopy = strdup(entryParamsRaw);
+    // 复制 entryParams 并加上 homeDir 前缀 (与 LaunchPadMode 新格式一致)
+    std::string fullParams = gBrokerHomeDir.empty() ? entryParamsRaw
+                            : (gBrokerHomeDir + "|" + entryParamsRaw);
+    char* entryParamsCopy = strdup(fullParams.c_str());
 
     NativeChildProcess_Fd fdNode = {};
     if (receivedFd >= 0) {

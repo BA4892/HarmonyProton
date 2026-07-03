@@ -39,7 +39,8 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
                                       const std::string& sockName,
                                       const std::string& libPath,
                                       const std::string& binDir,
-                                      int audioBootstrapFd);
+                                      int audioBootstrapFd,
+                                      const std::string& homeDir);
 
 // -- Audio bootstrap --
 int CreateAudioBootstrapFd(const std::string& runtimeDir);
