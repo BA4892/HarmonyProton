@@ -6,15 +6,32 @@
 
 - **OS:** Ubuntu 26.04 (或其他 Linux, 包名对应调整)
 - **OHOS SDK:** `/apps/harmony/` (通过 volume 挂载或本地安装)
-- **项目源码:** `/data/share/wineohos/` (带完整 thirdparty submodules)
+- **项目源码:** `/data/src/winehua/` (带完整 thirdparty submodules)
 
 ## 虚拟化场景
 
 ### Docker 容器
 
+项目根目录提供了 `Dockerfile`，可以直接构建镜像：
+
+```bash
+docker build -t wineohos-build .
+```
+
+然后挂载源码和 SDK 运行：
+
+```bash
+docker run --rm \
+  -v /path/to/wineohos:/data/src/winehua \
+  -v /path/to/harmony-sdk:/apps/harmony \
+  wineohos-build make NATIVE_ARCH=arm64-v8a DEVICE_TYPE=pad
+```
+
+或手动启动容器：
+
 ```bash
 docker run -d --name wine \
-  -v /path/to/wineohos:/data/share/wineohos \
+  -v /path/to/wineohos:/data/src/winehua \
   -v /path/to/harmony-sdk:/apps/harmony \
   ubuntu:26.04 bash -c 'sleep infinity'
 ```
@@ -34,10 +51,11 @@ apt-get update && apt-get install -y \
   build-essential cmake ninja-build meson         `# 编译工具链` \
   bison flex autoconf automake libtool             `# autotools (libffi, Wine configure)` \
   pkgconf zip git file python3 python3-pip         `# 工具` \
-  libexpat1-dev libxml2-dev                        `# wayland-scanner 原生构建` \
+  libexpat1-dev libxml2-dev libffi-dev             `# wayland-scanner 原生构建 (wayland 依赖 libffi)` \
   libfreetype-dev                                  `# sfnt2fon 字体工具 (Wine 字体 .fon 生成)` \
   gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64                             `# Wine OHOS 交叉 PE 编译` \
-  default-jdk                                      `# HAP 签名 (java)`
+  default-jdk                                      `# HAP 签名 (java)` \
+ && apt-get clean && rm -rf /var/lib/apt/lists/*
 ```
 
 > Wine native 构建只编译 `tools/` 下的 host 工具，不编译任何 DLL。
@@ -109,23 +127,19 @@ test -f /usr/local/bin/wayland-scanner && echo "✓ wayland-scanner" || echo "~ 
 
 ## 脚本修复
 
-在容器环境中，`scripts/build_xkbconfig.sh` 可能因绝对路径 symlink 解引用失败而报错。根本原因是 meson 创建的 `X11/xkb → /usr/share/xkeyboard-config-2` 绝对路径 symlink 在裸容器中不存在目标，`cp -rL` 无法解引用。
+项目构建脚本已修复以下裸容器环境问题，无需手动处理：
 
-**修复:** 直接复制实际数据目录，不依赖 symlink 解引用。
-
-```diff
-- cp -rL "$XKBC_INSTALL/usr/share/X11" "$SYSROOT_EXT_SHARE/"
-+ cp -r "$XKBC_INSTALL/usr/share/xkeyboard-config-2" "$SYSROOT_EXT_SHARE/X11/xkb"
-```
-
-（如果 `build_xkbconfig.sh` 尚未包含此修复，需手动加）
+- `build_xkbconfig.sh`: 修复 meson 创建的 `X11/xkb` 绝对路径 symlink 在裸容器中 `cp -rL` 解引用失败
+- `build_wine.sh`: native 构建从全量 make 改为仅编译 9 个 host 工具，不再需要 host 安装 wayland/xkbcommon/GL dev 包
+- `assemble.sh`: PE DLL 和数据文件路径从 `wine-native` 改为 `wine-ohos`（交叉构建产物）
+- `build_deps.sh`: guest_gfx (Mesa/VirGL) 默认跳过（`BUILD_GUEST_GFX=1` 启用）
 
 ---
 
 ## 构建
 
 ```bash
-cd /data/share/wineohos
+cd /data/src/winehua
 
 # Makefile 方式（推荐）
 make NATIVE_ARCH=arm64-v8a DEVICE_TYPE=pad
