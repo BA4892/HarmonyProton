@@ -100,7 +100,7 @@ static void tl_set_max_size(wl_client* client, wl_resource* tlRes, int32_t w, in
         sd->preMaxW = ws->GetToplevelW(sd->toplevelId);
         sd->preMaxH = ws->GetToplevelH(sd->toplevelId);
         sd->maximized = true;
-        ws->NotifyToplevelMaximized(sd->toplevelId);
+        ws->SetToplevelMaximized(sd->toplevelId);
         wl_array states;
         wl_array_init(&states);
         uint32_t* st = static_cast<uint32_t*>(wl_array_add(&states, sizeof(uint32_t)));
@@ -128,14 +128,14 @@ static void tl_set_maximized(wl_client* client, wl_resource* tlRes) {
     if (!sd) return;
 
     if (sd->minimized) {
-        WaylandServer::GetInstance()->NotifyWindowRestored(sd->toplevelId);
+        WaylandServer::GetInstance()->SetToplevelRestored(sd->toplevelId);
     }
     if (!sd->maximized) {
         auto* ws = WaylandServer::GetInstance();
         sd->preMaxW = ws->GetToplevelW(sd->toplevelId);
         sd->preMaxH = ws->GetToplevelH(sd->toplevelId);
         sd->maximized = true;
-        ws->NotifyToplevelMaximized(sd->toplevelId);
+        ws->SetToplevelMaximized(sd->toplevelId);
     }
     // 发 configure 让 Wine 渲染到工作区尺寸 (排除任务栏)
     auto* ws = WaylandServer::GetInstance();
