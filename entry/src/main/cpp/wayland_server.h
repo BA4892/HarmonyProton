@@ -51,6 +51,8 @@ public:
     void SendToplevelClose(uint32_t toplevelId);
     // 鸿蒙侧恢复最小化窗口时调用: 清除 minimized 标志 + 发 configure 通知 Wine
     void NotifyWindowRestored(uint32_t toplevelId);
+    // Wine 最小化窗口时调用: 保存 compositor 位置 + 标记 minimized + 触发 root 重绘
+    void NotifyToplevelMinimized(uint32_t toplevelId, int32_t geoX, int32_t geoY);
     // 鸿蒙侧 surface 尺寸变化时调用: 发 configure 通知 Wine 用新尺寸渲染
     void NotifyToplevelResize(uint32_t toplevelId, int32_t w, int32_t h);
     // 设置输出尺寸 (替换硬编码 1280x720)
@@ -81,15 +83,22 @@ public:
     static void surface_frame(wl_client*, wl_resource*, uint32_t);
     static void surface_commit(wl_client*, wl_resource*);
     static void surface_set_opaque_region(wl_client*, wl_resource*, wl_resource*) {}
-    static void surface_set_input_region(wl_client*, wl_resource*, wl_resource*) {}
+    static void surface_set_input_region(wl_client*, wl_resource*, wl_resource*);
     static void surface_set_buffer_transform(wl_client*, wl_resource*, int32_t) {}
     static void surface_set_buffer_scale(wl_client*, wl_resource*, int32_t) {}
     static void surface_damage_buffer(wl_client*, wl_resource*, int32_t, int32_t, int32_t, int32_t) {}
     static void surface_offset(wl_client*, wl_resource*, int32_t, int32_t) {}
 
-    static void region_destroy(wl_client*, wl_resource*) {}
-    static void region_add(wl_client*, wl_resource*, int32_t, int32_t, int32_t, int32_t) {}
-    static void region_subtract(wl_client*, wl_resource*, int32_t, int32_t, int32_t, int32_t) {}
+    static void region_destroy(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
+    static void region_add(wl_client*, wl_resource* r, int32_t, int32_t, int32_t, int32_t) {
+        int* count = static_cast<int*>(wl_resource_get_user_data(r));
+        if (count) (*count)++;
+    }
+    static void region_subtract(wl_client*, wl_resource* r, int32_t, int32_t, int32_t, int32_t) {
+        // 追踪计数: Wine 只用空/非空判断
+        int* count = static_cast<int*>(wl_resource_get_user_data(r));
+        if (count) (*count)++;
+    }
 
     /* wl_subcompositor */
     static void subcompositor_destroy(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
@@ -97,8 +106,8 @@ public:
     /* wl_subsurface */
     static void subsurface_destroy(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
     static void subsurface_set_position(wl_client*, wl_resource*, int32_t, int32_t);
-    static void subsurface_place_above(wl_client*, wl_resource*, wl_resource*) {}
-    static void subsurface_place_below(wl_client*, wl_resource*, wl_resource*) {}
+    static void subsurface_place_above(wl_client*, wl_resource*, wl_resource*);
+    static void subsurface_place_below(wl_client*, wl_resource*, wl_resource*);
     static void subsurface_set_sync(wl_client*, wl_resource*) {}
     static void subsurface_set_desync(wl_client*, wl_resource*) {}
 
@@ -144,9 +153,13 @@ private:
     std::mutex toplevelMutex_;
     std::unordered_map<uint32_t, std::vector<uint8_t>> toplevelPixels_;
     std::unordered_map<uint32_t, int> toplevelW_, toplevelH_;
-    std::unordered_map<uint32_t, int> toplevelX_, toplevelY_;  // desktop compositing position
+    std::unordered_map<uint32_t, int> toplevelX_, toplevelY_;  // compositor 桌面位置 (含 move grab 偏移)
+    std::unordered_map<uint32_t, int> toplevelWineX_, toplevelWineY_;  // Wine 坐标系位置 (首次 commit, 不变)
     std::unordered_map<uint32_t, bool> toplevelDirty_;
     std::unordered_map<uint32_t, int> toplevelLastReportedW_, toplevelLastReportedH_;
+    std::unordered_map<uint32_t, bool> toplevelMinimized_;  // 桌面合成时跳过最小化窗口
+    std::unordered_map<uint32_t, int> toplevelMinimizeCompX_, toplevelMinimizeCompY_;  // 最小化时的 compositor 位置
+    std::unordered_map<uint32_t, uint64_t> toplevelMinimizeTimeMs_;  // 最小化时间戳
 
     StateCb stateCb_;
     ToplevelCb toplevelCb_;
@@ -175,6 +188,7 @@ private:
         uint32_t shmFormat = 1;
         int32_t dmgX = 0, dmgY = 0, dmgW = 0, dmgH = 0;  // damage 包围盒
         int32_t vpDstW = -1, vpDstH = -1;                // viewport destination
+        bool isExternal = false;  // 外部菜单 (任务栏等), 输入坐标需用 Wine 基底
     };
     std::vector<SubsurfaceLayer> subsurfaceLayers_;
     std::vector<uint32_t> toplevelZOrder_;  // 前景→背景
@@ -223,4 +237,7 @@ struct SurfaceData {
     bool hasSizeLimits = false;
     int32_t minWidth = 0, minHeight = 0;
     int32_t maxWidth = 0, maxHeight = 0;
+
+    // wl_surface.set_input_region: true = 空区域 (不接受输入, 穿透点击)
+    bool inputRegionEmpty = false;
 };

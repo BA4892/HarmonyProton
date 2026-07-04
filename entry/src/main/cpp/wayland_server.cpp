@@ -198,9 +198,12 @@ void WaylandServer::compositor_create_surface(wl_client* client, wl_resource* co
 }
 
 void WaylandServer::compositor_create_region(wl_client* client, wl_resource* compRes, uint32_t id) {
+    int* rectCount = new int(0);
     wl_resource* res = wl_resource_create(client, &wl_region_interface,
                                           wl_resource_get_version(compRes), id);
-    wl_resource_set_implementation(res, &kRegionImpl, nullptr, nullptr);
+    wl_resource_set_implementation(res, &kRegionImpl, rectCount, [](wl_resource* r) {
+        delete static_cast<int*>(wl_resource_get_user_data(r));
+    });
 }
 
 // -- subcompositor 实现 --
@@ -231,15 +234,56 @@ void WaylandServer::subcompositor_get_subsurface(wl_client* client, wl_resource*
 
 void WaylandServer::subsurface_set_position(wl_client*, wl_resource* ssRes,
                                              int32_t x, int32_t y) {
-    // ssRes 的 user_data 是子 surface (在 get_subsurface 中设置)
     auto* childSurf = static_cast<wl_resource*>(wl_resource_get_user_data(ssRes));
     if (!childSurf) return;
     auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(childSurf));
     if (!sd) return;
     sd->subsurfaceX = x;
     sd->subsurfaceY = y;
-    OH_LOG_INFO(LOG_APP, "[MW-SUBSURF] set_position: child=%{public}p pos=(%{public}d,%{public}d)",
-                childSurf, x, y);
+    OH_LOG_INFO(LOG_APP, "[MW-SUBSURF] set_position: child=%{public}p parent=%{public}p pos=(%{public}d,%{public}d)",
+                childSurf, sd->parentSurface, x, y);
+}
+
+void WaylandServer::subsurface_place_above(wl_client*, wl_resource* ssRes, wl_resource* sibling) {
+    auto* childSurf = static_cast<wl_resource*>(wl_resource_get_user_data(ssRes));
+    if (!childSurf || !sibling) return;
+    auto* self = GetInstance();
+    std::lock_guard<std::mutex> lk(self->toplevelMutex_);
+    int myIdx = -1, siblingIdx = -1;
+    for (size_t i = 0; i < self->subsurfaceLayers_.size(); i++) {
+        if (self->subsurfaceLayers_[i].surface == childSurf) myIdx = (int)i;
+        if (self->subsurfaceLayers_[i].surface == sibling) siblingIdx = (int)i;
+    }
+    if (myIdx < 0 || siblingIdx < 0 || myIdx == siblingIdx) return;
+    auto layer = std::move(self->subsurfaceLayers_[myIdx]);
+    self->subsurfaceLayers_.erase(self->subsurfaceLayers_.begin() + myIdx);
+    int target = (myIdx < siblingIdx) ? siblingIdx - 1 : siblingIdx;
+    self->subsurfaceLayers_.insert(self->subsurfaceLayers_.begin() + target + 1, std::move(layer));
+    if (self->IsDesktopMode() && self->desktopRootToplevelId_ > 0)
+        self->toplevelDirty_[self->desktopRootToplevelId_] = true;
+    OH_LOG_INFO(LOG_APP, "[MW-SUBSURF] place_above child=%{public}p above sibling=%{public}p",
+                childSurf, sibling);
+}
+
+void WaylandServer::subsurface_place_below(wl_client*, wl_resource* ssRes, wl_resource* sibling) {
+    auto* childSurf = static_cast<wl_resource*>(wl_resource_get_user_data(ssRes));
+    if (!childSurf || !sibling) return;
+    auto* self = GetInstance();
+    std::lock_guard<std::mutex> lk(self->toplevelMutex_);
+    int myIdx = -1, siblingIdx = -1;
+    for (size_t i = 0; i < self->subsurfaceLayers_.size(); i++) {
+        if (self->subsurfaceLayers_[i].surface == childSurf) myIdx = (int)i;
+        if (self->subsurfaceLayers_[i].surface == sibling) siblingIdx = (int)i;
+    }
+    if (myIdx < 0 || siblingIdx < 0 || myIdx == siblingIdx) return;
+    auto layer = std::move(self->subsurfaceLayers_[myIdx]);
+    self->subsurfaceLayers_.erase(self->subsurfaceLayers_.begin() + myIdx);
+    int target = (myIdx < siblingIdx) ? siblingIdx - 1 : siblingIdx;
+    self->subsurfaceLayers_.insert(self->subsurfaceLayers_.begin() + target, std::move(layer));
+    if (self->IsDesktopMode() && self->desktopRootToplevelId_ > 0)
+        self->toplevelDirty_[self->desktopRootToplevelId_] = true;
+    OH_LOG_INFO(LOG_APP, "[MW-SUBSURF] place_below child=%{public}p below sibling=%{public}p",
+                childSurf, sibling);
 }
 
 // -- viewporter 实现 --
@@ -353,6 +397,17 @@ void WaylandServer::surface_damage(wl_client*, wl_resource* surfRes,
         int32_t rb = std::max(sd->damageY + sd->damageH, y + h);
         sd->damageX = rx; sd->damageY = ry;
         sd->damageW = rr - rx; sd->damageH = rb - ry;
+    }
+}
+
+void WaylandServer::surface_set_input_region(wl_client*, wl_resource* surfRes, wl_resource* region) {
+    auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(surfRes));
+    if (!sd) return;
+    if (region) {
+        int* count = static_cast<int*>(wl_resource_get_user_data(region));
+        sd->inputRegionEmpty = (count && *count == 0);
+    } else {
+        sd->inputRegionEmpty = false;  // NULL region = 整面接受输入
     }
 }
 
@@ -472,11 +527,27 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
             copyTight(self->toplevelPixels_[sd->toplevelId]);
             self->toplevelW_[sd->toplevelId] = contentW;
             self->toplevelH_[sd->toplevelId] = contentH;
+            // 自动恢复: 最小化后 >500ms 的 commit 是真正还原 (≈100ms 的标题栏不算)
+            if (sd->minimized && self->toplevelMinimizeTimeMs_.count(sd->toplevelId)) {
+                uint64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                if (now - self->toplevelMinimizeTimeMs_[sd->toplevelId] > 500) {
+                    sd->minimized = false;
+                    self->toplevelMinimized_.erase(sd->toplevelId);
+                    self->toplevelMinimizeCompX_.erase(sd->toplevelId);
+                    self->toplevelMinimizeCompY_.erase(sd->toplevelId);
+                    self->toplevelMinimizeTimeMs_.erase(sd->toplevelId);
+                    OH_LOG_INFO(LOG_APP, "[MW] auto-restore tl=%{public}u (commit %{public}llums after minimize)",
+                                sd->toplevelId, (long long)(now - self->toplevelMinimizeTimeMs_[sd->toplevelId]));
+                }
+            }
             // Wayland 标准语义: set_window_geometry 只描述 buffer 内容区域,
             // 窗口桌面位置由 compositor 管理。仅首次 commit 时用 geoX/geoY 设初始位置。
             if (self->toplevelX_.count(sd->toplevelId) == 0) {
                 self->toplevelX_[sd->toplevelId] = screenX;
                 self->toplevelY_[sd->toplevelId] = screenY;
+                self->toplevelWineX_[sd->toplevelId] = screenX;
+                self->toplevelWineY_[sd->toplevelId] = screenY;
                 OH_LOG_INFO(LOG_APP, "[MW-MOVE] initial pos tl=%{public}u (%{public}d,%{public}d)",
                     sd->toplevelId, screenX, screenY);
             }
@@ -561,8 +632,30 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                     layer.surface = surfRes;  // 用 subsurface 自己的 surface 做 key
                     layer.w = sd->w;
                     layer.h = sd->h;
-                    layer.x = self->toplevelX_[parentId] + sd->subsurfaceX;
-                    layer.y = self->toplevelY_[parentId] + sd->subsurfaceY;
+                    int32_t sx = sd->subsurfaceX, sy = sd->subsurfaceY;
+                    // 最小化窗口: Wine 内部坐标移到 (-32000,-32000), offset 偏 +32000
+                    if (self->toplevelMinimized_.count(parentId)) {
+                        if (sx > 16000) sx -= 32000;
+                        if (sy > 16000) sy -= 32000;
+                    }
+                    // 区分窗口内菜单 vs 外部菜单 (任务栏等):
+                    // subsurface offset 在窗口内容范围内 → 窗口内菜单, 跟 compositor 位置走
+                    // offset 在范围外 (如 sy<0 的任务栏弹出菜单) → 外部菜单, 用 Wine 坐标
+                    int wineX = (self->toplevelWineX_.count(parentId) ? self->toplevelWineX_[parentId] : 0);
+                    int wineY = (self->toplevelWineY_.count(parentId) ? self->toplevelWineY_[parentId] : 0);
+                    int compX = self->toplevelX_[parentId];
+                    int compY = self->toplevelY_[parentId];
+                    int compW = self->toplevelW_[parentId];
+                    int compH = self->toplevelH_[parentId];
+                    bool insideWin = (sx >= 0 && sx < compW && sy >= 0 && sy < compH);
+                    layer.isExternal = !insideWin;
+                    if (insideWin) {
+                        layer.x = compX + sx;
+                        layer.y = compY + sy;
+                    } else {
+                        layer.x = wineX + sx;
+                        layer.y = wineY + sy;
+                    }
                     layer.pixels = std::move(sd->pixels);
                     layer.parentToplevel = parentId;
                     layer.shmFormat = wl_shm_buffer_get_format(shm);
@@ -698,6 +791,7 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
         for (uint32_t childId : toplevelZOrder_) {
             if (childId == id) continue;
             if (backgroundLayers_.count(childId)) continue;  // 背景层, 只渲染到 root 之下
+            if (toplevelMinimized_.count(childId)) continue; // 最小化窗口不渲染
             if (toplevelPixels_.find(childId) == toplevelPixels_.end()) continue;
             int cw = toplevelW_[childId], ch = toplevelH_[childId];
             auto& childPx = toplevelPixels_[childId];
@@ -885,7 +979,13 @@ void WaylandServer::OnToplevelDestroyed(uint32_t toplevelId) {
     toplevelH_.erase(toplevelId);
     toplevelX_.erase(toplevelId);
     toplevelY_.erase(toplevelId);
+    toplevelWineX_.erase(toplevelId);
+    toplevelWineY_.erase(toplevelId);
     toplevelDirty_.erase(toplevelId);
+    toplevelMinimized_.erase(toplevelId);
+    toplevelMinimizeCompX_.erase(toplevelId);
+    toplevelMinimizeCompY_.erase(toplevelId);
+    toplevelMinimizeTimeMs_.erase(toplevelId);
     backgroundLayers_.erase(toplevelId);
     auto zit = std::find(toplevelZOrder_.begin(), toplevelZOrder_.end(), toplevelId);
     if (zit != toplevelZOrder_.end()) toplevelZOrder_.erase(zit);
@@ -914,22 +1014,55 @@ void WaylandServer::SendToplevelClose(uint32_t toplevelId) {
 
 uint32_t WaylandServer::FindToplevelAt(int x, int y) {
     std::lock_guard<std::mutex> lk(toplevelMutex_);
-    // 从 Z-order 顶层向底层遍历, 返回第一个命中 (即最顶层窗口)
     uint32_t rootId = desktopRootToplevelId_;
+
+    // 先查 subsurface 层 (渲染在 toplevel 之上, 点击应优先命中)
+    for (auto it = subsurfaceLayers_.rbegin(); it != subsurfaceLayers_.rend(); ++it) {
+        if (it->w <= 0 || it->h <= 0) continue;
+        if (x >= it->x && x < it->x + it->w && y >= it->y && y < it->y + it->h) {
+            return it->isExternal ? rootId : it->parentToplevel;
+        }
+    }
+
     for (auto it = toplevelZOrder_.rbegin(); it != toplevelZOrder_.rend(); ++it) {
         uint32_t id = *it;
         if (id == rootId) continue;
-        if (backgroundLayers_.count(id)) continue;  // 背景层, 只渲染不接收输入
+        if (backgroundLayers_.count(id)) continue;
         if (toplevelPixels_.find(id) == toplevelPixels_.end()) continue;
         int tx = toplevelX_[id];
         int ty = toplevelY_[id];
         int tw = toplevelW_[id];
         int th = toplevelH_[id];
         if (x >= tx && x < tx + tw && y >= ty && y < ty + th) {
+            wl_resource* surf = GetSurfaceForToplevel(id);
+            if (surf) {
+                auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(surf));
+                if (sd && sd->inputRegionEmpty) continue;
+            }
+            if (toplevelMinimized_.count(id)) continue;
             return id;
         }
     }
     return rootId;
+}
+
+void WaylandServer::NotifyToplevelMinimized(uint32_t toplevelId, int32_t geoX, int32_t geoY) {
+    std::lock_guard<std::mutex> lk(toplevelMutex_);
+    toplevelMinimized_[toplevelId] = true;
+    // 保存最小化时的 compositor 位置: Wine 内部坐标会跳到 (-32000,-32000),
+    // 后续 subsurface offset 会基于此偏移, 合成层坐标需要用 saved compositor 位置
+    if (toplevelX_.count(toplevelId)) {
+        toplevelMinimizeCompX_[toplevelId] = toplevelX_[toplevelId];
+        toplevelMinimizeCompY_[toplevelId] = toplevelY_[toplevelId];
+    }
+    toplevelMinimizeTimeMs_[toplevelId] = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (desktopRootToplevelId_ > 0)
+        toplevelDirty_[desktopRootToplevelId_] = true;
+    OH_LOG_INFO(LOG_APP, "[MW] NotifyToplevelMinimized tl=%{public}u wineGeo=(%{public}d,%{public}d)"
+                " compPos=(%{public}d,%{public}d)",
+                toplevelId, geoX, geoY,
+                toplevelMinimizeCompX_[toplevelId], toplevelMinimizeCompY_[toplevelId]);
 }
 
 void WaylandServer::NotifyWindowRestored(uint32_t toplevelId) {
@@ -957,6 +1090,15 @@ void WaylandServer::NotifyWindowRestored(uint32_t toplevelId) {
 
     // 3. 清除 minimized 标志
     sd->minimized = false;
+    {
+        std::lock_guard<std::mutex> lk(toplevelMutex_);
+        toplevelMinimized_.erase(toplevelId);
+        toplevelMinimizeCompX_.erase(toplevelId);
+        toplevelMinimizeCompY_.erase(toplevelId);
+        toplevelMinimizeTimeMs_.erase(toplevelId);
+        if (desktopRootToplevelId_ > 0)
+            toplevelDirty_[desktopRootToplevelId_] = true;
+    }
 
     // 4. 发 xdg_toplevel configure (ACTIVE 状态, 告知 Wine 窗口已恢复)
     wl_array states;

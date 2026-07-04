@@ -293,7 +293,6 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
     wl_fixed_t wx, wy;
     auto* ws = WaylandServer::GetInstance();
     if (ws->IsDesktopMode() && tl != ws->GetDesktopRootToplevelId()) {
-        // 子 toplevel: 用 root renderer 转换, 再减 toplevel 桌面偏移
         CoordTransform(px, py, ws->GetDesktopRootToplevelId(), &wx, &wy);
         wx -= wl_fixed_from_int(ws->GetToplevelX(tl));
         wy -= wl_fixed_from_int(ws->GetToplevelY(tl));

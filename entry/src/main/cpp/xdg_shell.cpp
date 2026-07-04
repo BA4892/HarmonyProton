@@ -146,6 +146,7 @@ static void tl_set_minimized(wl_client*, wl_resource* tlRes) {
     if (!sd) return;
 
     sd->minimized = true;
+    WaylandServer::GetInstance()->NotifyToplevelMinimized(sd->toplevelId, sd->geoX, sd->geoY);
     WaylandServer::GetInstance()->FireToplevelEvent(sd->toplevelId, "minimized");
     OH_LOG_INFO(LOG_APP, "[XDG] tl_set_minimized tl=%{public}u", sd->toplevelId);
 }
