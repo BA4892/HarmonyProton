@@ -683,7 +683,12 @@ void InputManager::InjectPointerAxis(int axis, wl_fixed_t value) {
     uint32_t t = NowMs();
     for (auto* ptr : ptrs) {
         if (ptr) {
+            // winewayland.drv 只处理 axis_discrete/axis_value120, axis 是空函数
             wl_pointer_send_axis(ptr, t, axisEnum, value);
+            if (wl_resource_get_version(ptr) >= WL_POINTER_AXIS_DISCRETE_SINCE_VERSION) {
+                int32_t steps = (wl_fixed_to_int(value) > 0) ? 1 : -1;
+                wl_pointer_send_axis_discrete(ptr, axisEnum, steps);
+            }
             wl_pointer_send_frame(ptr);
             nSent++;
         }

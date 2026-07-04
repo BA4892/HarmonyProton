@@ -40,6 +40,7 @@ class DesktopController extends XComponentController {
 struct DesktopPage {
   controller: DesktopController = new DesktopController();
   // 触控状态机: IDLE → PENDING → (DRAGGING | 长按 | 点击)
+  // 双指进入 SCROLLING 模式, 覆盖单指状态
   private touchPending: boolean = false;
   private isDragging: boolean = false;
   private touchStartTime: number = 0;
@@ -58,6 +59,15 @@ struct DesktopPage {
   private lastTapTl: number = 0;
   private static readonly DOUBLE_TAP_MS: number = 400;
   private static readonly DOUBLE_TAP_DIST: number = 30;
+  // 双指滚动
+  private twoFingerActive: boolean = false;
+  private twoFingerLastMidX: number = 0;
+  private twoFingerLastMidY: number = 0;
+  private twoFingerTl: number = 0;
+  private scrollLogCounter: number = 0;
+  private twoFingerAccumY: number = 0;
+  private twoFingerAccumX: number = 0;
+  private static readonly SCROLL_STEP_PX: number = 40; // 物理像素/滚动步, winewayland.drv 只处理 discrete
 
   build() {
     Stack() {
@@ -67,9 +77,79 @@ struct DesktopPage {
         controller: this.controller
       }).width('100%').height('100%').backgroundColor('#000').focusable(true)
 
-      // ── 触控处理: Down/Up/Click → 左键, 长按 → 右键, 拖拽 → Press+Motion+Release ──
+      // ── 触控处理: 单指→左键/右键/拖拽, 双指→滚轮 ──
       .onTouch((ev: TouchEvent) => {
         try {
+          // ── 双指滚动 ──
+          if (ev.touches.length >= 2) {
+            // 取消单指状态
+            if (this.touchPending || this.isDragging) {
+              if (this.isDragging) {
+                const btnLeft = mapMouseButton(1);
+                testNapi.sendPointerEvent(this.pendingTl, MouseAction.Release, this.pendingPx, this.pendingPy, btnLeft);
+              }
+              this.touchPending = false;
+              this.isDragging = false;
+            }
+
+            // 计算双指中点
+            let midX = 0, midY = 0;
+            for (let i = 0; i < ev.touches.length; i++) {
+              midX += vp2px(ev.touches[i].x);
+              midY += vp2px(ev.touches[i].y);
+            }
+            midX = Math.round(midX / ev.touches.length);
+            midY = Math.round(midY / ev.touches.length);
+
+            if (!this.twoFingerActive) {
+              // 进入双指模式
+              this.twoFingerActive = true;
+              this.twoFingerLastMidX = midX;
+              this.twoFingerLastMidY = midY;
+              this.twoFingerAccumY = 0;
+              this.twoFingerAccumX = 0;
+              const wpx = Math.round(midX / 2);
+              const wpy = Math.round(midY / 2);
+              this.twoFingerTl = testNapi.findToplevelAt(wpx, wpy) as number ?? 0;
+              this.scrollLogCounter = 0;
+              hilog.info(DOMAIN, 'CLICK-PIPE', '[ArkTS] SCROLL-START tl=%{public}d fingers=%{public}d',
+                this.twoFingerTl, ev.touches.length);
+            } else {
+              // 累积位移 → 超过阈值发送离散步
+              this.twoFingerAccumY += this.twoFingerLastMidY - midY;  // 向上=正=向下滚
+              this.twoFingerAccumX += midX - this.twoFingerLastMidX;  // 向右=正=向右滚
+              this.twoFingerLastMidX = midX;
+              this.twoFingerLastMidY = midY;
+
+              if (this.twoFingerTl > 0) {
+                // 垂直滚动
+                while (Math.abs(this.twoFingerAccumY) >= DesktopPage.SCROLL_STEP_PX) {
+                  const sign = this.twoFingerAccumY > 0 ? 1 : -1;
+                  testNapi.sendScrollEvent(this.twoFingerTl, 0, sign, DesktopPage.SCROLL_STEP_PX, midX, midY);
+                  this.twoFingerAccumY -= sign * DesktopPage.SCROLL_STEP_PX;
+                  if (++this.scrollLogCounter % 5 === 0) {
+                    hilog.info(DOMAIN, 'CLICK-PIPE', '[ArkTS] SCROLL-V tl=%{public}d',
+                      this.twoFingerTl);
+                  }
+                }
+                // 水平滚动
+                while (Math.abs(this.twoFingerAccumX) >= DesktopPage.SCROLL_STEP_PX) {
+                  const sign = this.twoFingerAccumX > 0 ? 1 : -1;
+                  testNapi.sendScrollEvent(this.twoFingerTl, 1, sign, DesktopPage.SCROLL_STEP_PX, midX, midY);
+                  this.twoFingerAccumX -= sign * DesktopPage.SCROLL_STEP_PX;
+                }
+              }
+            }
+            return;
+          }
+
+          // ── 单指模式: 恢复双指状态 ──
+          if (this.twoFingerActive) {
+            this.twoFingerActive = false;
+            hilog.info(DOMAIN, 'CLICK-PIPE', '[ArkTS] SCROLL-END');
+            return;
+          }
+
           const t = ev.changedTouches[0];
           if (!t) return;
           const px = Math.round(vp2px(t.x));
