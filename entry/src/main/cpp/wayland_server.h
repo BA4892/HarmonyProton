@@ -171,7 +171,9 @@ private:
         wl_resource* surface = nullptr;
         std::vector<uint8_t> pixels;
         int x = 0, y = 0, w = 0, h = 0;
-        uint32_t parentToplevel = 0;  // 所属 toplevel (input 路由用)
+        uint32_t parentToplevel = 0;
+        uint32_t shmFormat = 1;
+        int32_t dmgX = 0, dmgY = 0, dmgW = 0, dmgH = 0;  // damage 包围盒裁剪
     };
     std::vector<SubsurfaceLayer> subsurfaceLayers_;
     std::vector<uint32_t> toplevelZOrder_;  // 前景→背景
@@ -203,6 +205,9 @@ struct SurfaceData {
     wl_resource* parentSurface = nullptr;     // 父 wl_surface (仅 subsurface)
     int32_t subsurfaceX = 0, subsurfaceY = 0; // wl_subsurface.set_position
     bool isSubsurface = false;
+
+    // surface_damage 累积包围盒 (buffer 坐标), 用于裁剪 subsurface 渲染
+    int32_t damageX = 0, damageY = 0, damageW = 0, damageH = 0;
 
     // window states
     // app_id (xdg_toplevel.set_app_id), 用于识别 explorer 桌面

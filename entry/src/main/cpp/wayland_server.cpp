@@ -322,9 +322,28 @@ void WaylandServer::surface_destroy(wl_client*, wl_resource* r) {
 void WaylandServer::surface_attach(wl_client*, wl_resource* surfRes, wl_resource* buffer, int32_t, int32_t) {
     auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(surfRes));
     sd->pendingBuffer = buffer;
+    // 新 buffer → 重置 damage
+    sd->damageX = 0; sd->damageY = 0;
+    sd->damageW = 0; sd->damageH = 0;
 }
 
-void WaylandServer::surface_damage(wl_client*, wl_resource*, int32_t, int32_t, int32_t, int32_t) {}
+void WaylandServer::surface_damage(wl_client*, wl_resource* surfRes,
+                                    int32_t x, int32_t y, int32_t w, int32_t h) {
+    auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(surfRes));
+    if (!sd) return;
+    // 累积 damage 包围盒 (union)
+    if (sd->damageW == 0 || sd->damageH == 0) {
+        sd->damageX = x; sd->damageY = y;
+        sd->damageW = w; sd->damageH = h;
+    } else {
+        int32_t rx = std::min(sd->damageX, x);
+        int32_t ry = std::min(sd->damageY, y);
+        int32_t rr = std::max(sd->damageX + sd->damageW, x + w);
+        int32_t rb = std::max(sd->damageY + sd->damageH, y + h);
+        sd->damageX = rx; sd->damageY = ry;
+        sd->damageW = rr - rx; sd->damageH = rb - ry;
+    }
+}
 
 void WaylandServer::surface_frame(wl_client* client, wl_resource* surfRes, uint32_t cbId) {
     auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(surfRes));
@@ -517,6 +536,9 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                     layer.y = self->toplevelY_[parentId] + sd->subsurfaceY;
                     layer.pixels = std::move(sd->pixels);
                     layer.parentToplevel = parentId;
+                    layer.shmFormat = wl_shm_buffer_get_format(shm);
+                    layer.dmgX = sd->damageX; layer.dmgY = sd->damageY;
+                    layer.dmgW = sd->damageW; layer.dmgH = sd->damageH;
                     // 替换已有 layer
                     bool found = false;
                     for (auto& l : self->subsurfaceLayers_) {
@@ -525,7 +547,7 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                     if (!found) self->subsurfaceLayers_.push_back(std::move(layer));
                     self->toplevelDirty_[self->desktopRootToplevelId_] = true;
                     OH_LOG_INFO(LOG_APP, "[MW-SUBSURF] stored layer %{public}dx%{public}d at (%{public}d,%{public}d) parent=#%{public}u",
-                                sd->w, sd->h, layer.x, layer.y, parentId);
+                                layer.w, layer.h, layer.x, layer.y, parentId);
                 } else {
                     // 多窗口模式: 直接合成到父 toplevel
                     std::lock_guard<std::mutex> lk(self->toplevelMutex_);
@@ -686,15 +708,37 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
             if (dstX + copyW > rootW) copyW = rootW - dstX;
             if (dstY + copyH > rootH) copyH = rootH - dstY;
             if (copyW <= 0 || copyH <= 0) continue;
-            for (int y = 0; y < copyH; y++) {
-                for (int x = 0; x < copyW; x++) {
-                    int srcIdx = ((srcY + y) * layer.w + (srcX + x)) * 4;
+            // 用 damage 裁剪: 只渲染 damage 包围盒内的像素 (剪掉 buffer padding)
+            bool useDamage = (layer.dmgW > 0 && layer.dmgH > 0 &&
+                              layer.dmgW <= copyW && layer.dmgH <= copyH);
+            int renderW = useDamage ? layer.dmgW : copyW;
+            int renderH = useDamage ? layer.dmgH : copyH;
+            int renderOffX = useDamage ? layer.dmgX : 0;
+            int renderOffY = useDamage ? layer.dmgY : 0;
+            // WL_SHM_FORMAT_ARGB8888=0 (有alpha), WL_SHM_FORMAT_XRGB8888=1 (无alpha)
+            bool isArgb = (layer.shmFormat == 0);
+            for (int y = 0; y < renderH; y++) {
+                for (int x = 0; x < renderW; x++) {
+                    int srcIdx = ((renderOffY + srcY + y) * layer.w + (renderOffX + srcX + x)) * 4;
                     int dstIdx = ((dstY + y) * rootW + (dstX + x)) * 4;
-                    // bounds check (防止崩溃导致 mutex 死锁)
                     if (srcIdx + 3 >= (int)layer.pixels.size()) continue;
                     if (dstIdx + 3 >= (int)composited.size()) continue;
-                    if (layer.pixels[srcIdx + 3] == 255) continue;
-                    memcpy(&composited[dstIdx], &layer.pixels[srcIdx], 4);
+                    if (isArgb) {
+                        // ARGB8888: alpha 混合 (Weston PIXMAN_OP_OVER)
+                        uint8_t a = layer.pixels[srcIdx + 3];
+                        if (a == 0) continue;
+                        if (a == 255) {
+                            memcpy(&composited[dstIdx], &layer.pixels[srcIdx], 4);
+                        } else {
+                            unsigned inv = 255 - a;
+                            composited[dstIdx + 0] = (layer.pixels[srcIdx + 0] * a + composited[dstIdx + 0] * inv) / 255;
+                            composited[dstIdx + 1] = (layer.pixels[srcIdx + 1] * a + composited[dstIdx + 1] * inv) / 255;
+                            composited[dstIdx + 2] = (layer.pixels[srcIdx + 2] * a + composited[dstIdx + 2] * inv) / 255;
+                        }
+                    } else {
+                        // XRGB8888: 无alpha, 直接覆盖
+                        memcpy(&composited[dstIdx], &layer.pixels[srcIdx], 4);
+                    }
                 }
             }
         }
