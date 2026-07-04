@@ -455,26 +455,30 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                 self->FireToplevelEvent(sd->toplevelId, "resize", json);
             }
         }
-        // Desktop 模式: 用 app_id 识别 explorer 桌面
+        // Desktop 模式: 用 app_id+尺寸 识别 explorer 桌面
         if (self->IsDesktopMode() && sd->hasToplevel &&
             sd->toplevelId != self->GetDesktopRootToplevelId()) {
             uint32_t rootId = self->GetDesktopRootToplevelId();
-            bool isExplorerDesktop = (sd->appId.find("explorer") != std::string::npos);
-            if (isExplorerDesktop) {
+            bool isExplorer = (sd->appId.find("explorer") != std::string::npos);
+            // 任务栏等非全尺寸 explorer toplevel → 正常子窗口, 不走 root 逻辑
+            bool isFullSize = (contentW >= self->outputW_ * 8 / 10 &&
+                               contentH >= self->outputH_ * 8 / 10);
+
+            if (isExplorer && isFullSize) {
                 if (rootId == 0) {
-                    // 首个 explorer toplevel → 设为桌面 root
-                    OH_LOG_INFO(LOG_APP, "[MW] desktop root by app_id: #%{public}u appId=%{public}s",
-                                sd->toplevelId, sd->appId.c_str());
+                    // 首个全尺寸 explorer toplevel → 设为桌面 root
+                    OH_LOG_INFO(LOG_APP, "[MW] desktop root: #%{public}u appId=explorer",
+                                sd->toplevelId);
                     PluginManager::GetInstance()->MoveRendererToToplevel(0, sd->toplevelId);
                     self->SetDesktopRootToplevelId(sd->toplevelId);
                     self->FireToplevelEvent(sd->toplevelId, "desktop_root", "{}");
                     rootId = sd->toplevelId;
                 } else if (!sd->title.empty()) {
-                    // 已有 root, 新 explorer toplevel 有 title → 切换 root
+                    // 已有 root, 但有新全尺寸 explorer toplevel 带 title → root 切换
                     wl_resource* oldSurf = self->GetSurfaceForToplevel(rootId);
                     auto* oldSd = oldSurf ? static_cast<SurfaceData*>(wl_resource_get_user_data(oldSurf)) : nullptr;
                     if (oldSd && oldSd->title.empty()) {
-                        OH_LOG_INFO(LOG_APP, "[MW] root switch by app_id: #%{public}u (empty) -> #%{public}u (%{public}s)",
+                        OH_LOG_INFO(LOG_APP, "[MW] root switch: #%{public}u (empty) -> #%{public}u (%{public}s)",
                                     rootId, sd->toplevelId, sd->title.c_str());
                         self->backgroundLayers_.insert(rootId);
                         PluginManager::GetInstance()->MoveRendererToToplevel(rootId, sd->toplevelId);
@@ -482,18 +486,16 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                         self->FireToplevelEvent(sd->toplevelId, "desktop_root", "{}");
                         rootId = sd->toplevelId;
                     } else {
-                        OH_LOG_INFO(LOG_APP, "[MW] extra explorer toplevel #%{public}u -> background layer (root stays #%{public}u)",
-                                    sd->toplevelId, rootId);
                         self->backgroundLayers_.insert(sd->toplevelId);
+                        OH_LOG_INFO(LOG_APP, "[MW] extra full-size explorer #%{public}u -> background",
+                                    sd->toplevelId);
                     }
                 } else {
-                    // 已有 root, 新 explorer toplevel 无 title → 背景层
-                    OH_LOG_INFO(LOG_APP, "[MW] extra explorer toplevel #%{public}u (no title) -> background layer",
-                                sd->toplevelId);
                     self->backgroundLayers_.insert(sd->toplevelId);
+                    OH_LOG_INFO(LOG_APP, "[MW] extra full-size explorer #%{public}u (no title) -> background",
+                                sd->toplevelId);
                 }
             }
-            // 非 explorer 窗口: 只标记 root dirty 触发重合成
             if (rootId > 0) {
                 std::lock_guard<std::mutex> lk(self->toplevelMutex_);
                 self->toplevelDirty_[rootId] = true;
