@@ -65,6 +65,8 @@ public:
     int32_t outputW_ = 1280;
     int32_t outputH_ = 720;
     int32_t GetWorkAreaHeight();  // 排除任务栏后的可用高度
+    // 渲染/输入共用的 toplevel 可见性检查
+    bool IsToplevelVisible(uint32_t id);
     // Desktop 模式: 在合成帧中查找包含 (x,y) 的 toplevel (用于输入路由)
     uint32_t FindToplevelAt(int x, int y);
     // Desktop 模式: 提到 Z-order 最顶层

@@ -810,10 +810,7 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
         // Wine explorer 会创建多个全尺寸 toplevel (#1=背景层, #3=新桌面),
         // #1 需合成到 root 之上以显示桌面背景, 不因同尺寸跳过。
         for (uint32_t childId : toplevelZOrder_) {
-            if (childId == id) continue;
-            if (backgroundLayers_.count(childId)) continue;  // 背景层, 只渲染到 root 之下
-            if (toplevelMinimized_.count(childId)) continue; // 最小化窗口不渲染
-            if (toplevelPixels_.find(childId) == toplevelPixels_.end()) continue;
+            if (!IsToplevelVisible(childId)) continue;
             int cw = toplevelW_[childId], ch = toplevelH_[childId];
             auto& childPx = toplevelPixels_[childId];
             int childW = toplevelW_[childId];
@@ -1066,9 +1063,7 @@ uint32_t WaylandServer::FindToplevelAt(int x, int y) {
 
     for (auto it = toplevelZOrder_.rbegin(); it != toplevelZOrder_.rend(); ++it) {
         uint32_t id = *it;
-        if (id == rootId) continue;
-        if (backgroundLayers_.count(id)) continue;
-        if (toplevelPixels_.find(id) == toplevelPixels_.end()) continue;
+        if (!IsToplevelVisible(id)) continue;
         int tx = toplevelX_[id];
         int ty = toplevelY_[id];
         int tw = toplevelW_[id];
@@ -1079,11 +1074,20 @@ uint32_t WaylandServer::FindToplevelAt(int x, int y) {
                 auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(surf));
                 if (sd && sd->inputRegionEmpty) continue;
             }
-            if (toplevelMinimized_.count(id)) continue;
             return id;
         }
     }
     return rootId;
+}
+
+bool WaylandServer::IsToplevelVisible(uint32_t id) {
+    // 渲染和输入共用的可见性条件:
+    // 非 root + 非背景层 + 有像素 + 非最小化
+    if (id == desktopRootToplevelId_) return false;
+    if (backgroundLayers_.count(id)) return false;
+    if (toplevelPixels_.find(id) == toplevelPixels_.end()) return false;
+    if (toplevelMinimized_.count(id)) return false;
+    return true;
 }
 
 int32_t WaylandServer::GetWorkAreaHeight() {
