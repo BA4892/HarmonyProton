@@ -205,6 +205,8 @@ struct SurfaceData {
     bool isSubsurface = false;
 
     // window states
+    // app_id (xdg_toplevel.set_app_id), 用于识别 explorer 桌面
+    std::string appId;
     bool minimized = false;
     bool maximized = false;
 

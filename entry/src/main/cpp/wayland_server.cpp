@@ -455,28 +455,26 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                 self->FireToplevelEvent(sd->toplevelId, "resize", json);
             }
         }
-        // Desktop 模式: 非 root toplevel commit → 标记 root dirty
+        // Desktop 模式: 用 app_id 识别 explorer 桌面
         if (self->IsDesktopMode() && sd->hasToplevel &&
             sd->toplevelId != self->GetDesktopRootToplevelId()) {
             uint32_t rootId = self->GetDesktopRootToplevelId();
-            // 如果 toplevel 尺寸匹配桌面输出（>=80%），说明 explorer 重建了桌面窗口
-            if (contentW >= self->outputW_ * 8 / 10 && contentH >= self->outputH_ * 8 / 10) {
+            bool isExplorerDesktop = (sd->appId.find("explorer") != std::string::npos);
+            if (isExplorerDesktop) {
                 if (rootId == 0) {
-                    // 首个全尺寸 toplevel → 设为桌面 root
-                    OH_LOG_INFO(LOG_APP, "[MW] initial desktop root: #%{public}u (%{public}dx%{public}d)",
-                                sd->toplevelId, contentW, contentH);
+                    // 首个 explorer toplevel → 设为桌面 root
+                    OH_LOG_INFO(LOG_APP, "[MW] desktop root by app_id: #%{public}u appId=%{public}s",
+                                sd->toplevelId, sd->appId.c_str());
                     PluginManager::GetInstance()->MoveRendererToToplevel(0, sd->toplevelId);
                     self->SetDesktopRootToplevelId(sd->toplevelId);
                     self->FireToplevelEvent(sd->toplevelId, "desktop_root", "{}");
                     rootId = sd->toplevelId;
                 } else if (!sd->title.empty()) {
-                    // 已有 root, 但新 toplevel 有 title → 检查是否需要切换
-                    // 首次启动时 explorer 先创建空 title 临时窗口, 真正桌面后到
+                    // 已有 root, 新 explorer toplevel 有 title → 切换 root
                     wl_resource* oldSurf = self->GetSurfaceForToplevel(rootId);
                     auto* oldSd = oldSurf ? static_cast<SurfaceData*>(wl_resource_get_user_data(oldSurf)) : nullptr;
                     if (oldSd && oldSd->title.empty()) {
-                        // 当前 root 是空 title 临时窗口 → 切换 root 到真正桌面
-                        OH_LOG_INFO(LOG_APP, "[MW] root switch: #%{public}u (empty) -> #%{public}u (%{public}s)",
+                        OH_LOG_INFO(LOG_APP, "[MW] root switch by app_id: #%{public}u (empty) -> #%{public}u (%{public}s)",
                                     rootId, sd->toplevelId, sd->title.c_str());
                         self->backgroundLayers_.insert(rootId);
                         PluginManager::GetInstance()->MoveRendererToToplevel(rootId, sd->toplevelId);
@@ -484,17 +482,18 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                         self->FireToplevelEvent(sd->toplevelId, "desktop_root", "{}");
                         rootId = sd->toplevelId;
                     } else {
-                        OH_LOG_INFO(LOG_APP, "[MW] extra full-size toplevel #%{public}u -> background layer (root stays #%{public}u)",
+                        OH_LOG_INFO(LOG_APP, "[MW] extra explorer toplevel #%{public}u -> background layer (root stays #%{public}u)",
                                     sd->toplevelId, rootId);
                         self->backgroundLayers_.insert(sd->toplevelId);
                     }
                 } else {
-                    // 已有 root, 新全尺寸 toplevel 无 title → 渲染背景层
-                    OH_LOG_INFO(LOG_APP, "[MW] extra full-size toplevel #%{public}u -> background layer (root stays #%{public}u)",
-                                sd->toplevelId, rootId);
+                    // 已有 root, 新 explorer toplevel 无 title → 背景层
+                    OH_LOG_INFO(LOG_APP, "[MW] extra explorer toplevel #%{public}u (no title) -> background layer",
+                                sd->toplevelId);
                     self->backgroundLayers_.insert(sd->toplevelId);
                 }
             }
+            // 非 explorer 窗口: 只标记 root dirty 触发重合成
             if (rootId > 0) {
                 std::lock_guard<std::mutex> lk(self->toplevelMutex_);
                 self->toplevelDirty_[rootId] = true;
