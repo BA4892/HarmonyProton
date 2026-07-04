@@ -529,6 +529,7 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
             self->toplevelW_[sd->toplevelId] = contentW;
             self->toplevelH_[sd->toplevelId] = contentH;
             // 自动恢复: 检测到真实窗口内容 (>200×50) 而非最小化标题栏
+            // 注意: 此处已持有 toplevelMutex_, 不能调 SetToplevelRestored
             if (sd->minimized && contentW > 200 && contentH > 50) {
                 sd->minimized = false;
                 self->toplevelMinimized_.erase(sd->toplevelId);
