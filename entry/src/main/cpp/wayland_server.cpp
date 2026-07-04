@@ -364,7 +364,25 @@ void WaylandServer::surface_frame(wl_client* client, wl_resource* surfRes, uint3
 
 void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
     auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(surfRes));
-    if (!sd->pendingBuffer) return;
+    // NULL buffer → surface 无内容: 清除对应 subsurface layer
+    if (!sd->pendingBuffer) {
+        if (sd->isSubsurface) {
+            auto* self = GetInstance();
+            std::lock_guard<std::mutex> lk(self->toplevelMutex_);
+            size_t before = self->subsurfaceLayers_.size();
+            for (auto it = self->subsurfaceLayers_.begin(); it != self->subsurfaceLayers_.end(); ) {
+                if (it->surface == surfRes) it = self->subsurfaceLayers_.erase(it);
+                else ++it;
+            }
+            if (self->subsurfaceLayers_.size() != before) {
+                OH_LOG_INFO(LOG_APP, "[MW-SUBSURF] NULL buffer commit → removed layer, layers %{public}zu→%{public}zu",
+                            before, self->subsurfaceLayers_.size());
+                if (self->IsDesktopMode() && self->desktopRootToplevelId_ > 0)
+                    self->toplevelDirty_[self->desktopRootToplevelId_] = true;
+            }
+        }
+        return;
+    }
 
     // 读取 wl_shm buffer 像素
     wl_shm_buffer* shm = wl_shm_buffer_get(sd->pendingBuffer);
@@ -765,8 +783,8 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
         w = rootW;
         h = rootH;
         toplevelDirty_[id] = false;
-        OH_LOG_INFO(LOG_APP, "[MW-TAKE] desktop root #%{public}u frame %{public}dx%{public}d px=%{public}zu",
-                    id, w, h, out.size());
+        OH_LOG_INFO(LOG_APP, "[MW-TAKE] root #%{public}u %{public}dx%{public}d children=%{public}zu subsurfaces=%{public}zu",
+                    id, w, h, toplevelZOrder_.size(), subsurfaceLayers_.size());
         return true;
     }
 
