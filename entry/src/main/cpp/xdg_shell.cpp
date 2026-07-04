@@ -128,8 +128,7 @@ static void tl_set_maximized(wl_client* client, wl_resource* tlRes) {
     if (!sd) return;
 
     if (sd->minimized) {
-        sd->minimized = false;
-        WaylandServer::GetInstance()->FireToplevelEvent(sd->toplevelId, "restored");
+        WaylandServer::GetInstance()->NotifyWindowRestored(sd->toplevelId);
     }
     if (!sd->maximized) {
         auto* ws = WaylandServer::GetInstance();

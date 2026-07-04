@@ -528,19 +528,15 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
             copyTight(self->toplevelPixels_[sd->toplevelId]);
             self->toplevelW_[sd->toplevelId] = contentW;
             self->toplevelH_[sd->toplevelId] = contentH;
-            // 自动恢复: 最小化后 >500ms 的 commit 是真正还原 (≈100ms 的标题栏不算)
-            if (sd->minimized && self->toplevelMinimizeTimeMs_.count(sd->toplevelId)) {
-                uint64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now().time_since_epoch()).count();
-                if (now - self->toplevelMinimizeTimeMs_[sd->toplevelId] > 500) {
-                    sd->minimized = false;
-                    self->toplevelMinimized_.erase(sd->toplevelId);
-                    self->toplevelMinimizeCompX_.erase(sd->toplevelId);
-                    self->toplevelMinimizeCompY_.erase(sd->toplevelId);
-                    self->toplevelMinimizeTimeMs_.erase(sd->toplevelId);
-                    OH_LOG_INFO(LOG_APP, "[MW] auto-restore tl=%{public}u (commit %{public}llums after minimize)",
-                                sd->toplevelId, (long long)(now - self->toplevelMinimizeTimeMs_[sd->toplevelId]));
-                }
+            // 自动恢复: 检测到真实窗口内容 (>200×50) 而非最小化标题栏
+            if (sd->minimized && contentW > 200 && contentH > 50) {
+                sd->minimized = false;
+                self->toplevelMinimized_.erase(sd->toplevelId);
+                self->toplevelMinimizeCompX_.erase(sd->toplevelId);
+                self->toplevelMinimizeCompY_.erase(sd->toplevelId);
+                self->toplevelMinimizeTimeMs_.erase(sd->toplevelId);
+                OH_LOG_INFO(LOG_APP, "[MW] auto-restore tl=%{public}u size=%{public}dx%{public}d",
+                            sd->toplevelId, contentW, contentH);
             }
             isFirstCommit = (self->toplevelX_.count(sd->toplevelId) == 0);
             if (isFirstCommit) {
