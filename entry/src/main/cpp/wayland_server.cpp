@@ -1069,82 +1069,69 @@ int32_t WaylandServer::GetWorkAreaHeight() {
     return h;
 }
 
-void WaylandServer::NotifyToplevelMaximized(uint32_t toplevelId) {
+void WaylandServer::SetToplevelMinimized(uint32_t id) {
     std::lock_guard<std::mutex> lk(toplevelMutex_);
-    if (toplevelX_.count(toplevelId)) {
-        toplevelX_[toplevelId] = 0;
-        toplevelY_[toplevelId] = 0;
+    toplevelMinimized_[id] = true;
+    if (toplevelX_.count(id)) {
+        toplevelMinimizeCompX_[id] = toplevelX_[id];
+        toplevelMinimizeCompY_[id] = toplevelY_[id];
     }
-    if (desktopRootToplevelId_ > 0)
-        toplevelDirty_[desktopRootToplevelId_] = true;
-}
-
-void WaylandServer::NotifyToplevelMinimized(uint32_t toplevelId, int32_t geoX, int32_t geoY) {
-    std::lock_guard<std::mutex> lk(toplevelMutex_);
-    toplevelMinimized_[toplevelId] = true;
-    if (toplevelX_.count(toplevelId)) {
-        toplevelMinimizeCompX_[toplevelId] = toplevelX_[toplevelId];
-        toplevelMinimizeCompY_[toplevelId] = toplevelY_[toplevelId];
-    }
-    toplevelMinimizeTimeMs_[toplevelId] = std::chrono::duration_cast<std::chrono::milliseconds>(
+    toplevelMinimizeTimeMs_[id] = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
     if (desktopRootToplevelId_ > 0)
         toplevelDirty_[desktopRootToplevelId_] = true;
-    OH_LOG_INFO(LOG_APP, "[MW] NotifyToplevelMinimized tl=%{public}u wineGeo=(%{public}d,%{public}d)"
-                " compPos=(%{public}d,%{public}d)",
-                toplevelId, geoX, geoY,
-                toplevelMinimizeCompX_[toplevelId], toplevelMinimizeCompY_[toplevelId]);
 }
 
-void WaylandServer::NotifyWindowRestored(uint32_t toplevelId) {
-    // 1. 取 toplevel resource
+void WaylandServer::SetToplevelRestored(uint32_t id) {
+    // 清除 minimized 状态
+    {
+        std::lock_guard<std::mutex> lk(toplevelMutex_);
+        toplevelMinimized_.erase(id);
+        toplevelMinimizeCompX_.erase(id);
+        toplevelMinimizeCompY_.erase(id);
+        toplevelMinimizeTimeMs_.erase(id);
+        if (desktopRootToplevelId_ > 0)
+        toplevelDirty_[desktopRootToplevelId_] = true;
+    }
+    // 发 configure 通知 Wine (如果 toplevel resource 存在)
     wl_resource* tl = nullptr;
     {
         std::lock_guard<std::mutex> lk(toplevelResMutex_);
-        auto it = toplevelResources_.find(toplevelId);
-        if (it != toplevelResources_.end()) {
-            tl = it->second;
-        }
+        auto it = toplevelResources_.find(id);
+        if (it != toplevelResources_.end()) tl = it->second;
     }
-    if (!tl) {
-        OH_LOG_WARN(LOG_APP, "[MW] NotifyWindowRestored id=%{public}u NOT found", toplevelId);
-        return;
-    }
-
-    // 2. 遍历 toplevel → xdg_surface → wl_surface → SurfaceData
+    if (!tl) return;
     auto* td = static_cast<ToplevelData*>(wl_resource_get_user_data(tl));
     if (!td || !td->xdgSurface) return;
     auto* xdg = static_cast<XdgSurface*>(wl_resource_get_user_data(td->xdgSurface));
     if (!xdg || !xdg->wlSurface) return;
     auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(xdg->wlSurface));
-    if (!sd) return;
-
-    // 3. 清除 minimized 标志
-    sd->minimized = false;
-    {
-        std::lock_guard<std::mutex> lk(toplevelMutex_);
-        toplevelMinimized_.erase(toplevelId);
-        toplevelMinimizeCompX_.erase(toplevelId);
-        toplevelMinimizeCompY_.erase(toplevelId);
-        toplevelMinimizeTimeMs_.erase(toplevelId);
-        if (desktopRootToplevelId_ > 0)
-            toplevelDirty_[desktopRootToplevelId_] = true;
-    }
-
-    // 4. 发 xdg_toplevel configure (ACTIVE 状态, 告知 Wine 窗口已恢复)
+    if (sd) sd->minimized = false;
     wl_array states;
     wl_array_init(&states);
     uint32_t* st = static_cast<uint32_t*>(wl_array_add(&states, sizeof(uint32_t)));
     *st = XDG_TOPLEVEL_STATE_ACTIVATED;
     xdg_toplevel_send_configure(tl, 0, 0, &states);
     wl_array_release(&states);
-
-    // 5. 发 xdg_surface configure
     wl_client* client = wl_resource_get_client(tl);
     wl_display* dpy = wl_client_get_display(client);
     xdg_surface_send_configure(xdg->xdgSurface, wl_display_next_serial(dpy));
+}
 
-    OH_LOG_INFO(LOG_APP, "[MW] NotifyWindowRestored id=%{public}u → xdg configure ACTIVE", toplevelId);
+void WaylandServer::SetToplevelMaximized(uint32_t id) {
+    std::lock_guard<std::mutex> lk(toplevelMutex_);
+    if (toplevelX_.count(id)) {
+        toplevelX_[id] = 0;
+        toplevelY_[id] = 0;
+    }
+    if (desktopRootToplevelId_ > 0)
+        toplevelDirty_[desktopRootToplevelId_] = true;
+}
+
+void WaylandServer::SetToplevelUnmaximized(uint32_t id) {
+    // 仅清除标记, 位置/尺寸由 surface_commit 恢复
+    if (desktopRootToplevelId_ > 0)
+        toplevelDirty_[desktopRootToplevelId_] = true;
 }
 
 void WaylandServer::NotifyToplevelResize(uint32_t toplevelId, int32_t w, int32_t h) {

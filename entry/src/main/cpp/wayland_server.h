@@ -49,12 +49,15 @@ public:
     // 清理 toplevel 像素数据 + 标记 root dirty (desktop mode)
     void OnToplevelDestroyed(uint32_t toplevelId);
     void SendToplevelClose(uint32_t toplevelId);
-    // 鸿蒙侧恢复最小化窗口时调用: 清除 minimized 标志 + 发 configure 通知 Wine
-    void NotifyWindowRestored(uint32_t toplevelId);
-    // Wine 最大化窗口时调用: 重置 compositor 位置到 (0,0)
-    void NotifyToplevelMaximized(uint32_t toplevelId);
-    // Wine 最小化窗口时调用: 保存 compositor 位置 + 标记 minimized + 触发 root 重绘
-    void NotifyToplevelMinimized(uint32_t toplevelId, int32_t geoX, int32_t geoY);
+    // 统一状态转换 (确保 minimize/maximize/restore 涉及的 map 操作原子化)
+    void SetToplevelMinimized(uint32_t id);
+    void SetToplevelRestored(uint32_t id);
+    void SetToplevelMaximized(uint32_t id);
+    void SetToplevelUnmaximized(uint32_t id);
+    // 旧接口 → 转发到新方法
+    void NotifyWindowRestored(uint32_t id) { SetToplevelRestored(id); }
+    void NotifyToplevelMaximized(uint32_t id) { SetToplevelMaximized(id); }
+    void NotifyToplevelMinimized(uint32_t id, int32_t, int32_t) { SetToplevelMinimized(id); }
     // 鸿蒙侧 surface 尺寸变化时调用: 发 configure 通知 Wine 用新尺寸渲染
     void NotifyToplevelResize(uint32_t toplevelId, int32_t w, int32_t h);
     // 设置输出尺寸 (替换硬编码 1280x720)
