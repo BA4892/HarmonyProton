@@ -108,7 +108,7 @@ public:
     /* wp_viewport */
     static void viewport_destroy(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
     static void viewport_set_source(wl_client*, wl_resource*, wl_fixed_t, wl_fixed_t, wl_fixed_t, wl_fixed_t) {}
-    static void viewport_set_destination(wl_client*, wl_resource*, int32_t, int32_t) {}
+    static void viewport_set_destination(wl_client*, wl_resource*, int32_t, int32_t);
 
     /* Globals bind */
     static void subcompositor_bind(wl_client*, void*, uint32_t, uint32_t);
@@ -173,7 +173,8 @@ private:
         int x = 0, y = 0, w = 0, h = 0;
         uint32_t parentToplevel = 0;
         uint32_t shmFormat = 1;
-        int32_t dmgX = 0, dmgY = 0, dmgW = 0, dmgH = 0;  // damage 包围盒裁剪
+        int32_t dmgX = 0, dmgY = 0, dmgW = 0, dmgH = 0;  // damage 包围盒
+        int32_t vpDstW = -1, vpDstH = -1;                // viewport destination
     };
     std::vector<SubsurfaceLayer> subsurfaceLayers_;
     std::vector<uint32_t> toplevelZOrder_;  // 前景→背景
@@ -208,6 +209,9 @@ struct SurfaceData {
 
     // surface_damage 累积包围盒 (buffer 坐标), 用于裁剪 subsurface 渲染
     int32_t damageX = 0, damageY = 0, damageW = 0, damageH = 0;
+
+    // wp_viewport destination (实际显示尺寸, -1=未设置/使用 buffer 尺寸)
+    int32_t vpDstW = -1, vpDstH = -1;
 
     // window states
     // app_id (xdg_toplevel.set_app_id), 用于识别 explorer 桌面

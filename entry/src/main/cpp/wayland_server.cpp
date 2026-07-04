@@ -252,7 +252,18 @@ void WaylandServer::viewporter_bind(wl_client* client, void* data, uint32_t vers
 void WaylandServer::viewporter_get_viewport(wl_client* client, wl_resource*,
                                              uint32_t id, wl_resource* surface) {
     wl_resource* vp = wl_resource_create(client, &wp_viewport_interface, 1, id);
-    wl_resource_set_implementation(vp, &kViewportImpl, nullptr, nullptr);
+    // 把 surface resource 存为 viewport 的 user_data,
+    // 这样 viewport_set_destination 就能通过 surface 找到 SurfaceData
+    wl_resource_set_implementation(vp, &kViewportImpl, surface, nullptr);
+}
+
+void WaylandServer::viewport_set_destination(wl_client*, wl_resource* vpRes, int32_t w, int32_t h) {
+    auto* surf = static_cast<wl_resource*>(wl_resource_get_user_data(vpRes));
+    if (!surf) return;
+    auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(surf));
+    if (!sd) return;
+    sd->vpDstW = w;
+    sd->vpDstH = h;
 }
 
 // -- output 实现 --
@@ -537,6 +548,7 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                     layer.pixels = std::move(sd->pixels);
                     layer.parentToplevel = parentId;
                     layer.shmFormat = wl_shm_buffer_get_format(shm);
+                    layer.vpDstW = sd->vpDstW; layer.vpDstH = sd->vpDstH;
                     layer.dmgX = sd->damageX; layer.dmgY = sd->damageY;
                     layer.dmgW = sd->damageW; layer.dmgH = sd->damageH;
                     // 替换已有 layer
@@ -561,8 +573,11 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                         int srcY = (popupY < 0) ? -popupY : 0;
                         int dstX = (popupX > 0) ? popupX : 0;
                         int dstY = (popupY > 0) ? popupY : 0;
+                        // wp_viewport: destination 指定实际显示尺寸
                         int copyW = sd->w - srcX;
                         int copyH = sd->h - srcY;
+                        if (sd->vpDstW > 0 && sd->vpDstW < copyW) copyW = sd->vpDstW;
+                        if (sd->vpDstH > 0 && sd->vpDstH < copyH) copyH = sd->vpDstH;
                         if (dstX + copyW > parentW) copyW = parentW - dstX;
                         if (dstY + copyH > parentH) copyH = parentH - dstY;
                         if (copyW > 0 && copyH > 0) {
@@ -708,13 +723,16 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
             if (dstX + copyW > rootW) copyW = rootW - dstX;
             if (dstY + copyH > rootH) copyH = rootH - dstY;
             if (copyW <= 0 || copyH <= 0) continue;
-            // 用 damage 裁剪: 只渲染 damage 包围盒内的像素 (剪掉 buffer padding)
-            bool useDamage = (layer.dmgW > 0 && layer.dmgH > 0 &&
-                              layer.dmgW <= copyW && layer.dmgH <= copyH);
-            int renderW = useDamage ? layer.dmgW : copyW;
-            int renderH = useDamage ? layer.dmgH : copyH;
-            int renderOffX = useDamage ? layer.dmgX : 0;
-            int renderOffY = useDamage ? layer.dmgY : 0;
+            // wp_viewport: Wine 用 destination 指定实际显示尺寸 (buffer 可能更大)
+            int renderW = copyW, renderH = copyH, renderOffX = 0, renderOffY = 0;
+            if (layer.vpDstW > 0 && layer.vpDstW < copyW) renderW = layer.vpDstW;
+            if (layer.vpDstH > 0 && layer.vpDstH < copyH) renderH = layer.vpDstH;
+            // surface_damage 裁剪: 只渲染 damage 包围盒内的像素
+            if (layer.dmgW > 0 && layer.dmgH > 0 &&
+                layer.dmgW <= renderW && layer.dmgH <= renderH) {
+                renderOffX = layer.dmgX; renderOffY = layer.dmgY;
+                renderW = layer.dmgW; renderH = layer.dmgH;
+            }
             // WL_SHM_FORMAT_ARGB8888=0 (有alpha), WL_SHM_FORMAT_XRGB8888=1 (无alpha)
             bool isArgb = (layer.shmFormat == 0);
             for (int y = 0; y < renderH; y++) {
