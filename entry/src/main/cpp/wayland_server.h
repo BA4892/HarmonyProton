@@ -51,6 +51,8 @@ public:
     void SendToplevelClose(uint32_t toplevelId);
     // 鸿蒙侧恢复最小化窗口时调用: 清除 minimized 标志 + 发 configure 通知 Wine
     void NotifyWindowRestored(uint32_t toplevelId);
+    // Wine 最大化窗口时调用: 重置 compositor 位置到 (0,0)
+    void NotifyToplevelMaximized(uint32_t toplevelId);
     // Wine 最小化窗口时调用: 保存 compositor 位置 + 标记 minimized + 触发 root 重绘
     void NotifyToplevelMinimized(uint32_t toplevelId, int32_t geoX, int32_t geoY);
     // 鸿蒙侧 surface 尺寸变化时调用: 发 configure 通知 Wine 用新尺寸渲染
@@ -59,6 +61,7 @@ public:
     void SetOutputSize(int32_t w, int32_t h) { outputW_ = w; outputH_ = h; }
     int32_t outputW_ = 1280;
     int32_t outputH_ = 720;
+    int32_t GetWorkAreaHeight();  // 排除任务栏后的可用高度
     // Desktop 模式: 在合成帧中查找包含 (x,y) 的 toplevel (用于输入路由)
     uint32_t FindToplevelAt(int x, int y);
     // Desktop 模式: 提到 Z-order 最顶层
@@ -66,6 +69,8 @@ public:
     // 读取 toplevel 桌面坐标 (InputManager 坐标转换用)
     int GetToplevelX(uint32_t id) { std::lock_guard<std::mutex> lk(toplevelMutex_); return toplevelX_[id]; }
     int GetToplevelY(uint32_t id) { std::lock_guard<std::mutex> lk(toplevelMutex_); return toplevelY_[id]; }
+    int GetToplevelW(uint32_t id) { std::lock_guard<std::mutex> lk(toplevelMutex_); return toplevelW_[id]; }
+    int GetToplevelH(uint32_t id) { std::lock_guard<std::mutex> lk(toplevelMutex_); return toplevelH_[id]; }
     // Desktop 合成模式 (Tablet): 全部 toplevel 合成到一个 root framebuffer
     void SetDesktopMode(bool on) { desktopMode_ = on; }
     bool IsDesktopMode() const { return desktopMode_; }
@@ -232,6 +237,7 @@ struct SurfaceData {
     std::string appId;
     bool minimized = false;
     bool maximized = false;
+    int32_t preMaxW = 0, preMaxH = 0;  // 最大化前尺寸, restore 用
 
     // xdg_toplevel resize 约束 (0 = 无限制)
     bool hasSizeLimits = false;

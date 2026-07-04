@@ -517,6 +517,7 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
             self->dirty_ = true;
         }
         // toplevel framebuffer
+        bool isFirstCommit = false;
         if (sd->hasToplevel) {
             // Register surface mapping for input focus lookup
             {
@@ -541,9 +542,8 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                                 sd->toplevelId, (long long)(now - self->toplevelMinimizeTimeMs_[sd->toplevelId]));
                 }
             }
-            // Wayland 标准语义: set_window_geometry 只描述 buffer 内容区域,
-            // 窗口桌面位置由 compositor 管理。仅首次 commit 时用 geoX/geoY 设初始位置。
-            if (self->toplevelX_.count(sd->toplevelId) == 0) {
+            isFirstCommit = (self->toplevelX_.count(sd->toplevelId) == 0);
+            if (isFirstCommit) {
                 self->toplevelX_[sd->toplevelId] = screenX;
                 self->toplevelY_[sd->toplevelId] = screenY;
                 self->toplevelWineX_[sd->toplevelId] = screenX;
@@ -574,47 +574,48 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                 self->FireToplevelEvent(sd->toplevelId, "resize", json);
             }
         }
-        // Desktop 模式: 用 app_id+尺寸 识别 explorer 桌面
+        // Desktop 模式子窗口 commit → 标记 root dirty
         if (self->IsDesktopMode() && sd->hasToplevel &&
             sd->toplevelId != self->GetDesktopRootToplevelId()) {
             uint32_t rootId = self->GetDesktopRootToplevelId();
-            bool isExplorer = (sd->appId.find("explorer") != std::string::npos);
-            // 任务栏等非全尺寸 explorer toplevel → 正常子窗口, 不走 root 逻辑
-            bool isFullSize = (contentW >= self->outputW_ * 8 / 10 &&
-                               contentH >= self->outputH_ * 8 / 10);
+            // 仅首次 commit 识别 explorer 桌面 (防止最大化误切 root)
+            if (isFirstCommit) {
+                bool isExplorer = (sd->appId.find("explorer") != std::string::npos);
+                bool isFullSize = (contentW >= self->outputW_ * 8 / 10 &&
+                                   contentH >= self->outputH_ * 8 / 10);
 
-            if (isExplorer && isFullSize) {
-                if (rootId == 0) {
-                    // 首个全尺寸 explorer toplevel → 设为桌面 root
-                    OH_LOG_INFO(LOG_APP, "[MW] desktop root: #%{public}u appId=explorer",
-                                sd->toplevelId);
-                    PluginManager::GetInstance()->MoveRendererToToplevel(0, sd->toplevelId);
-                    self->SetDesktopRootToplevelId(sd->toplevelId);
-                    self->FireToplevelEvent(sd->toplevelId, "desktop_root", "{}");
-                    rootId = sd->toplevelId;
-                } else if (!sd->title.empty()) {
-                    // 已有 root, 但有新全尺寸 explorer toplevel 带 title → root 切换
-                    wl_resource* oldSurf = self->GetSurfaceForToplevel(rootId);
-                    auto* oldSd = oldSurf ? static_cast<SurfaceData*>(wl_resource_get_user_data(oldSurf)) : nullptr;
-                    if (oldSd && oldSd->title.empty()) {
-                        OH_LOG_INFO(LOG_APP, "[MW] root switch: #%{public}u (empty) -> #%{public}u (%{public}s)",
-                                    rootId, sd->toplevelId, sd->title.c_str());
-                        self->backgroundLayers_.insert(rootId);
-                        PluginManager::GetInstance()->MoveRendererToToplevel(rootId, sd->toplevelId);
+                if (isExplorer && isFullSize) {
+                    if (rootId == 0) {
+                        OH_LOG_INFO(LOG_APP, "[MW] desktop root: #%{public}u appId=explorer",
+                                    sd->toplevelId);
+                        PluginManager::GetInstance()->MoveRendererToToplevel(0, sd->toplevelId);
                         self->SetDesktopRootToplevelId(sd->toplevelId);
                         self->FireToplevelEvent(sd->toplevelId, "desktop_root", "{}");
                         rootId = sd->toplevelId;
+                    } else if (!sd->title.empty()) {
+                        wl_resource* oldSurf = self->GetSurfaceForToplevel(rootId);
+                        auto* oldSd = oldSurf ? static_cast<SurfaceData*>(wl_resource_get_user_data(oldSurf)) : nullptr;
+                        if (oldSd && oldSd->title.empty()) {
+                            OH_LOG_INFO(LOG_APP, "[MW] root switch: #%{public}u (empty) -> #%{public}u (%{public}s)",
+                                        rootId, sd->toplevelId, sd->title.c_str());
+                            self->backgroundLayers_.insert(rootId);
+                            PluginManager::GetInstance()->MoveRendererToToplevel(rootId, sd->toplevelId);
+                            self->SetDesktopRootToplevelId(sd->toplevelId);
+                            self->FireToplevelEvent(sd->toplevelId, "desktop_root", "{}");
+                            rootId = sd->toplevelId;
+                        } else {
+                            self->backgroundLayers_.insert(sd->toplevelId);
+                            OH_LOG_INFO(LOG_APP, "[MW] extra full-size explorer #%{public}u -> background",
+                                        sd->toplevelId);
+                        }
                     } else {
                         self->backgroundLayers_.insert(sd->toplevelId);
-                        OH_LOG_INFO(LOG_APP, "[MW] extra full-size explorer #%{public}u -> background",
+                        OH_LOG_INFO(LOG_APP, "[MW] extra full-size explorer #%{public}u (no title) -> background",
                                     sd->toplevelId);
                     }
-                } else {
-                    self->backgroundLayers_.insert(sd->toplevelId);
-                    OH_LOG_INFO(LOG_APP, "[MW] extra full-size explorer #%{public}u (no title) -> background",
-                                sd->toplevelId);
                 }
             }
+            // 每次子窗口 commit 都标记 root dirty (包括 resize)
             if (rootId > 0) {
                 std::lock_guard<std::mutex> lk(self->toplevelMutex_);
                 self->toplevelDirty_[rootId] = true;
@@ -897,6 +898,19 @@ void WaylandServer::RaiseToplevel(uint32_t id) {
     auto it = std::find(toplevelZOrder_.begin(), toplevelZOrder_.end(), id);
     if (it != toplevelZOrder_.end()) toplevelZOrder_.erase(it);
     toplevelZOrder_.push_back(id);
+    // 任务栏始终在顶层: 底部对齐 + 高度 <100 的 toplevel
+    uint32_t taskbarId = 0;
+    for (auto& [tid, th] : toplevelH_) {
+        if (th > 0 && th < 100 && toplevelY_[tid] + th >= outputH_) {
+            taskbarId = tid;
+            break;
+        }
+    }
+    if (taskbarId > 0 && taskbarId != id) {
+        auto tit = std::find(toplevelZOrder_.begin(), toplevelZOrder_.end(), taskbarId);
+        if (tit != toplevelZOrder_.end()) toplevelZOrder_.erase(tit);
+        toplevelZOrder_.push_back(taskbarId);
+    }
     toplevelDirty_[desktopRootToplevelId_] = true;
 }
 
@@ -1046,11 +1060,32 @@ uint32_t WaylandServer::FindToplevelAt(int x, int y) {
     return rootId;
 }
 
+int32_t WaylandServer::GetWorkAreaHeight() {
+    std::lock_guard<std::mutex> lk(toplevelMutex_);
+    int32_t h = outputH_;
+    // 找底部对齐的小高度 toplevel (任务栏), 工作区 = 任务栏上方空间
+    for (auto& [id, y] : toplevelY_) {
+        if (toplevelH_.count(id) && toplevelH_[id] > 0 && toplevelH_[id] < 100 &&
+            y + toplevelH_[id] >= outputH_ && y < h) {
+            h = y;
+        }
+    }
+    return h;
+}
+
+void WaylandServer::NotifyToplevelMaximized(uint32_t toplevelId) {
+    std::lock_guard<std::mutex> lk(toplevelMutex_);
+    if (toplevelX_.count(toplevelId)) {
+        toplevelX_[toplevelId] = 0;
+        toplevelY_[toplevelId] = 0;
+    }
+    if (desktopRootToplevelId_ > 0)
+        toplevelDirty_[desktopRootToplevelId_] = true;
+}
+
 void WaylandServer::NotifyToplevelMinimized(uint32_t toplevelId, int32_t geoX, int32_t geoY) {
     std::lock_guard<std::mutex> lk(toplevelMutex_);
     toplevelMinimized_[toplevelId] = true;
-    // 保存最小化时的 compositor 位置: Wine 内部坐标会跳到 (-32000,-32000),
-    // 后续 subsurface offset 会基于此偏移, 合成层坐标需要用 saved compositor 位置
     if (toplevelX_.count(toplevelId)) {
         toplevelMinimizeCompX_[toplevelId] = toplevelX_[toplevelId];
         toplevelMinimizeCompY_[toplevelId] = toplevelY_[toplevelId];
