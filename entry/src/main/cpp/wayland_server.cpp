@@ -528,8 +528,14 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
             copyTight(self->toplevelPixels_[sd->toplevelId]);
             self->toplevelW_[sd->toplevelId] = contentW;
             self->toplevelH_[sd->toplevelId] = contentH;
-            // 自动恢复: 检测到真实窗口内容 (>200×50) 而非最小化标题栏
-            // 注意: 此处已持有 toplevelMutex_, 不能调 SetToplevelRestored
+            /*
+             * 自动恢复最小化窗口:
+             * Wine 没有 "unset_minimized" 协议。当用户点击任务栏还原窗口时,
+             * Wine 直接 commit 新的窗口内容 (正常尺寸 > 最小化标题栏 ~200x30)。
+             * 检测到 contentW>200 && contentH>50 即判定为真实窗口 → 清除 minimized 状态。
+             * (Wine 最小化标题栏会定期 commit 约 200x30 的小表面, 不应触发恢复)
+             * 注意: 此处已持有 toplevelMutex_, 不能调 SetToplevelRestored。
+             */
             if (sd->minimized && contentW > 200 && contentH > 50) {
                 sd->minimized = false;
                 self->toplevelMinimized_.erase(sd->toplevelId);
@@ -631,14 +637,31 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                     layer.w = sd->w;
                     layer.h = sd->h;
                     int32_t sx = sd->subsurfaceX, sy = sd->subsurfaceY;
-                    // 最小化窗口: Wine 内部坐标移到 (-32000,-32000), offset 偏 +32000
+                    /*
+                     * Wine 最小化时 Windows 窗口管理器将窗口移到 (-32000, -32000)。
+                     * 此时如果弹出 context menu (如任务栏右键菜单):
+                     *   winewayland.drv/wayland_surface.c:745
+                     *     local_x = surface->window.rect.left - toplevel->window.rect.left
+                     *             = 正常屏幕坐标 - (-32000) = 正常坐标 + 32000
+                     * compositor 收到偏了 32000 的 subsurface offset,
+                     * 再用 toplevelX_ (compositor 位置) 累加 → 菜单跑出屏幕。
+                     * 补偿: 检测 offset > 16000 时减去 32000 还原真实偏移。
+                     */
                     if (self->toplevelMinimized_.count(parentId)) {
                         if (sx > 16000) sx -= 32000;
                         if (sy > 16000) sy -= 32000;
                     }
-                    // 区分窗口内菜单 vs 外部菜单 (任务栏等):
-                    // subsurface offset 在窗口内容范围内 → 窗口内菜单, 跟 compositor 位置走
-                    // offset 在范围外 (如 sy<0 的任务栏弹出菜单) → 外部菜单, 用 Wine 坐标
+                    /*
+                     * Wine 和 compositor 有两套坐标系:
+                     * - toplevelWineX_/Y_: Wine 认为的窗口位置 (首次 commit 后不变)
+                     * - toplevelX_/Y_:     compositor 管理的桌面位置 (move grab 后会变)
+                     *
+                     * 窗口内菜单: subsurface offset 是相对于窗口内部的 → 跟 compositor 位置
+                     * 外部菜单 (如任务栏右击): subsurface offset 是 Wine 虚拟屏幕坐标
+                     *   → 用 Wine 原始位置 (不含 move grab 偏移) 避免双重偏移
+                     *
+                     * 判断方法: offset 是否在窗口内容范围内
+                     */
                     int wineX = (self->toplevelWineX_.count(parentId) ? self->toplevelWineX_[parentId] : 0);
                     int wineY = (self->toplevelWineY_.count(parentId) ? self->toplevelWineY_[parentId] : 0);
                     int compX = self->toplevelX_[parentId];
@@ -1027,7 +1050,13 @@ uint32_t WaylandServer::FindToplevelAt(int x, int y) {
     std::lock_guard<std::mutex> lk(toplevelMutex_);
     uint32_t rootId = desktopRootToplevelId_;
 
-    // 先查 subsurface 层 (渲染在 toplevel 之上, 点击应优先命中)
+    /*
+     * subsurface 命中优先于 toplevel (渲染在上层):
+     * - 内部菜单: 在父窗口范围内 → 走父 toplevel
+     * - 外部菜单 (isExternal): 任务栏弹出等, 超出父窗口范围
+     *   → 走 root, Wine explorer 内部处理点击分发
+     *   (直接发给父 toplevel 会导致 Wine 收到错误的窗口相对坐标)
+     */
     for (auto it = subsurfaceLayers_.rbegin(); it != subsurfaceLayers_.rend(); ++it) {
         if (it->w <= 0 || it->h <= 0) continue;
         if (x >= it->x && x < it->x + it->w && y >= it->y && y < it->y + it->h) {
