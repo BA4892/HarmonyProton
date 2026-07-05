@@ -61,7 +61,7 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
         "WINEDLLDIR2=" + binDir,
         "WINEDLLPATH=" + binDir + "/x86_64-windows:" + binDir + "/i386-windows:" + binDir,
 #endif
-        "WINEDEBUG=-all",
+        "WINEDEBUG=-all,+waylanddrv",
         "WINE_MONO=never",
         "XKB_CONFIG_ROOT=" + xkbDir,
         "PATH=/usr/local/bin:/data/app/bin:/data/service/hnp/bin:/usr/bin:/vendor/bin:" + binDir + "/x86_64-windows:" + binDir + "/i386-windows:" + binDir,

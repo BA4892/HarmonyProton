@@ -214,7 +214,7 @@ struct Index {
       let dllFiles = fs.listFileSync(srcDir);
       let count = 0;
       for (let f of dllFiles) {
-        if (f.endsWith('.dll')) {
+        if (f.endsWith('.dll') || f.endsWith('.drv') || f.endsWith('.sys') || f.endsWith('.exe')) {
           fs.copyFileSync(srcDir + '/' + f, syswow64 + '/' + f);
           count++;
         }

@@ -559,7 +559,11 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
             // 新 toplevel 加到 Z-order 顶层
             if (self->IsDesktopMode() && sd->toplevelId != self->desktopRootToplevelId_) {
                 auto zit = std::find(self->toplevelZOrder_.begin(), self->toplevelZOrder_.end(), sd->toplevelId);
-                if (zit == self->toplevelZOrder_.end()) self->toplevelZOrder_.push_back(sd->toplevelId);
+                if (zit == self->toplevelZOrder_.end()) {
+                    self->toplevelZOrder_.push_back(sd->toplevelId);
+                    OH_LOG_INFO(LOG_APP, "[MW] Z-order ADD id=%{public}u (total=%{public}zu)",
+                                sd->toplevelId, self->toplevelZOrder_.size());
+                }
             }
             OH_LOG_INFO(LOG_APP, "[MW-COMMIT] toplevel #%{public}u frame %{public}dx%{public}d stride=%{public}d stored=%{public}zu",
                         sd->toplevelId, contentW, contentH, stride, self->toplevelPixels_[sd->toplevelId].size());

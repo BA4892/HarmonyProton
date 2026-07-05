@@ -229,6 +229,7 @@ static void xs_destroy(wl_client*, wl_resource* r) {
 
 static void xs_get_toplevel(wl_client* client, wl_resource* xsRes, uint32_t id) {
     auto* d = static_cast<XdgSurface*>(wl_resource_get_user_data(xsRes));
+    OH_LOG_INFO(LOG_APP, "[MW] xs_get_toplevel ENTER wlSurface=%{public}p", d ? d->wlSurface : nullptr);
 
     wl_resource* tl = wl_resource_create(client, &xdg_toplevel_interface,
                                           wl_resource_get_version(xsRes), id);
@@ -240,19 +241,23 @@ static void xs_get_toplevel(wl_client* client, wl_resource* xsRes, uint32_t id) 
     td->xdgSurface = xsRes;
     wl_resource_set_implementation(tl, &kToplevelImpl, td, tl_resource_destroy);
 
-    // 关联 SurfaceData: 分配 toplevelId, 标记 hasToplevel
+    // 关联 SurfaceData: 分配 toplevelId, 发送 created 事件到 ArkTS
     if (d->wlSurface) {
         auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(d->wlSurface));
+        OH_LOG_INFO(LOG_APP, "[MW] xs_get_toplevel sd=%{public}p hasToplevel=%{public}d",
+                    sd, sd ? (int)sd->hasToplevel : -1);
         if (sd && !sd->hasToplevel) {
             sd->hasToplevel = true;
             sd->toplevelId = WaylandServer::GetInstance()->NextToplevelId();
-            d->toplevelId = sd->toplevelId;  // XdgSurface 也缓存 toplevelId
-            td->toplevelId = sd->toplevelId; // ToplevelData 存储独立的拷贝
-            OH_LOG_INFO(LOG_APP, "[MW] xs_get_toplevel -> id=%{public}u (first toplevel for this surface)", sd->toplevelId);
-            // 注册 toplevel resource (用于 SendToplevelClose)
+            d->toplevelId = sd->toplevelId;
+            td->toplevelId = sd->toplevelId;
+            OH_LOG_INFO(LOG_APP, "[MW] xs_get_toplevel -> id=%{public}u (created)", sd->toplevelId);
             WaylandServer::GetInstance()->RegisterToplevelResource(sd->toplevelId, tl);
             WaylandServer::GetInstance()->FireToplevelEvent(sd->toplevelId, "created",
                 "{\"w\":640,\"h\":480}");
+        } else {
+            OH_LOG_WARN(LOG_APP, "[MW] xs_get_toplevel SKIP: sd=%{public}p hasToplevel=%{public}d",
+                        sd, sd ? (int)sd->hasToplevel : -1);
         }
     }
 
