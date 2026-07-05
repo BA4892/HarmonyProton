@@ -89,6 +89,7 @@ build_ohos_unix() {
         PKG_CONFIG_PATH="$SYSROOT_EXT_PC" \
         "$WINE_SRC/configure" \
             --host=x86_64-linux-ohos \
+            --enable-archs=i386,x86_64 \
             --prefix=/opt/winehua \
             --libdir='${prefix}' \
             --with-wine-tools="$BUILD_DIR/wine-native" \

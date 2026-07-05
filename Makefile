@@ -103,6 +103,27 @@ $(STAMPS)/wine-$(CONFIG): $(SCRIPTS)/build_wine.sh $(SCRIPTS)/env.sh $(STAMPS)/d
 	fi
 
 # ============================================================
+# wine32 — 32-bit PE DLL (i686-mingw32, WoW64 必需)
+# ============================================================
+WINE32_SENTINEL := $(BUILD_DIR)/wine-i386-pe/dlls/ntdll/i386-windows/ntdll.dll
+
+.PHONY: wine32
+wine32: $(STAMPS)/wine32
+
+$(STAMPS)/wine32: $(SCRIPTS)/build_wine32_pe.sh $(SCRIPTS)/env.sh $(STAMPS)/deps FORCE | $(STAMPS)
+	@if [ -f $@ ] && [ -f $(WINE32_SENTINEL) ] && \
+	    ! find $(ROOT)/thirdparty/wine \
+	           -newer $@ -type f \
+	           \( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.cc' \
+	              -o -name '*.rc' -o -name '*.spec' -o -name '*.idl' \) \
+	           2>/dev/null | grep -q .; then \
+	    echo "  [wine32] up to date"; \
+	else \
+	    echo "=== wine32 ==="; \
+	    bash $(SCRIPTS)/build_wine32_pe.sh && touch $@; \
+	fi
+
+# ============================================================
 # box64 — ARM64 翻译器 (始终 arm64-v8a 架构, PC: 可执行文件, Pad: .so)
 # ============================================================
 .PHONY: box64
@@ -183,9 +204,9 @@ $$(STAMPS)/$(1)/assemble-pad: $(SCRIPTS)/assemble.sh $(SCRIPTS)/env.sh \
 endef
 $(foreach a,arm64-v8a x86_64,$(eval $(call assemble_rule,$(a))))
 
-# arm64 assemble 额外依赖 box64
-$(STAMPS)/arm64-v8a/assemble-pc:  $(STAMPS)/box64-arm64-v8a-pc
-$(STAMPS)/arm64-v8a/assemble-pad: $(STAMPS)/box64-arm64-v8a-pad
+# arm64 assemble 额外依赖 box64 + wine32 (WoW64 32-bit PE DLL)
+$(STAMPS)/arm64-v8a/assemble-pc:  $(STAMPS)/box64-arm64-v8a-pc  $(STAMPS)/wine32
+$(STAMPS)/arm64-v8a/assemble-pad: $(STAMPS)/box64-arm64-v8a-pad $(STAMPS)/wine32
 
 # ============================================================
 # hnp — HNP 打包 (仅 PC)

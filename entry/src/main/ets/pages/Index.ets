@@ -61,6 +61,7 @@ struct Index {
   @State entries: string[] = [];
   @State dirStack: string[] = [];
   @State processList: ProcessInfo[] = [];
+  _wow64Done: boolean = false;
 
   aboutToAppear(): void {
     detectWinePath();
@@ -79,6 +80,11 @@ struct Index {
         this.statusText = '已就绪';
         // wineboot 可能还在后台初始化 prefix，轮询等待 drive_c 就绪
         this.waitForPrefix();
+        // 一次性: 填充 syswow64/ (OHOS 沙箱不支持 symlink, wineboot Wow64Install 失败)
+        if (!this._wow64Done) {
+          this._wow64Done = true;
+          setTimeout(() => { this.setupWow64(); }, 3000);
+        }
       } else if (stateMsg == 'wine-running') {
         this.statusText = '运行中';
         this.refreshProcessList();
@@ -196,6 +202,27 @@ struct Index {
     }
     // 超时，仍然尝试刷新一次
     this.refreshPrefix();
+  }
+
+  // 一次性: 填充 syswow64/ (OHOS 沙箱不支持 symlink, wineboot Wow64Install 失败)
+  // build_dir=NULL 导致 Wine 不从 i386-windows/ 加载, 只查 wineprefix 目录.
+  private setupWow64 = (): void => {
+    try {
+      let syswow64 = FILES_BASE + '/.wine/drive_c/windows/syswow64';
+      let srcDir = WINE_BIN_PAD + '/i386-windows';
+      fs.mkdirSync(syswow64, true);
+      let dllFiles = fs.listFileSync(srcDir);
+      let count = 0;
+      for (let f of dllFiles) {
+        if (f.endsWith('.dll')) {
+          fs.copyFileSync(srcDir + '/' + f, syswow64 + '/' + f);
+          count++;
+        }
+      }
+      hilog.info(DOMAIN, 'wow64', 'syswow64 populated: %{public}d DLLs', count);
+    } catch (e) {
+      hilog.error(DOMAIN, 'wow64', 'setupWow64 error: %{public}s', JSON.stringify(e));
+    }
   }
 
   private refreshProcessList = (): void => {

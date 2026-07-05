@@ -177,6 +177,35 @@ assemble_pad() {
     done
     log "  x86_64-windows → $(ls "$wine_data/bin/x86_64-windows" | wc -l) files"
 
+    # i386-windows/ (32-bit PE DLL for WoW64)
+    # 只取核心 DLL (~20 个), 其余 600+ 个 (d3dx9/msi/media等) 暂不需要.
+    # 完整列表在 build/wine-i386-pe/dlls/*/i386-windows/*.dll.
+    # 日后需要某个缺失的 DLL 时, 在此处加名即可.
+    if [ -d "$BUILD_DIR/wine-i386-pe" ]; then
+        # 32-bit PE DLL for WoW64: copy ALL dlls for now, trim later
+        mkdir -p "$wine_data/bin/i386-windows"
+        for dll in "$BUILD_DIR/wine-i386-pe/dlls/"*/i386-windows/*.dll; do
+            cp "$dll" "$wine_data/bin/i386-windows/"
+        done
+        for drv in "$BUILD_DIR/wine-i386-pe/dlls/"*/i386-windows/*.drv; do
+            cp "$drv" "$wine_data/bin/i386-windows/"
+        done
+        for sys in "$BUILD_DIR/wine-i386-pe/dlls/"*/i386-windows/*.sys; do
+            cp "$sys" "$wine_data/bin/i386-windows/"
+        done
+        log "  i386-windows → $(ls "$wine_data/bin/i386-windows" | wc -l) files (ALL)"
+
+        # 32-bit exe stubs (notepad 等), 放在 bin/i386-windows/.
+        # Wine 通过 WINEARCH 或 exe header 判断 32/64, 自动加载对应 DLL.
+        for exe in "$BUILD_DIR/wine-i386-pe/programs/notepad/i386-windows/notepad.exe" \
+                   "$BUILD_DIR/wine-i386-pe/programs/winecfg/i386-windows/winecfg.exe"; do
+            [ -f "$exe" ] && cp "$exe" "$wine_data/bin/i386-windows/"
+        done
+        log "  i386 exe stubs → $(ls "$wine_data/bin/i386-windows"/*.exe 2>/dev/null | wc -l) files"
+    else
+        warn "  i386-windows: SKIP (build/wine-i386-pe not found)"
+    fi
+
     # *.exe stubs → rawfile
     for exe in "$BUILD_DIR/wine-ohos/programs/"*/x86_64-windows/*.exe; do
         cp "$exe" "$wine_data/bin/"
@@ -320,6 +349,26 @@ for sys in "$BUILD_DIR/wine-ohos/dlls/"*/x86_64-windows/*.sys; do
     cp "$sys" "$BIN/x86_64-windows/"
 done
 log "  x86_64-windows: $(ls "$BIN/x86_64-windows" | wc -l) DLL/DRV/EXE/SYS files"
+
+# i386-windows/ (32-bit PE DLL for WoW64)
+# 只取核心 DLL (~20 个), 其余 600+ 个 (d3dx9/msi/media等) 暂不需要.
+# 完整列表在 build/wine-i386-pe/dlls/*/i386-windows/*.dll.
+# 日后需要某个缺失的 DLL 时, 在此处加名即可.
+if [ -d "$BUILD_DIR/wine-i386-pe" ]; then
+    mkdir -p "$BIN/i386-windows"
+    CORE32_DLLS="ntdll kernel32 kernelbase user32 gdi32 advapi32 ole32 oleaut32 shell32 comctl32 comdlg32 shlwapi rpcrt4 ucrtbase msvcrt version win32u imm32 setupapi ws2_32"
+    for name in $CORE32_DLLS; do
+        src="$BUILD_DIR/wine-i386-pe/dlls/$name/i386-windows/$name.dll"
+        if [ -f "$src" ]; then
+            cp "$src" "$BIN/i386-windows/"
+        else
+            warn "  i386-windows: $name.dll NOT FOUND"
+        fi
+    done
+    log "  i386-windows: $(ls "$BIN/i386-windows" | wc -l) files (core WoW64)"
+else
+    warn "  i386-windows: SKIP (build/wine-i386-pe not found)"
+fi
 
 # ---- *.exe stubs ----
 for exe in "$BUILD_DIR/wine-ohos/programs/"*/x86_64-windows/*.exe; do

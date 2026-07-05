@@ -57,13 +57,14 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
 #ifdef PAD_MODE
         "WINEDLLDIR=" + binDir + "/x86_64-unix",
         "WINEDLLDIR0=" + binDir + "/x86_64-windows",
-        "WINEDLLDIR1=" + binDir,
-        "WINEDLLPATH=" + binDir + "/x86_64-windows:" + binDir,
+        "WINEDLLDIR1=" + binDir + "/i386-windows",
+        "WINEDLLDIR2=" + binDir,
+        "WINEDLLPATH=" + binDir + "/x86_64-windows:" + binDir + "/i386-windows:" + binDir,
 #endif
         "WINEDEBUG=-all",
         "WINE_MONO=never",
         "XKB_CONFIG_ROOT=" + xkbDir,
-        "PATH=/usr/local/bin:/data/app/bin:/data/service/hnp/bin:/usr/bin:/vendor/bin:" + binDir + "/x86_64-windows:" + binDir,
+        "PATH=/usr/local/bin:/data/app/bin:/data/service/hnp/bin:/usr/bin:/vendor/bin:" + binDir + "/x86_64-windows:" + binDir + "/i386-windows:" + binDir,
         "TMPDIR=" WINE_TMPDIR,
     };
     AppendBox64PerfStrings(env);

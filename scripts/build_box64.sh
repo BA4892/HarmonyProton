@@ -19,9 +19,17 @@ cd "$BOX64_SRC"
 mkdir -p "$BUILD_DIR/box64_build"
 cd "$BUILD_DIR/box64_build"
 
+# 抑制大量 warning，聚焦真正的 error
+BOX64_WARN_FLAGS="-Wno-macro-redefined -Wno-unused-command-line-argument \
+    -Wno-format -Wno-format-security -Wno-error=format-security \
+    -Wno-deprecated-declarations -Wno-unused-function -Wno-unused-variable \
+    -Wno-unused-but-set-variable -Wno-int-conversion -Wno-error=int-conversion \
+    -Wno-incompatible-pointer-types -Wno-implicit-function-declaration \
+    -Wno-string-plus-int -Wno-array-bounds -Wno-ignored-pragmas"
+
 if [ "$DEVICE_TYPE" = "pad" ]; then
     # ARM64 Pad: 编 .so, dlopen 加载, 无 execve
-    log "  → box64.so (in-process)"
+    log "  → box64.so (in-process, BOX32=ON)"
     cmake "$BOX64_SRC" \
         -GNinja \
         -DCMAKE_TOOLCHAIN_FILE="$OHOS_SDK/native/build/cmake/ohos.toolchain.cmake" \
@@ -29,14 +37,17 @@ if [ "$DEVICE_TYPE" = "pad" ]; then
         -DOHOS_PLATFORM=OHOS \
         -DCMAKE_BUILD_TYPE=Release \
         -DARM_DYNAREC=ON \
+        -DBOX32=ON \
         -DLIBBOX64_SO=ON \
-        -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+        -DCMAKE_C_FLAGS="$BOX64_WARN_FLAGS" \
+        -DCMAKE_CXX_FLAGS="$BOX64_WARN_FLAGS"
     ninja box64_hmos_core
     cp "$BUILD_DIR/box64_build/box64.so" "$NATIVE_LIBS/"
     log "Box64 → $NATIVE_LIBS/box64.so"
 else
     # ARM64 PC: 编可执行文件, execve 启动
-    log "  → box64 (executable)"
+    log "  → box64 (executable, BOX32=ON)"
     cmake "$BOX64_SRC" \
         -GNinja \
         -DCMAKE_TOOLCHAIN_FILE="$OHOS_SDK/native/build/cmake/ohos.toolchain.cmake" \
@@ -44,7 +55,10 @@ else
         -DOHOS_PLATFORM=OHOS \
         -DCMAKE_BUILD_TYPE=Release \
         -DARM_DYNAREC=ON \
-        -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+        -DBOX32=ON \
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+        -DCMAKE_C_FLAGS="$BOX64_WARN_FLAGS" \
+        -DCMAKE_CXX_FLAGS="$BOX64_WARN_FLAGS"
     ninja box64
     log "Box64 构建完成 (executable)"
 fi
