@@ -177,6 +177,25 @@ assemble_pad() {
     done
     log "  x86_64-windows → $(ls "$wine_data/bin/x86_64-windows" | wc -l) files"
 
+    # strip PE 调试符号 (DWARF .debug_*, 缩减 ~50%)
+    log "  stripping debug symbols..."
+    if command -v x86_64-w64-mingw32-strip &>/dev/null; then
+        for f in "$wine_data/bin/x86_64-windows/"*.dll "$wine_data/bin/x86_64-windows/"*.drv "$wine_data/bin/x86_64-windows/"*.exe "$wine_data/bin/x86_64-windows/"*.sys; do
+            [ -f "$f" ] && x86_64-w64-mingw32-strip "$f" 2>/dev/null
+        done
+        log "  64-bit PE stripped"
+    else
+        warn "  x86_64-w64-mingw32-strip not found, skipping strip"
+    fi
+    if command -v i686-w64-mingw32-strip &>/dev/null; then
+        for f in "$wine_data/bin/i386-windows/"*.dll "$wine_data/bin/i386-windows/"*.drv "$wine_data/bin/i386-windows/"*.exe "$wine_data/bin/i386-windows/"*.sys; do
+            [ -f "$f" ] && i686-w64-mingw32-strip "$f" 2>/dev/null
+        done
+        log "  32-bit PE stripped"
+    else
+        warn "  i686-w64-mingw32-strip not found, skipping strip"
+    fi
+
     # i386-windows/ (32-bit PE DLL for WoW64)
     # 只取核心 DLL (~20 个), 其余 600+ 个 (d3dx9/msi/media等) 暂不需要.
     # 完整列表在 build/wine-i386-pe/dlls/*/i386-windows/*.dll.
