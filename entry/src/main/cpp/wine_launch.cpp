@@ -221,13 +221,21 @@ static bool LaunchPcMode(LaunchParams* p, int audioBootstrapFd) {
     // -- wineboot --init via fork + execve --
     {
         OH_LOG_INFO(LOG_APP, "[Launch-Async] running wineboot --init...");
+        int bootPipe[2];
+        bool bootPipeOk = (pipe(bootPipe) == 0);
         pid_t bootPid = fork();
         if (bootPid == 0) {
+            if (bootPipeOk) {
+                close(bootPipe[0]); dup2(bootPipe[1], STDERR_FILENO);
+                if (bootPipe[1] > 2) close(bootPipe[1]);
+            }
             CloseInheritedFds({STDOUT_FILENO, STDERR_FILENO, audioBootstrapFd});
             for (int s = 1; s < 32; ++s) signal(s, SIG_DFL);
             prctl(PR_SET_NAME, "wl-wineboot", 0, 0, 0);
             chdir(p->winehuaBin.c_str());
-            const char* bootArgv[] = {"./box64", "./wine", "./wineboot", "--init", nullptr};
+            // wine 程序参数用裸名 "wineboot"(对齐 pad),wine 解析到 builtin;
+            // "./wineboot" 会被当 unix 路径 open 失败。pc/pad 只应差 wine 路径。
+            const char* bootArgv[] = {"./box64", "./wine", "wineboot", "--init", nullptr};
             execve("./box64", (char* const*)bootArgv, p->envp.data());
             _exit(127);
         }
@@ -236,9 +244,12 @@ static bool LaunchPcMode(LaunchParams* p, int audioBootstrapFd) {
             audioBootstrapFd = -1;
         }
         if (bootPid > 0) {
+            if (bootPipeOk) { close(bootPipe[1]); StartStderrLogger(bootPipe[0], "wineboot-stderr"); }
             int bootStatus = 0;
             waitpid(bootPid, &bootStatus, 0);
             LogProcessExit("wineboot", bootPid, bootStatus);
+        } else if (bootPipeOk) {
+            close(bootPipe[0]); close(bootPipe[1]);
         }
     }
     return true;

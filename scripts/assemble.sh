@@ -369,22 +369,33 @@ for sys in "$BUILD_DIR/wine-ohos/dlls/"*/x86_64-windows/*.sys; do
 done
 log "  x86_64-windows: $(ls "$BIN/x86_64-windows" | wc -l) DLL/DRV/EXE/SYS files"
 
-# i386-windows/ (32-bit PE DLL for WoW64)
-# 只取核心 DLL (~20 个), 其余 600+ 个 (d3dx9/msi/media等) 暂不需要.
-# 完整列表在 build/wine-i386-pe/dlls/*/i386-windows/*.dll.
-# 日后需要某个缺失的 DLL 时, 在此处加名即可.
+# i386-windows/ (32-bit PE DLL/DRV/SYS for WoW64)
+# 对齐 pad(wine-data.zip)的做法: 拷全部 dll/drv/sys + exe stub, 再 strip 控体积.
+# winewayland.drv 等 .drv 是 32 位 GUI 程序显示窗口的必需件, 不能只拷 .dll.
 if [ -d "$BUILD_DIR/wine-i386-pe" ]; then
     mkdir -p "$BIN/i386-windows"
-    CORE32_DLLS="ntdll kernel32 kernelbase user32 gdi32 advapi32 ole32 oleaut32 shell32 comctl32 comdlg32 shlwapi rpcrt4 ucrtbase msvcrt version win32u imm32 setupapi ws2_32"
-    for name in $CORE32_DLLS; do
-        src="$BUILD_DIR/wine-i386-pe/dlls/$name/i386-windows/$name.dll"
-        if [ -f "$src" ]; then
-            cp "$src" "$BIN/i386-windows/"
-        else
-            warn "  i386-windows: $name.dll NOT FOUND"
-        fi
+    for dll in "$BUILD_DIR/wine-i386-pe/dlls/"*/i386-windows/*.dll; do
+        [ -f "$dll" ] && cp "$dll" "$BIN/i386-windows/"
     done
-    log "  i386-windows: $(ls "$BIN/i386-windows" | wc -l) files (core WoW64)"
+    for drv in "$BUILD_DIR/wine-i386-pe/dlls/"*/i386-windows/*.drv; do
+        [ -f "$drv" ] && cp "$drv" "$BIN/i386-windows/"
+    done
+    for sys in "$BUILD_DIR/wine-i386-pe/dlls/"*/i386-windows/*.sys; do
+        [ -f "$sys" ] && cp "$sys" "$BIN/i386-windows/"
+    done
+    # 32 位 exe stubs (notepad 等)
+    for exe in "$BUILD_DIR/wine-i386-pe/programs/notepad/i386-windows/notepad.exe" \
+               "$BUILD_DIR/wine-i386-pe/programs/winecfg/i386-windows/winecfg.exe"; do
+        [ -f "$exe" ] && cp "$exe" "$BIN/i386-windows/"
+    done
+    # strip 32 位 PE 控制 HNP 体积
+    if command -v i686-w64-mingw32-strip &>/dev/null; then
+        for f in "$BIN/i386-windows/"*.dll "$BIN/i386-windows/"*.drv \
+                 "$BIN/i386-windows/"*.sys "$BIN/i386-windows/"*.exe; do
+            [ -f "$f" ] && i686-w64-mingw32-strip "$f" 2>/dev/null
+        done
+    fi
+    log "  i386-windows → $(ls "$BIN/i386-windows" | wc -l) files (ALL WoW64)"
 else
     warn "  i386-windows: SKIP (build/wine-i386-pe not found)"
 fi

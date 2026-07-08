@@ -209,7 +209,7 @@ struct Index {
   private setupWow64 = (): void => {
     try {
       let syswow64 = FILES_BASE + '/.wine/drive_c/windows/syswow64';
-      let srcDir = WINE_BIN_PAD + '/i386-windows';
+      let srcDir = WINE_BIN + '/i386-windows';
       fs.mkdirSync(syswow64, true);
       let dllFiles = fs.listFileSync(srcDir);
       let count = 0;

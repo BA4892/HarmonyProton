@@ -80,6 +80,34 @@ with open('$profile', 'w') as f:
     f.write(content)
 "
         log "  已注入 -DPAD_MODE 到 cppFlags"
+    else
+        # PC: pad 分支的逆操作 — 确保 hnpPackages 存在 + 移除 PAD_MODE 编译宏
+        # (package.sh 只把源文件改向 pad, 这里负责切 pc 时还原, 保证 pc/pad 双向可切)
+        local module_json="$WINEHUA/entry/src/main/module.json5"
+        python3 -c "
+with open('$module_json', 'r') as f:
+    content = f.read()
+# 若缺失, 在 deliveryWithInstall 前注入 hnpPackages (PC 模式需要)
+if 'hnpPackages' not in content:
+    content = content.replace(
+        '    \"deliveryWithInstall\"',
+        '    \"hnpPackages\": [\n      {\n        \"package\": \"winehua.hnp\",\n        \"type\": \"public\"\n      }\n    ],\n    \"deliveryWithInstall\"',
+        1)
+with open('$module_json', 'w') as f:
+    f.write(content)
+"
+        log "  已确保 hnpPackages 存在 (PC)"
+
+        # 从 cppFlags 移除 -DPAD_MODE (pad 分支注入的逆操作, 否则 pc 会编成 pad 的 NCP 路径)
+        local profile="$WINEHUA/entry/build-profile.json5"
+        python3 -c "
+with open('$profile', 'r') as f:
+    content = f.read()
+content = content.replace('-DPAD_MODE ', '').replace('-DPAD_MODE', '')
+with open('$profile', 'w') as f:
+    f.write(content)
+"
+        log "  已移除 -DPAD_MODE (PC 模式)"
     fi
 
     # 清理非目标架构的 native libs (hvigorw ProcessLibs 会打包所有 libs/)

@@ -126,10 +126,10 @@ build_wineserver() {
         datadir="/opt/winehua/share"
     fi
     local wine_include="-I$WINE_SRC/include -I$WINE_SRC/include/wine -I$WINE_SRC/server -I$BUILD_DIR/wine-ohos/include"
-    # ARM64 Pad: Box64 加载 x86_64 wineserver ELF，用 x86_64 目标编译
+    # ARM64 (pad/pc): Box64 加载 x86_64 wineserver ELF，用 x86_64 目标编译
     # x86_64 Pad: 系统 linker 直接加载 libwineserver.so (原生 .so)
     local srv_target="$NATIVE_TARGET"
-    if [ "$DEVICE_TYPE" = "pad" ] && [ "$NATIVE_ARCH" = "arm64-v8a" ]; then
+    if [ "$NATIVE_ARCH" = "arm64-v8a" ]; then
         srv_target="$TARGET"
     fi
     local srv_cflags="--target=$srv_target --sysroot=$SYSROOT -D__MUSL__ -D_GNU_SOURCE \
@@ -164,9 +164,9 @@ build_wineserver() {
 
     # musl_compat.c 已在 WINE_SRC/server/ 中, 遍历编译时已打包
 
-    if [ "$DEVICE_TYPE" = "pad" ] && [ "$NATIVE_ARCH" = "arm64-v8a" ]; then
-        # ARM64 Pad: 编译为 x86_64 PIE 可执行文件，Box64 加载
-        log "  wineserver → x86_64 ELF (Box64 in-process, arm64 pad)"
+    if [ "$NATIVE_ARCH" = "arm64-v8a" ]; then
+        # ARM64 (pad/pc): 编译为 x86_64 PIE 可执行文件，Box64 加载
+        log "  wineserver → x86_64 ELF (Box64 loads, arm64)"
         $CLANG --target=$TARGET --sysroot=$SYSROOT -fuse-ld=lld -pie \
             -o "$out/wineserver" "$out"/*.o -lm
         log "wineserver: $out/wineserver"
