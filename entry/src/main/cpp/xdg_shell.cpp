@@ -291,6 +291,18 @@ static const struct xdg_surface_interface kSurfaceImpl = {
 };
 
 static void xs_resource_destroy(wl_resource* r) {
+    // client 断开时 libwayland-server 走此路径, 不会触发 xs_destroy。
+    // 必须在此处也做 compositor 清理 (等价于 xs_destroy 的逻辑),
+    // 否则已断开进程的窗口像素永久滞留。
+    auto* d = static_cast<XdgSurface*>(wl_resource_get_user_data(r));
+    if (d && d->wlSurface) {
+        auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(d->wlSurface));
+        if (sd && sd->hasToplevel) {
+            OH_LOG_INFO(LOG_APP, "[MW-Life] xs_resource_destroy → OnToplevelDestroyed tl=%{public}u (client disconnect)", sd->toplevelId);
+            WaylandServer::GetInstance()->OnToplevelDestroyed(sd->toplevelId);
+            WaylandServer::GetInstance()->FireToplevelEvent(sd->toplevelId, "destroyed");
+        }
+    }
     delete static_cast<XdgSurface*>(wl_resource_get_user_data(r));
 }
 
