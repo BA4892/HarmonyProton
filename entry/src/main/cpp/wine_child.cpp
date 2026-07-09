@@ -132,7 +132,14 @@ extern "C" void Main(NativeChildProcess_Args args)
     OH_LOG_INFO(LOG_APP, "[WineChild] homeDir=%{public}s binDir=%{public}s argc=%{public}d argv[0]=%{public}s",
                 homeDir ? homeDir : "(null)", binDir, argc, argc > 0 ? argv[0] : "(none)");
 
-    // 2. 从父进程 fdList 读取 fds (按 fdName 区分)
+    // 2. Step A: 设置 Wine 环境变量 baseline (硬编码默认值, 确保非 broker 路径可用)
+    setup_wine_env(binDir, homeDir);
+
+    // 3. 从父进程 fdList 读取 fds (按 fdName 区分)
+    //    环境变量转发 fd (wine_env) 先读到缓冲区, 最后一步 apply
+    char* envBuf = nullptr;
+    size_t envBufLen = 0;
+    int wsSockFd = -1;  // 保存 wineserver fd, 等转发 env apply 后再 setenv
     for (auto* node = args.fdList.head; node; node = node->next) {
         if (node->fdName && strcmp(node->fdName, "wine_audio_bootstrap") == 0) {
             char buf[32];
@@ -142,18 +149,64 @@ extern "C" void Main(NativeChildProcess_Args args)
             setenv("WINE_OHOS_AUDIO_PROTOCOL_VERSION", "1", 1);
             OH_LOG_INFO(LOG_APP, "[WineChild] audio bootstrap fd=%{public}d", node->fd);
         } else if (node->fdName && strcmp(node->fdName, "wineserver_sock") == 0) {
-            char sockEnv[64];
-            snprintf(sockEnv, sizeof(sockEnv), "%d", node->fd);
-            setenv("WINESERVERSOCKET", sockEnv, 1);
-            OH_LOG_INFO(LOG_APP, "[WineChild] WINESERVERSOCKET=%{public}s (via Broker)", sockEnv);
+            wsSockFd = node->fd;
+            OH_LOG_INFO(LOG_APP, "[WineChild] wineserver fd=%{public}d (via Broker, assert after env apply)", wsSockFd);
+            // 不在此处 setenv —— 转发 env 可能包含父进程的旧 WINESERVERSOCKET,
+            // 等 apply 完成后再用本进程自己的 fd 覆盖
+        } else if (node->fdName && strcmp(node->fdName, "wine_env") == 0) {
+            // 从 memfd 读取完整 env blob, 稍后 apply
+            off_t end = lseek(node->fd, 0, SEEK_END);
+            if (end > 0 && end <= 65536) {
+                envBuf = (char*)malloc(end + 1);
+                if (envBuf) {
+                    lseek(node->fd, 0, SEEK_SET);
+                    ssize_t r = read(node->fd, envBuf, end);
+                    if (r == end) {
+                        envBufLen = (size_t)end;
+                        OH_LOG_INFO(LOG_APP, "[WineChild] env blob fd=%{public}d len=%{public}zu",
+                                    node->fd, envBufLen);
+                    } else {
+                        free(envBuf); envBuf = nullptr; envBufLen = 0;
+                        OH_LOG_WARN(LOG_APP, "[WineChild] env blob read partial: %{public}zd != %{public}lld", r, (long long)end);
+                    }
+                }
+            } else {
+                OH_LOG_WARN(LOG_APP, "[WineChild] env blob fd=%{public}d invalid size", node->fd);
+            }
+            close(node->fd);  // memfd 读完即关, 所有权转移
         } else {
             OH_LOG_INFO(LOG_APP, "[WineChild] fdList fd=%{public}d name=%{public}s (unrecognized, ignoring)",
                         node->fd, node->fdName ? node->fdName : "(null)");
         }
     }
 
-    // 3. 设置 Wine 环境变量
-    setup_wine_env(binDir, homeDir);
+    // Step B: 应用转发来的 guest 环境变量 (覆盖 baseline, 复刻 fork+exec 继承)
+    if (envBuf && envBufLen > 0) {
+        char *p = envBuf, *end = envBuf + envBufLen;
+        int applied = 0;
+        while (p < end) {
+            char* eq = strchr(p, '=');
+            if (eq) {
+                *eq = '\0';
+                setenv(p, eq + 1, 1);  // overwrite=1, guest env 优先
+                *eq = '=';
+            }
+            p += strlen(p) + 1;
+            applied++;
+        }
+        OH_LOG_INFO(LOG_APP, "[WineChild] applied %{public}d env vars from forwarded environ", applied);
+        free(envBuf);
+    }
+
+    // WINESERVERSOCKET 必须设为本进程自己的 fd (从 fdList 拿到)
+    // 转发来的父进程 environ 包含的是父进程的 fd 号, 会被本进程 fd 覆盖
+    // 等价于 fork+exec 路径中 exec_wineloader 的 putenv("WINESERVERSOCKET")
+    if (wsSockFd >= 0) {
+        char wsEnv[64];
+        snprintf(wsEnv, sizeof(wsEnv), "%d", wsSockFd);
+        setenv("WINESERVERSOCKET", wsEnv, 1);
+        OH_LOG_INFO(LOG_APP, "[WineChild] WINESERVERSOCKET=%{public}d (own fd)", wsSockFd);
+    }
 
     // 确保 WINEPREFIX 目录存在
     mkdir(WINE_PREFIX, 0755);

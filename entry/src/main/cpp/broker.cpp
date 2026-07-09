@@ -19,6 +19,8 @@ std::string gBrokerHomeDir;
 
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/mman.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <cstdio>
 #include <cstring>
@@ -71,9 +73,9 @@ static void HandleRequest(int conn_fd)
     }
     buf[n] = '\0';
 
-    // 2) 解析 "SPAWN\n{entryParams}\n[FDS:name0,name1,...\n]"
-    //    entryParams 到第一个 '\n' 为止; 其后若以 "FDS:" 开头则是可选的
-    //    fd 命名行 (逗号分隔), 名字顺序与 SCM_RIGHTS 传来的 fd 顺序一一对应。
+    // 2) 解析 "SPAWN\n{entryParams}\n[FDS:name0,name1,...\n][ENV:{n}\n{blob}]"
+    //    entryParams 到第一个 '\n' 为止; 其后是可选段: FDS: (逗号分隔 fd 名) 和/或
+    //    ENV:{n}\n (n 字节环境变量 blob, \0 分隔的 KEY=VALUE)。
     if (strncmp(buf, "SPAWN\n", 6) != 0) {
         OH_LOG_ERROR(LOG_APP, "[Broker] bad protocol: %{public}s", buf);
         close(conn_fd);
@@ -81,6 +83,8 @@ static void HandleRequest(int conn_fd)
     }
     char* entryParamsRaw = buf + 6;
     char* fdsLine = nullptr;
+    char* envBlob = nullptr;
+    int envBlobLen = 0;
     {
         char* nl = strchr(entryParamsRaw, '\n');
         if (nl) {
@@ -89,13 +93,31 @@ static void HandleRequest(int conn_fd)
             if (strncmp(rest, "FDS:", 4) == 0) {
                 fdsLine = rest + 4;
                 char* nl2 = strchr(fdsLine, '\n');
-                if (nl2) *nl2 = '\0';
+                if (nl2) {
+                    *nl2 = '\0';
+                    rest = nl2 + 1;  // rest 指向 FDS 行之后的 "\0"
+                }
+            }
+            // ENV:{n}\n{blob} — blob 含 \0, 长度由 {n} 精确指定
+            // 跳过头部的 \n (FDS 行尾 \n + ENV 头 \n 可能连续出现)
+            while (*rest == '\n') rest++;
+            if (strncmp(rest, "ENV:", 4) == 0) {
+                char* envN = rest + 4;
+                char* envNl = strchr(envN, '\n');
+                if (envNl) {
+                    *envNl = '\0';
+                    envBlobLen = atoi(envN);
+                    if (envBlobLen > 0 && envBlobLen <= 65536)  // 64KB 安全上限
+                        envBlob = envNl + 1;  // blob 紧贴 \n 之后
+                    else
+                        envBlobLen = 0;
+                }
             }
         }
     }
 
-    OH_LOG_INFO(LOG_APP, "[Broker] request entryParams=%{public}s fds=%{public}s",
-                entryParamsRaw, fdsLine ? fdsLine : "(none)");
+    OH_LOG_INFO(LOG_APP, "[Broker] request entryParams=%{public}s fds=%{public}s env=%{public}d",
+                entryParamsRaw, fdsLine ? fdsLine : "(none)", envBlobLen);
 
     // 3) 提取 fd (SCM_RIGHTS, 可能多个)
     int recvFds[kMaxFds];
@@ -156,6 +178,46 @@ static void HandleRequest(int conn_fd)
         if (nNodes > 0) nodes[nNodes - 1].next = &nodes[nNodes];
         OH_LOG_INFO(LOG_APP, "[Broker] fd[%{public}d] name=%{public}s fd=%{public}d", nNodes, name, recvFds[i]);
         nNodes++;
+    }
+
+    // 若有 ENV blob, 写入 memfd 并以命名 fd "wine_env" 传给子进程
+    int envMemFd = -1;
+    if (envBlob && envBlobLen > 0 && nNodes < kMaxFds) {
+#ifdef __linux__
+        envMemFd = memfd_create("wine_env", MFD_CLOEXEC);
+#endif
+        if (envMemFd < 0) {
+            // fallback: shm_open (musl / OHOS 可能缺 memfd_create)
+            envMemFd = shm_open("/wine_env_brk", O_RDWR | O_CREAT | O_EXCL, 0600);
+            if (envMemFd >= 0) {
+                shm_unlink("/wine_env_brk");
+                if (ftruncate(envMemFd, envBlobLen) < 0) {
+                    close(envMemFd);
+                    envMemFd = -1;
+                }
+            }
+        }
+        if (envMemFd >= 0) {
+            ssize_t written = write(envMemFd, envBlob, envBlobLen);
+            if (written == envBlobLen) {
+                lseek(envMemFd, 0, SEEK_SET);
+                nodes[nNodes].fdName = const_cast<char*>("wine_env");
+                nodes[nNodes].fd = envMemFd;
+                nodes[nNodes].next = nullptr;
+                if (nNodes > 0) nodes[nNodes - 1].next = &nodes[nNodes];
+                OH_LOG_INFO(LOG_APP, "[Broker] env memfd=%{public}d len=%{public}d (fd node %{public}d)",
+                            envMemFd, envBlobLen, nNodes);
+                nNodes++;
+            } else {
+                OH_LOG_WARN(LOG_APP, "[Broker] env memfd write failed: %{public}zd != %{public}d",
+                            written, envBlobLen);
+                close(envMemFd);
+                envMemFd = -1;
+            }
+        } else {
+            OH_LOG_WARN(LOG_APP, "[Broker] env memfd create failed (errno=%{public}d), skipping env",
+                        errno);
+        }
     }
 
     NativeChildProcess_FdList fdList = {};

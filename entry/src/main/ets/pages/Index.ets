@@ -208,10 +208,18 @@ struct Index {
   // build_dir=NULL 导致 Wine 不从 i386-windows/ 加载, 只查 wineprefix 目录.
   private setupWow64 = (): void => {
     try {
+      hilog.info(DOMAIN, 'wow64', 'setupWow64 START FILES_BASE=%{public}s WINE_BIN=%{public}s', FILES_BASE, WINE_BIN);
       let syswow64 = FILES_BASE + '/.wine/drive_c/windows/syswow64';
       let srcDir = WINE_BIN + '/i386-windows';
+      hilog.info(DOMAIN, 'wow64', 'syswow64=%{public}s srcDir=%{public}s', syswow64, srcDir);
+      // 先检查 srcDir 是否存在
+      if (!fs.accessSync(srcDir)) {
+        hilog.error(DOMAIN, 'wow64', 'srcDir NOT accessible: %{public}s', srcDir);
+        return;
+      }
       fs.mkdirSync(syswow64, true);
       let dllFiles = fs.listFileSync(srcDir);
+      hilog.info(DOMAIN, 'wow64', 'srcDir has %{public}d entries', dllFiles.length);
       let count = 0;
       for (let f of dllFiles) {
         if (f.endsWith('.dll') || f.endsWith('.drv') || f.endsWith('.sys') || f.endsWith('.exe')) {
@@ -221,7 +229,7 @@ struct Index {
       }
       hilog.info(DOMAIN, 'wow64', 'syswow64 populated: %{public}d DLLs', count);
     } catch (e) {
-      hilog.error(DOMAIN, 'wow64', 'setupWow64 error: %{public}s', JSON.stringify(e));
+      hilog.error(DOMAIN, 'wow64', 'setupWow64 EXCEPTION: %{public}s', JSON.stringify(e));
     }
   }
 
