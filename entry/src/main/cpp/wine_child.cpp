@@ -139,15 +139,13 @@ extern "C" void Main(NativeChildProcess_Args args)
     //    环境变量转发 fd (wine_env) 先读到缓冲区, 最后一步 apply
     char* envBuf = nullptr;
     size_t envBufLen = 0;
-    int wsSockFd = -1;  // 保存 wineserver fd, 等转发 env apply 后再 setenv
+    int wsSockFd = -1;   // wineserver fd (per-process, 等 apply 后覆盖)
+    int audioFd = -1;    // audio bootstrap fd (同上)
     for (auto* node = args.fdList.head; node; node = node->next) {
         if (node->fdName && strcmp(node->fdName, "wine_audio_bootstrap") == 0) {
-            char buf[32];
-            snprintf(buf, sizeof(buf), "%d", node->fd);
-            setenv("WINE_OHOS_AUDIO_ENABLE", "1", 1);
-            setenv("WINE_OHOS_AUDIO_BOOTSTRAP_FD", buf, 1);
-            setenv("WINE_OHOS_AUDIO_PROTOCOL_VERSION", "1", 1);
-            OH_LOG_INFO(LOG_APP, "[WineChild] audio bootstrap fd=%{public}d", node->fd);
+            audioFd = node->fd;
+            OH_LOG_INFO(LOG_APP, "[WineChild] audio bootstrap fd=%{public}d (assert after env apply)", audioFd);
+            // 不在此处 setenv —— 等 Step B 应用转发 env 后统一覆盖
         } else if (node->fdName && strcmp(node->fdName, "wineserver_sock") == 0) {
             wsSockFd = node->fd;
             OH_LOG_INFO(LOG_APP, "[WineChild] wineserver fd=%{public}d (via Broker, assert after env apply)", wsSockFd);
@@ -198,14 +196,21 @@ extern "C" void Main(NativeChildProcess_Args args)
         free(envBuf);
     }
 
-    // WINESERVERSOCKET 必须设为本进程自己的 fd (从 fdList 拿到)
-    // 转发来的父进程 environ 包含的是父进程的 fd 号, 会被本进程 fd 覆盖
+    // 覆盖 per-process fd 变量 (转发 env 中的是父进程 fd 号, 本进程无效)
     // 等价于 fork+exec 路径中 exec_wineloader 的 putenv("WINESERVERSOCKET")
     if (wsSockFd >= 0) {
         char wsEnv[64];
         snprintf(wsEnv, sizeof(wsEnv), "%d", wsSockFd);
         setenv("WINESERVERSOCKET", wsEnv, 1);
         OH_LOG_INFO(LOG_APP, "[WineChild] WINESERVERSOCKET=%{public}d (own fd)", wsSockFd);
+    }
+    if (audioFd >= 0) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%d", audioFd);
+        setenv("WINE_OHOS_AUDIO_ENABLE", "1", 1);
+        setenv("WINE_OHOS_AUDIO_BOOTSTRAP_FD", buf, 1);
+        setenv("WINE_OHOS_AUDIO_PROTOCOL_VERSION", "1", 1);
+        OH_LOG_INFO(LOG_APP, "[WineChild] AUDIO fd=%{public}d (own fd)", audioFd);
     }
 
     // 确保 WINEPREFIX 目录存在
