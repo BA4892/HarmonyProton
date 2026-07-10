@@ -7,7 +7,7 @@ source "$SCRIPT_DIR/env.sh"
 # Wine 编译标志 (Unix .so + wineserver)
 WINE_CFLAGS="-g -O2 -D__MUSL__ -D_GNU_SOURCE -D__ANDROID__ -D__OHOS__ -DWINE_UNIX_LIB \
     -D_NTSYSTEM_ -D__WINESRC__ -DFAR= -D_ACRTIMP= -DWINBASEAPI= -DZ_SOLO \
-    -fPIC -fasynchronous-unwind-tables $PAD_CFLAGS"
+    -fPIC -fasynchronous-unwind-tables"
 
 build_native_tools() {
     log "--- Native 构建 (winegcc 等 host 工具) ---"

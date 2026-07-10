@@ -1,5 +1,5 @@
 #!/bin/bash
-# package.sh — HNP 打包 + HAP 构建 + 签名 + 部署
+# package.sh — HAP 构建 + 签名 + 部署
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/env.sh"
@@ -33,19 +33,6 @@ with open('$profile', 'w') as f:
 }
 
 # ============================================================
-package_hnp() {
-    log "=== 打包 HNP ($NATIVE_ARCH) ==="
-    mkdir -p "$BUILD_DIR"
-    "$HNPCLI" pack -i "$STAGING_DIR" -o "$BUILD_DIR" -n winehua -v 0.1.0 || { err "hnpcli pack 失败"; return 1; }
-
-    # HNP 按架构存放
-    local hnp_dir="$WINEHUA/entry/hnp/$NATIVE_ARCH"
-    mkdir -p "$hnp_dir"
-    cp "$BUILD_DIR/winehua.hnp" "$hnp_dir/winehua.hnp"
-    ls -lh "$hnp_dir/winehua.hnp"
-}
-
-# ============================================================
 package_hap() {
     log "=== 打包 HAP ($NATIVE_ARCH) ==="
     local unsigned_hap="$WINEHUA/entry/build/default/outputs/default/entry-default-unsigned.hap"
@@ -53,62 +40,17 @@ package_hap() {
 
     set_abi_filters
 
-    # Pad: 移除 hnpPackages 配置 + 注入 PAD_MODE 编译宏
-    if [ "$DEVICE_TYPE" = "pad" ]; then
-        local module_json="$WINEHUA/entry/src/main/module.json5"
-        python3 -c "
+    # 移除 hnpPackages (所有平台统一用 rawfile zip)
+    local module_json="$WINEHUA/entry/src/main/module.json5"
+    python3 -c "
 import re
 with open('$module_json', 'r') as f:
     content = f.read()
-# 移除 hnpPackages 块 (含前导逗号)
 content = re.sub(r',?\s*\"hnpPackages\"\s*:\s*\[[^][]*\]', '', content)
 with open('$module_json', 'w') as f:
     f.write(content)
 "
-        log "  已移除 hnpPackages 配置"
-
-        # 通过 cppFlags 注入 PAD_MODE (hvigorw 不会透传环境变量给 CMake)
-        local profile="$WINEHUA/entry/build-profile.json5"
-        python3 -c "
-import re
-with open('$profile', 'r') as f:
-    content = f.read()
-# 仅当不存在时注入 -DPAD_MODE
-if '-DPAD_MODE' not in content:
-    content = re.sub(r'\"cppFlags\"\s*:\s*\"', '\"cppFlags\": \"-DPAD_MODE ', content)
-with open('$profile', 'w') as f:
-    f.write(content)
-"
-        log "  已注入 -DPAD_MODE 到 cppFlags"
-    else
-        # PC: pad 分支的逆操作 — 确保 hnpPackages 存在 + 移除 PAD_MODE 编译宏
-        # (package.sh 只把源文件改向 pad, 这里负责切 pc 时还原, 保证 pc/pad 双向可切)
-        local module_json="$WINEHUA/entry/src/main/module.json5"
-        python3 -c "
-with open('$module_json', 'r') as f:
-    content = f.read()
-# 若缺失, 在 deliveryWithInstall 前注入 hnpPackages (PC 模式需要)
-if 'hnpPackages' not in content:
-    content = content.replace(
-        '    \"deliveryWithInstall\"',
-        '    \"hnpPackages\": [\n      {\n        \"package\": \"winehua.hnp\",\n        \"type\": \"public\"\n      }\n    ],\n    \"deliveryWithInstall\"',
-        1)
-with open('$module_json', 'w') as f:
-    f.write(content)
-"
-        log "  已确保 hnpPackages 存在 (PC)"
-
-        # 从 cppFlags 移除 -DPAD_MODE (pad 分支注入的逆操作, 否则 pc 会编成 pad 的 NCP 路径)
-        local profile="$WINEHUA/entry/build-profile.json5"
-        python3 -c "
-with open('$profile', 'r') as f:
-    content = f.read()
-content = content.replace('-DPAD_MODE ', '').replace('-DPAD_MODE', '')
-with open('$profile', 'w') as f:
-    f.write(content)
-"
-        log "  已移除 -DPAD_MODE (PC 模式)"
-    fi
+    log "  已移除 hnpPackages 配置"
 
     # 清理非目标架构的 native libs (hvigorw ProcessLibs 会打包所有 libs/)
     local libs_root="$WINEHUA/entry/libs"
@@ -117,28 +59,9 @@ with open('$profile', 'w') as f:
     elif [ "$NATIVE_ARCH" = "x86_64" ]; then
         rm -rf "$libs_root/arm64-v8a"
     fi
-    # NATIVE_ARCH=all 时保留两个架构
 
     cd "$WINEHUA"
     hvigorw assembleHap || { err "hvigorw assembleHap 失败"; return 1; }
-
-    cd "$WINEHUA/entry"
-    # 清理非目标架构的 HNP (hvigorw 不处理 hnp/, 所以这时清理即可)
-    local hnp_root="$WINEHUA/entry/hnp"
-    if [ "$DEVICE_TYPE" = "pad" ]; then
-        # Pad: 完全移除 hnp/ 目录 (Pad 不支持 HNP)
-        rm -rf "$hnp_root"
-    else
-        if [ "$NATIVE_ARCH" = "arm64-v8a" ]; then
-            rm -rf "$hnp_root/x86_64"
-        elif [ "$NATIVE_ARCH" = "x86_64" ]; then
-            rm -rf "$hnp_root/arm64-v8a"
-        fi
-        # NATIVE_ARCH=all 时保留两个架构
-
-        # 将 HNP 目录打包进 HAP (hvigorw 不会自动处理 hnp/)
-        zip -r "$unsigned_hap" hnp
-    fi
 
     cd "$WINEHUA"
     python3 sign.py "$unsigned_hap" "$signed_hap"
@@ -167,22 +90,10 @@ deploy() {
 
 # ---- main ----
 case "${1:-}" in
-    hnp)
-        if [ "$DEVICE_TYPE" = "pad" ]; then
-            log "Pad 模式: 跳过 HNP 打包"
-        else
-            package_hnp
-        fi
-        ;;
     hap)  package_hap ;;
     deploy) deploy "${2:-}" ;;
     all)
-        if [ "$DEVICE_TYPE" = "pad" ]; then
-            log "Pad 模式: 跳过 HNP 打包"
-            package_hap && deploy "${2:-}"
-        else
-            package_hnp && package_hap && deploy "${2:-}"
-        fi
+        package_hap && deploy "${2:-}"
         ;;
-    *)    echo "用法: $0 {hnp|hap|deploy|all} [device_ip]" >&2; exit 1 ;;
+    *)    echo "用法: $0 {hap|deploy|all} [device_ip]" >&2; exit 1 ;;
 esac

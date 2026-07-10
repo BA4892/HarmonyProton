@@ -87,6 +87,7 @@ static void setup_wine_env(const char* binDir, const char* homeDir)
         setenv("PROCESSBROKER", brokerPath, 1);
     }
     setenv("WINEDATADIR", (shareDir + "/wine").c_str(), 1);
+    setenv("XKB_CONFIG_ROOT", (shareDir + "/X11/xkb").c_str(), 1);
     // WINEBINDIR/WINEUNIXDIR 覆盖 init_paths() 中基于 dladdr(ntdll.so) 推算的错误路径
     // ntdll.so 在 bundle libs 目录，而 PE DLL / Unix SO 数据都在 wine/bin/ 下
     setenv("WINEBINDIR", binDir, 1);   // wine/bin/
@@ -128,6 +129,19 @@ extern "C" void Main(NativeChildProcess_Args args)
     while ((tok = strtok(nullptr, "|")) && argc < 63)
         argv[argc++] = tok;
     argv[argc] = nullptr;
+
+    // 检查 __winehua_desktop__ 标记: 有 → desktop 模式, 需要传 env 给 wine
+    {
+        for (int i = 0; i < argc; i++) {
+            if (strcmp(argv[i], "__winehua_desktop__") == 0) {
+                setenv("WINEHUA_DESKTOP_MODE", "1", 1);
+                OH_LOG_INFO(LOG_APP, "[WineChild] __winehua_desktop__ → WINEHUA_DESKTOP_MODE=1");
+                for (int j = i; j < argc; j++) argv[j] = argv[j + 1];
+                argc--;
+                break;
+            }
+        }
+    }
 
     OH_LOG_INFO(LOG_APP, "[WineChild] homeDir=%{public}s binDir=%{public}s argc=%{public}d argv[0]=%{public}s",
                 homeDir ? homeDir : "(null)", binDir, argc, argc > 0 ? argv[0] : "(none)");

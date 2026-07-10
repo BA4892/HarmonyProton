@@ -28,15 +28,13 @@
 #include "broker.h"
 #include "wait_utils.h"
 
-#ifdef PAD_MODE
 #include <AbilityKit/native_child_process.h>
 
-// Pad: 从 envp 重建 environ (fork 后 __wine_main / main 从 environ 读环境变量)
+// NCP 子进程中 environ 为空, 从 envp 重建供 wine 使用
 static void rebuild_environ(char* const* envp) {
     extern char** environ;
     environ = (char**)envp;
 }
-#endif
 
 // 轮询 wineserver socket 是否就绪
 static bool IsWineserverSocketReady() {
@@ -58,7 +56,6 @@ static bool IsWineserverSocketReady() {
     return found;
 }
 
-#ifdef PAD_MODE
 static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
     // 通过 fdList 传递 audio bootstrap fd (仅 explorer 需要音频)
     NativeChildProcess_Fd audioFdNode;
@@ -106,10 +103,11 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
 
     if (!prefixReady) {
         OH_LOG_INFO(LOG_APP, "[Launch-Async] prefix not ready, running wineboot --init...");
+        const char* desktopTag = WaylandServer::GetInstance()->IsDesktopMode() ? "__winehua_desktop__|" : "";
 #ifdef __aarch64__
-        std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|wineboot|--init";
+        std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|" + desktopTag + "wineboot|--init";
 #else
-        std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|wine|wineboot|--init";
+        std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|" + desktopTag + "wine|wineboot|--init";
 #endif
         NativeChildProcess_Args childArgs = {};
         childArgs.entryParams = const_cast<char*>(entryParams.c_str());
@@ -146,7 +144,8 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
         OH_LOG_INFO(LOG_APP, "[Launch-Async] prefix already initialized, skipping wineboot");
     }
 
-    // -- explorer desktop shell --
+    // -- explorer desktop shell (仅 desktop 模式) --
+    if (WaylandServer::GetInstance()->IsDesktopMode())
     {
         auto* ws = WaylandServer::GetInstance();
         int dw = ws->outputW_ > 0 ? ws->outputW_ : 1280;
@@ -154,9 +153,9 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
         char desktopArg[128];
         snprintf(desktopArg, sizeof(desktopArg), "/desktop=shell,%dx%d", dw, dh);
 #ifdef __aarch64__
-        std::string exEntry = p->homeDir + "|" + p->winehuaBin + "|explorer|" + desktopArg;
+        std::string exEntry = p->homeDir + "|" + p->winehuaBin + "|__winehua_desktop__|explorer|" + desktopArg;
 #else
-        std::string exEntry = p->homeDir + "|" + p->winehuaBin + "|wine|explorer|" + desktopArg;
+        std::string exEntry = p->homeDir + "|" + p->winehuaBin + "|__winehua_desktop__|wine|explorer|" + desktopArg;
 #endif
         NativeChildProcess_Args exArgs = {};
         exArgs.entryParams = const_cast<char*>(exEntry.c_str());
@@ -169,92 +168,12 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
         OH_LOG_INFO(LOG_APP, "[Launch-Async] explorer desktop pid=%{public}d ret=%{public}d",
                     exPid, (int)exRet);
     }
-    return true;
-}
-#else
-static bool LaunchPcMode(LaunchParams* p, int audioBootstrapFd) {
-    // -- wineserver via fork + execve --
+    else
     {
-        std::vector<std::string> wsEnvStrs = p->envStrs;
-        std::vector<char*> wsEnvp;
-        for (auto& s : wsEnvStrs) wsEnvp.push_back((char*)s.c_str());
-        wsEnvp.push_back(nullptr);
-        int wsPipe[2];
-        bool wsPipeOk = (pipe(wsPipe) == 0);
-        if (!wsPipeOk)
-            OH_LOG_ERROR(LOG_APP, "[Launch-Async] wineserver pipe failed: %{public}s", strerror(errno));
-
-        pid_t wsPid = fork();
-        if (wsPid == 0) {
-            if (wsPipeOk) {
-                close(wsPipe[0]); dup2(wsPipe[1], STDERR_FILENO);
-                if (wsPipe[1] > 2) close(wsPipe[1]);
-            }
-            CloseInheritedFds({STDOUT_FILENO, STDERR_FILENO, audioBootstrapFd});
-            for (int s = 1; s < 32; ++s) signal(s, SIG_DFL);
-            prctl(PR_SET_NAME, "wl-wineserver", 0, 0, 0);
-            chdir(p->winehuaBin.c_str());
-            const char* wsArgv[] = {"./box64", "./wineserver", nullptr};
-            execve("./box64", (char* const*)wsArgv, wsEnvp.data());
-            _exit(127);
-        }
-        if (wsPid > 0) {
-            OH_LOG_INFO(LOG_APP, "[Launch-Async] wineserver pid=%{public}d", wsPid);
-            if (wsPipeOk) { close(wsPipe[1]); StartStderrLogger(wsPipe[0], "wineserver-stderr"); }
-            if (!WaitFor("wineserver socket (PC)", IsWineserverSocketReady, 5000, 100)) {
-                OH_LOG_WARN(LOG_APP, "[Launch-Async] wineserver socket not detected, "
-                            "wineboot will recover via server_connect retry");
-            }
-        } else {
-            OH_LOG_ERROR(LOG_APP, "[Launch-Async] wineserver fork failed");
-            if (wsPipeOk) { close(wsPipe[0]); close(wsPipe[1]); }
-            if (audioBootstrapFd >= 0) close(audioBootstrapFd);
-            if (gStateTsfn)
-                napi_call_threadsafe_function(gStateTsfn, strdup("wineserver-failed"), napi_tsfn_blocking);
-            return false;
-        }
-    }
-
-    if (gStateTsfn)
-        napi_call_threadsafe_function(gStateTsfn, strdup("wineboot-starting"), napi_tsfn_blocking);
-
-    // -- wineboot --init via fork + execve --
-    {
-        OH_LOG_INFO(LOG_APP, "[Launch-Async] running wineboot --init...");
-        int bootPipe[2];
-        bool bootPipeOk = (pipe(bootPipe) == 0);
-        pid_t bootPid = fork();
-        if (bootPid == 0) {
-            if (bootPipeOk) {
-                close(bootPipe[0]); dup2(bootPipe[1], STDERR_FILENO);
-                if (bootPipe[1] > 2) close(bootPipe[1]);
-            }
-            CloseInheritedFds({STDOUT_FILENO, STDERR_FILENO, audioBootstrapFd});
-            for (int s = 1; s < 32; ++s) signal(s, SIG_DFL);
-            prctl(PR_SET_NAME, "wl-wineboot", 0, 0, 0);
-            chdir(p->winehuaBin.c_str());
-            // wine 程序参数用裸名 "wineboot"(对齐 pad),wine 解析到 builtin;
-            // "./wineboot" 会被当 unix 路径 open 失败。pc/pad 只应差 wine 路径。
-            const char* bootArgv[] = {"./box64", "./wine", "wineboot", "--init", nullptr};
-            execve("./box64", (char* const*)bootArgv, p->envp.data());
-            _exit(127);
-        }
-        if (audioBootstrapFd >= 0) {
-            close(audioBootstrapFd);
-            audioBootstrapFd = -1;
-        }
-        if (bootPid > 0) {
-            if (bootPipeOk) { close(bootPipe[1]); StartStderrLogger(bootPipe[0], "wineboot-stderr"); }
-            int bootStatus = 0;
-            waitpid(bootPid, &bootStatus, 0);
-            LogProcessExit("wineboot", bootPid, bootStatus);
-        } else if (bootPipeOk) {
-            close(bootPipe[0]); close(bootPipe[1]);
-        }
+        OH_LOG_INFO(LOG_APP, "[Launch-Async] non-desktop mode, skip explorer shell");
     }
     return true;
 }
-#endif
 
 void LaunchThreadFunc(LaunchParams* p) {
     OH_LOG_INFO(LOG_APP, "[Launch-Async] wineserver + wineboot + wine starting in background");
@@ -276,11 +195,7 @@ void LaunchThreadFunc(LaunchParams* p) {
         napi_call_threadsafe_function(gStateTsfn, strdup("wineserver-starting"), napi_tsfn_blocking);
 
     bool ok = false;
-#ifdef PAD_MODE
     ok = LaunchPadMode(p, audioBootstrapFd);
-#else
-    ok = LaunchPcMode(p, audioBootstrapFd);
-#endif
 
     if (ok && gStateTsfn)
         napi_call_threadsafe_function(gStateTsfn, strdup("wine-ready"), napi_tsfn_blocking);

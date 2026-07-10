@@ -45,27 +45,12 @@ case "$NATIVE_ARCH" in
 esac
 
 # ── 设备类型 ──
-# pc:  普通鸿蒙设备 (有 execve, 有 HNP)
-# pad: 鸿蒙 Pad (fork-only, 无 execve, 无 HNP)
+# pc:  普通鸿蒙设备 (broker+NCP, 无 fork/execve)
+# pad: 鸿蒙 Pad (broker+NCP, 无 fork/execve)
 DEVICE_TYPE="${DEVICE_TYPE:-pc}"
 
-# ── 设备上的 Wine 运行时根目录 ──
-if [ "$DEVICE_TYPE" = "pad" ]; then
-    WINE_DEVICE_ROOT="/data/storage/el2/base/files/wine"
-else
-    WINE_DEVICE_ROOT="/data/service/hnp/winehua.org/winehua_0.1.0/opt/winehua"
-fi
-
-# ── 传给 C++ 的 Pad 编译宏 ──
-# CMakeLists.txt 根据此变量添加 -DPAD_MODE
-if [ "$DEVICE_TYPE" = "pad" ]; then
-    export PAD_CFLAGS="-DPAD_MODE"
-else
-    export PAD_CFLAGS=""
-fi
-
-# 工具
-HNPCLI="$OHOS_SDK/toolchains/hnpcli"
+# ── 设备上的 Wine 运行时根目录 (均由 rawfile zip 解压) ──
+WINE_DEVICE_ROOT="/data/storage/el2/base/files/wine"
 
 # 源码路径
 WINE_SRC="$ROOT/thirdparty/wine"
@@ -74,8 +59,7 @@ BOX64_SRC="$ROOT/thirdparty/box64"
 # 产物路径
 BUILD_DIR="$ROOT/build"          # 源码构建中间产物
 SYSROOT_EXT="$BUILD_DIR/sysroot-ext"  # 交叉编译扩展 (不污染 SDK)
-STAGING_DIR="$BUILD_DIR/staging"   # HNP/Pad 打包临时目录
-HNP_LAYOUT="$STAGING_DIR/opt/winehua"
+STAGING_DIR="$BUILD_DIR/staging"   # 打包临时目录
 
 # sysroot-ext 目录结构
 SYSROOT_EXT_INC="$SYSROOT_EXT/usr/include"

@@ -7,40 +7,12 @@ const DOMAIN = 0x0000;
 const SOCK = '/data/storage/el2/base/files/.wine/wine-wayland';
 const FILES_BASE = '/data/storage/el2/base/files';
 
-// PC 模式 (HNP): Wine 运行时由系统挂载到 /data/service/hnp/
-const WINE_BIN_PC = '/data/service/hnp/winehua.org/winehua_0.1.0/opt/winehua/bin';
-const WINE_LIB_PC = `${WINE_BIN_PC}/x86_64-unix`;
-
-// Pad 模式 (无 HNP): Wine 运行时从 rawfile 解压到 files/
-const WINE_ROOT_PAD = `${FILES_BASE}/wine`;
-const WINE_BIN_PAD = `${WINE_ROOT_PAD}/bin`;
-const WINE_LIB_PAD = `${WINE_BIN_PAD}/x86_64-unix`;
-
-// 运行时检测: 如果 HNP 路径不存在则使用 Pad 路径
-let WINE_BIN = WINE_BIN_PC;
-let WINE_LIB = WINE_LIB_PC;
-let BIN_DIR = WINE_BIN;
-let BOX64 = `${WINE_BIN}/box64`;
-
-function detectWinePath(): void {
-  try {
-    if (fs.accessSync(WINE_BIN_PC)) {
-      // PC 模式 (HNP)
-      WINE_BIN = WINE_BIN_PC;
-      WINE_LIB = WINE_LIB_PC;
-      BIN_DIR = WINE_BIN;
-      BOX64 = `${WINE_BIN}/box64`;
-      hilog.info(DOMAIN, 'wine', 'detectWinePath: PC mode (HNP)');
-      return;
-    }
-  } catch (_) {}
-  // Pad 模式 (无 HNP)
-  WINE_BIN = WINE_BIN_PAD;
-  WINE_LIB = WINE_LIB_PAD;
-  BIN_DIR = WINE_BIN;
-  BOX64 = `${WINE_BIN}/box64`;
-  hilog.info(DOMAIN, 'wine', 'detectWinePath: Pad mode (rawfile)');
-}
+// Wine 运行时从 rawfile 解压到 files/
+const WINE_ROOT = `${FILES_BASE}/wine`;
+const WINE_BIN = `${WINE_ROOT}/bin`;
+const WINE_LIB = `${WINE_BIN}/x86_64-unix`;
+const BIN_DIR = WINE_BIN;
+const BOX64 = `${WINE_BIN}/box64`;
 
 const DRIVE_C = '/data/storage/el2/base/files/.wine/drive_c';
 
@@ -64,8 +36,6 @@ struct Index {
   _wow64Done: boolean = false;
 
   aboutToAppear(): void {
-    detectWinePath();
-
     testNapi.setStateCallback((s: string) => {
       hilog.info(DOMAIN, 'wine', 'state: %{public}s', s);
       this.state = s;
@@ -107,7 +77,7 @@ struct Index {
   // Pad: 从 rawfile 取出 wine-data.zip → zlib.decompressFile 解压到 files/wine/
   // 使用 getRawFdSync 流式读取，避免 249MB 一次加载到内存导致 OOM
   private async extractWineData(): Promise<void> {
-    const marker = `${WINE_ROOT_PAD}/share/wine/wine.inf`;
+    const marker = `${WINE_ROOT}/share/wine/wine.inf`;
     hilog.info(DOMAIN, 'wine', 'extract: check marker=%{public}s', marker);
     try {
       if (fs.accessSync(marker)) {
@@ -150,9 +120,9 @@ struct Index {
       hilog.info(DOMAIN, 'wine', 'extract: stream copy ok, totalWritten=%{public}d', totalWritten);
 
       // 确保目标目录存在
-      fs.mkdirSync(WINE_ROOT_PAD, true);
-      hilog.info(DOMAIN, 'wine', 'extract: calling decompressFile → %{public}s', WINE_ROOT_PAD);
-      await zlib.decompressFile(tmpZip, WINE_ROOT_PAD, {});
+      fs.mkdirSync(WINE_ROOT, true);
+      hilog.info(DOMAIN, 'wine', 'extract: calling decompressFile → %{public}s', WINE_ROOT);
+      await zlib.decompressFile(tmpZip, WINE_ROOT, {});
       hilog.info(DOMAIN, 'wine', 'extract: decompress ok');
 
       // 验证
@@ -301,11 +271,11 @@ struct Index {
     const documentViewPicker = new picker.DocumentViewPicker();
     let documentSaveResult = await documentViewPicker.save({ pickerMode: picker.DocumentPickerMode.DOWNLOAD });
     const zHome = new fileUri.FileUri(documentSaveResult[0]).path + '/';
-    // Pad: 检查是否需要解压 wine 数据文件
-    hilog.info(DOMAIN, 'wine', 'auto-init: check PC path=%{public}s', WINE_BIN_PC);
-    const isPC = fs.accessSync(WINE_BIN_PC);
-    hilog.info(DOMAIN, 'wine', 'auto-init: isPC=%{public}s', String(isPC));
-    if (!isPC) {
+    // 检查是否需要解压 wine 数据文件
+    hilog.info(DOMAIN, 'wine', 'auto-init: check marker=%{public}s', `${WINE_ROOT}/share/wine/wine.inf`);
+    let needExtract = true;
+    try { needExtract = !fs.accessSync(`${WINE_ROOT}/share/wine/wine.inf`); } catch (_) {}
+    if (needExtract) {
       this.statusText = '解压数据...';
       hilog.info(DOMAIN, 'wine', 'auto-init: extracting wine data...');
       await this.extractWineData();

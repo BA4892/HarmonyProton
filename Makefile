@@ -209,30 +209,10 @@ $(STAMPS)/arm64-v8a/assemble-pc:  $(STAMPS)/box64-arm64-v8a-pc  $(STAMPS)/wine32
 $(STAMPS)/arm64-v8a/assemble-pad: $(STAMPS)/box64-arm64-v8a-pad $(STAMPS)/wine32
 
 # ============================================================
-# hnp — HNP 打包 (仅 PC)
-# ============================================================
-.PHONY: hnp
-hnp: $(foreach a,$(ARCHES),$(STAMPS)/$(a)/hnp)
-
-define hnp_rule
-.PHONY: hnp-$(1)
-hnp-$(1): $$(STAMPS)/$(1)/hnp
-
-$$(STAMPS)/$(1)/hnp: $(SCRIPTS)/package.sh $$(STAMPS)/$(1)/assemble-pc | $$(STAMPS)/$(1)
-	@echo "=== hnp ($(1)) ==="
-	NATIVE_ARCH=$(1) DEVICE_TYPE=pc bash $(SCRIPTS)/package.sh hnp
-	@touch $$@
-endef
-$(foreach a,arm64-v8a x86_64,$(eval $(call hnp_rule,$(a))))
-
-# ============================================================
-# hap — HAP 构建 + 签名 (PC: 含 HNP, Pad: rawfile)
+# hap — HAP 构建 + 签名 (统一 rawfile zip)
 # ============================================================
 .PHONY: hap
 hap: assemble
-ifeq ($(DEVICE_TYPE),pc)
-hap: hnp
-endif
 	@echo "=== hap ($(CONFIG)) ==="
 	bash $(SCRIPTS)/package.sh hap
 	@echo ""
@@ -250,7 +230,6 @@ clean:
 	rm -f $(ROOT)/entry/libs/arm64-v8a/virgl_test_server
 	rm -f $(ROOT)/entry/libs/x86_64/*.so
 	rm -f $(ROOT)/entry/libs/x86_64/virgl_test_server
-	rm -rf $(ROOT)/entry/hnp/*
 	rm -rf $(ROOT)/entry/build
 	rm -f $(ROOT)/entry/src/main/resources/rawfile/wine-data.zip
 	@echo "  已清理所有中间产物"
@@ -274,12 +253,11 @@ help:
 	@echo "  make wine      # Wine + wineserver"
 	@echo "  make box64     # Box64 (仅 arm64)"
 	@echo "  make native    # Native compositor 依赖"
-	@echo "  make assemble  # 组装 HNP/Pad 布局"
+	@echo "  make assemble  # 组装布局"
 	@echo "  make hap       # HAP 打包 + 签名"
 	@echo ""
 	@echo "每个架构:"
 	@echo "  make native-x86_64  make native-arm64-v8a"
-	@echo "  make hnp-x86_64     make hnp-arm64-v8a"
 	@echo ""
 	@echo "清理:"
 	@echo "  make clean     # 删除所有中间产物"

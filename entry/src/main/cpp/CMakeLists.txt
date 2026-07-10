@@ -12,12 +12,6 @@ include_directories(
     ${NATIVERENDER_ROOT_PATH}/include
 )
 
-# Pad fork-only mode: enable PAD_MODE compile define when requested by env.sh.
-if(DEFINED ENV{PAD_CFLAGS} AND NOT "$ENV{PAD_CFLAGS}" STREQUAL "")
-    add_definitions(-DPAD_MODE)
-    message(STATUS "WineHua: PAD_MODE enabled (fork-only, no execve)")
-endif()
-
 if(DEFINED PACKAGE_FIND_FILE)
     include(${PACKAGE_FIND_FILE})
 endif()

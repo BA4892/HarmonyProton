@@ -334,7 +334,7 @@ napi_value RunMmapTests(napi_env env, napi_callback_info) {
         posix_spawn_file_actions_adddup2(&actions, fd[1], STDOUT_FILENO);
         posix_spawn_file_actions_adddup2(&actions, fd[1], STDERR_FILENO);
         pid_t pid;
-        const char* spawn_bin = "/data/service/hnp/winehua.org/winehua_0.1.0/opt/winehua/bin/mmap_test";
+        const char* spawn_bin = "/data/storage/el2/base/files/wine/bin/mmap_test";
         char* argv[] = { (char*)spawn_bin, NULL };
         extern char** environ;
         int ret = posix_spawn(&pid, spawn_bin, &actions, NULL, argv, environ);

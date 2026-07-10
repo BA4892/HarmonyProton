@@ -13,11 +13,10 @@
 #   native     Native compositor 依赖 (按架构)
 #   wine       构建 Wine
 #   box64      构建 Box64 (仅 arm64)
-#   assemble   组装 HNP 布局 (按架构)
-#   hnp        打包 HNP (按架构)
+#   assemble   组装布局 (按架构)
 #   hap        构建 HAP + 签名 (按架构)
 #   deploy     推送到设备并安装
-#   quick      assemble → hnp → hap → deploy
+#   quick      assemble → hap → deploy
 #
 set -euo pipefail
 
@@ -85,10 +84,6 @@ run_box64() {
     bash "$SCRIPTS/build_box64.sh"
 }
 
-run_hnp() {
-    local a="${1:-arm64-v8a}"
-    NATIVE_ARCH="$a" bash "$SCRIPTS/package.sh" hnp
-}
 
 run_hap() {
     local a="${1:-arm64-v8a}"
@@ -110,18 +105,15 @@ for_each_arch() {
     fi
 }
 
-# assemble + hnp 必须配对 (assemble 会清除 staging 目录)
-for_each_arch_assemble_and_hnp() {
+# assemble 单步完成 (assemble 会清除 staging 目录)
+for_each_arch_assemble() {
     if [ "$arch" = "all" ]; then
-        log "=== 架构: arm64-v8a (assemble + hnp) ==="
+        log "=== 架构: arm64-v8a (assemble) ==="
         NATIVE_ARCH=arm64-v8a bash "$SCRIPTS/assemble.sh"
-        NATIVE_ARCH=arm64-v8a bash "$SCRIPTS/package.sh" hnp
-        log "=== 架构: x86_64 (assemble + hnp) ==="
+        log "=== 架构: x86_64 (assemble) ==="
         NATIVE_ARCH=x86_64 bash "$SCRIPTS/assemble.sh"
-        NATIVE_ARCH=x86_64 bash "$SCRIPTS/package.sh" hnp
     else
         NATIVE_ARCH="$NATIVE_ARCH" bash "$SCRIPTS/assemble.sh"
-        NATIVE_ARCH="$NATIVE_ARCH" bash "$SCRIPTS/package.sh" hnp
     fi
 }
 
@@ -150,12 +142,8 @@ case "$cmd" in
         run_box64
         ;;
     assemble)
-        # all 模式下 assemble + hnp 配对, 避免 staging 被覆盖
-        for_each_arch_assemble_and_hnp
-        ;;
-    hnp)
-        # hnp 自动先 assemble (确保 staging 对应当前架构)
-        for_each_arch_assemble_and_hnp
+        # assemble 布局
+        for_each_arch_assemble
         ;;
     hap)
         run_hap "$NATIVE_ARCH"
@@ -168,7 +156,7 @@ case "$cmd" in
         run_wine
         run_box64
         for_each_arch run_native
-        for_each_arch_assemble_and_hnp
+        for_each_arch_assemble
         if [ "$arch" = "all" ]; then
             NATIVE_ARCH=all bash "$SCRIPTS/package.sh" hap
         else
@@ -177,7 +165,7 @@ case "$cmd" in
         [ "$cmd" = "quick" ] && run_deploy || true
         ;;
     pad)
-        # Pad 构建 (fork-only, 无 HNP, 无 execve)
+        # Pad 构建 (fork-only, 无 execve)
         export DEVICE_TYPE=pad
         run_deps
         run_wine
@@ -200,23 +188,22 @@ case "$cmd" in
         bash "$SCRIPTS/package.sh" deploy "$device_ip"
         ;;
     *)
-        echo "用法: $0 {full|deps|native|wine|box64|assemble|hnp|hap|deploy|quick|pad|pad-deploy} [device_ip] [arch]"
+        echo "用法: $0 {full|deps|native|wine|box64|assemble|hap|deploy|quick|pad|pad-deploy} [device_ip] [arch]"
         echo ""
         echo "  arch: arm64 (默认) | x86_64 | all"
         echo ""
-        echo "  PC 命令 (有 execve, 有 HNP):"
+        echo "  通用命令:"
         echo "    full       全量构建 (首次使用)"
         echo "    deps       模拟层交叉编译依赖"
         echo "    native     Native compositor 依赖"
         echo "    wine       构建 Wine"
         echo "    box64      构建 Box64 (仅 arm64)"
-        echo "    assemble   组装 HNP 布局"
-        echo "    hnp        打包 HNP"
+        echo "    assemble   组装布局"
         echo "    hap        构建 HAP + 签名"
         echo "    deploy     推送到设备并安装"
-        echo "    quick      快速: assemble → hnp → hap → deploy"
+        echo "    quick      快速: assemble → hap → deploy"
         echo ""
-        echo "  Pad 命令 (fork-only, 无 HNP):"
+        echo "  Pad 快捷命令:"
         echo "    pad <arch>        构建 Pad HAP (arm64|x86_64)"
         echo "    pad-hap <arch>    仅 Pad HAP (只改 ArkTS/native 时用)"
         echo "    pad-deploy <ip>   推送并安装"

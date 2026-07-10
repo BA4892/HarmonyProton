@@ -3,6 +3,7 @@
 #include "audio_broker.h"
 #include "audio_ipc_protocol.h"
 #include "graphics_broker.h"
+#include "wayland_server.h"
 
 #include <unistd.h>
 #include <algorithm>
@@ -54,17 +55,15 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
         "HOME=" + homeDir,
         "WINEPREFIX=" WINE_PREFIX,
         "WINEDATADIR=" + shareDir + "/wine",
-#ifdef PAD_MODE
         "WINEDLLDIR=" + binDir + "/x86_64-unix",
         "WINEDLLDIR0=" + binDir + "/x86_64-windows",
         "WINEDLLDIR1=" + binDir + "/i386-windows",
         "WINEDLLDIR2=" + binDir,
         "WINEDLLPATH=" + binDir + "/x86_64-windows:" + binDir + "/i386-windows:" + binDir,
-#endif
         "WINEDEBUG=-all",
         "WINE_MONO=never",
         "XKB_CONFIG_ROOT=" + xkbDir,
-        "PATH=/usr/local/bin:/data/app/bin:/data/service/hnp/bin:/usr/bin:/vendor/bin:" + binDir + "/x86_64-windows:" + binDir + "/i386-windows:" + binDir,
+        "PATH=/usr/local/bin:/data/app/bin:/usr/bin:/vendor/bin:" + binDir + "/x86_64-windows:" + binDir + "/i386-windows:" + binDir,
         "TMPDIR=" WINE_TMPDIR,
     };
     AppendBox64PerfStrings(env);
@@ -80,6 +79,9 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
         env.push_back("WINE_OHOS_AUDIO_PROTOCOL_VERSION=" + std::to_string(WINEHUA_AUDIO_PROTOCOL_VERSION));
     }
     winehua::GraphicsBroker::GetInstance().SetWineRuntimeBinaryDir(binDir);
+    // 告知 winewayland.drv 当前是桌面模式还是独立窗口模式
+    env.push_back(std::string("WINEHUA_DESKTOP_MODE=") +
+                  (WaylandServer::GetInstance()->IsDesktopMode() ? "1" : "0"));
     winehua::GraphicsBroker::GetInstance().AppendWineEnv(env);
 
     OH_LOG_INFO(LOG_APP,

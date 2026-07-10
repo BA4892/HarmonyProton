@@ -453,12 +453,12 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
         // 确定实际内容区域: 优先用 window_geometry, 否则全 buffer
         int contentW = w, contentH = h;
         int contentOffX = 0, contentOffY = 0;
-        int screenX = 0, screenY = 0;  // PAD_MODE: 虚拟桌面位置
+        int screenX = 0, screenY = 0;  // 桌面模式: 虚拟桌面位置
         if (sd->hasWindowGeometry && sd->geoW > 0 && sd->geoH > 0) {
             contentW = sd->geoW;
             contentH = sd->geoH;
             if (sd->hasToplevel) {
-                // PAD_MODE: toplevel content 永远从 buffer 原点开始,
+                // 桌面模式: toplevel content 永远从 buffer 原点开始,
                 // geoX/geoY 是虚拟桌面屏幕位置
                 contentOffX = 0;
                 contentOffY = 0;

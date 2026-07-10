@@ -27,7 +27,7 @@ Usage:
 
 Notes:
   - This script packages an already-built OHOS Mesa install tree into
-    build/guest_gfx/<arch>/ so assemble.sh can stage it into the HNP.
+    build/guest_gfx/<arch>/ so assemble.sh can stage it into rawfile.
   - The install root must contain OHOS-target runtime files, not regular Linux
     desktop libraries from WSL/Ubuntu.
   - Requires thirdparty/mesa and thirdparty/libdrm submodules (gitee OpenHarmony mirrors).
