@@ -75,7 +75,7 @@ struct DesktopPage {
         id: 'wine_desktop_xc',
         type: XComponentType.SURFACE,
         controller: this.controller
-      }).width('100%').height('100%').backgroundColor('#000').focusable(true)
+      }).width('100%').height('100%').backgroundColor('#000').focusable(true).focusOnTouch(true)
 
       // ── 触控处理: 单指→左键/右键/拖拽, 双指→滚轮 ──
       .onTouch((ev: TouchEvent) => {

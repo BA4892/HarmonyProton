@@ -409,7 +409,9 @@ void InputManager::SendKeyEvent(uint32_t tl, int evdevCode, bool pressed) {
                 keyboardEntered_.load());
 
     // 键盘 enter 管理: 立即设置状态防止重复 enter (参考旧代码)
-    if (pressed && (!keyboardEntered_.load() || keyboardFocusedToplevel_.load() != tl)) {
+    // 桌面模式: 键盘事件永远发到 root, 不应覆盖点击建立的子窗口焦点
+    if (pressed && !WaylandServer::GetInstance()->IsDesktopMode()
+        && (!keyboardEntered_.load() || keyboardFocusedToplevel_.load() != tl)) {
         wl_resource* surf = WaylandServer::GetInstance()->GetSurfaceForToplevel(tl);
         if (surf) {
             if (keyboardEntered_.load() && keyboardFocusedToplevel_.load() != tl) {
