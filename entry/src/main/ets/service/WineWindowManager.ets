@@ -104,29 +104,12 @@ export class WineWindowManager {
         d.width, d.height, this.displayScale.toFixed(2), this.scaleBoost.toFixed(2));
       testNapi.setDisplayScale(this.displayScale * this.scaleBoost);
 
-      // Wine 输出尺寸
+      // Wine 输出尺寸: 沉浸模式下 avoid area 为 0, 直接用显示尺寸
       const s = this.displayScale * this.scaleBoost;
-      let outW = Math.round(d.width / s);
-      let outH = Math.round(d.height / s);
-      // Pad 桌面模式: 用主窗口实际可用区域替代屏幕尺寸
-      // (屏幕含状态栏, XComponent 实际可渲染区域小, 用屏幕尺寸会导致宽高比不匹配)
-      if (this.isDesktopMode && this.mainWindow) {
-        try {
-          const props = this.mainWindow.getWindowProperties();
-          const winRect = props.windowRect;
-          const sysAvoid = this.mainWindow.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
-          const navAvoid = this.mainWindow.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
-          const availW = winRect.width;
-          const availH = winRect.height - sysAvoid.topRect.height - navAvoid.bottomRect.height;
-          outW = Math.round(availW / s);
-          outH = Math.round(availH / s);
-          hilog.info(DOMAIN, TAG, '[MW] desktop: window %{public}dx%{public}d avoid(top=%{public}d navBot=%{public}d) → avail %{public}dx%{public}d → output %{public}dx%{public}d',
-            winRect.width, winRect.height, sysAvoid.topRect.height, navAvoid.bottomRect.height,
-            Math.round(availW), Math.round(availH), outW, outH);
-        } catch (_) {
-          hilog.warn(DOMAIN, TAG, '[MW] avoid area query failed, using display size');
-        }
-      }
+      const outW = Math.round(d.width / s);
+      const outH = Math.round(d.height / s);
+      hilog.info(DOMAIN, TAG, '[MW] display %{public}dx%{public}d → output %{public}dx%{public}d',
+        d.width, d.height, outW, outH);
       testNapi.setOutputSize(outW, outH);
     } catch (_) {
       this.displayScale = 1.61;

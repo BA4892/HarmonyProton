@@ -1,6 +1,7 @@
 import { AbilityConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
+import { BusinessError } from '@kit.BasicServicesKit';
 import testNapi from 'libentry.so';
 import { WineWindowManager } from '../service/WineWindowManager';
 
@@ -25,8 +26,26 @@ export default class DesktopAbility extends UIAbility {
     windowStage.loadContent('pages/DesktopWindow', (err) => {
       if (err.code) {
         hilog.error(DOMAIN, TAG, '[DWA] loadContent FAILED: %{public}s', JSON.stringify(err));
-      } else {
-        hilog.info(DOMAIN, TAG, '[DWA] loadContent OK tl=%{public}d', this.toplevelId);
+        return;
+      }
+      hilog.info(DOMAIN, TAG, '[DWA] loadContent OK tl=%{public}d', this.toplevelId);
+
+      // 沉浸模式: 全屏 + 隐藏状态栏和导航栏
+      try {
+        const mw = windowStage.getMainWindowSync();
+        if (mw) {
+          mw.setWindowLayoutFullScreen(true).catch((e: BusinessError) => {
+            hilog.error(DOMAIN, TAG, '[DWA] fullScreen failed: %{public}s', JSON.stringify(e));
+          });
+          mw.setSpecificSystemBarEnabled('status', false).catch((e: BusinessError) => {
+            hilog.error(DOMAIN, TAG, '[DWA] statusBar failed: %{public}s', JSON.stringify(e));
+          });
+          mw.setSpecificSystemBarEnabled('navigationIndicator', false).catch((e: BusinessError) => {
+            hilog.error(DOMAIN, TAG, '[DWA] navBar failed: %{public}s', JSON.stringify(e));
+          });
+        }
+      } catch (e) {
+        hilog.error(DOMAIN, TAG, '[DWA] immersive ERR: %{public}s', JSON.stringify(e));
       }
     });
   }

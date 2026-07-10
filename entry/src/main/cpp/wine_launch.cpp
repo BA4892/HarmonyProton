@@ -150,6 +150,8 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
         auto* ws = WaylandServer::GetInstance();
         int dw = ws->outputW_ > 0 ? ws->outputW_ : 1280;
         int dh = ws->outputH_ > 0 ? ws->outputH_ : 720;
+        OH_LOG_INFO(LOG_APP, "[Launch-Async] explorer desktop size: outputW=%{public}d outputH=%{public}d → %{public}dx%{public}d",
+                    ws->outputW_, ws->outputH_, dw, dh);
         char desktopArg[128];
         snprintf(desktopArg, sizeof(desktopArg), "/desktop=shell,%dx%d", dw, dh);
 #ifdef __aarch64__
