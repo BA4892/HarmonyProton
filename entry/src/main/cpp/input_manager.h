@@ -77,11 +77,11 @@ public:
     bool HasKeyboardFocus() const { return keyboardEntered_.load(); }
     uint32_t GetKeyboardFocusedToplevel() const { return keyboardFocusedToplevel_.load(); }
 
+    // -- 辅助: 物理像素 → Wine 逻辑坐标映射 (供 FindToplevelAt 等使用) --
+    wl_fixed_t CoordTransform(double px, double py, uint32_t tl, wl_fixed_t* outX, wl_fixed_t* outY);
+
 private:
     InputManager() = default;
-
-    // -- 辅助 --
-    wl_fixed_t CoordTransform(double px, double py, uint32_t tl, wl_fixed_t* outX, wl_fixed_t* outY);
 
     // -- 事件队列 (NAPI → Wayland 线程) --
     struct InputEvent {

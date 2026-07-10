@@ -505,16 +505,25 @@ static napi_value RaiseToplevel(napi_env env, napi_callback_info info) {
     return nullptr;
 }
 
-// Desktop 模式: 查找 Wine 桌面坐标 (x,y) 处最上层的 toplevel
+// Desktop 模式: 接收物理像素坐标 (px, py), 通过 viewport 映射为 Wine 逻辑坐标后查找
+// resize 后 surface 和逻辑尺寸比例变化, 由 renderer viewport 保证映射正确
 static napi_value FindToplevelAt(napi_env env, napi_callback_info info) {
     size_t argc = 2;
     napi_value args[2];
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
     if (argc < 2) return nullptr;
-    int32_t x, y;
-    napi_get_value_int32(env, args[0], &x);
-    napi_get_value_int32(env, args[1], &y);
-    uint32_t id = WaylandServer::GetInstance()->FindToplevelAt(x, y);
+    int32_t px, py;  // 物理像素坐标
+    napi_get_value_int32(env, args[0], &px);
+    napi_get_value_int32(env, args[1], &py);
+
+    auto* ws = WaylandServer::GetInstance();
+    uint32_t rootId = ws->GetDesktopRootToplevelId();
+    wl_fixed_t wx, wy;
+    InputManager::GetInstance()->CoordTransform(px, py, rootId > 0 ? rootId : 1, &wx, &wy);
+    int32_t lx = wl_fixed_to_int(wx);
+    int32_t ly = wl_fixed_to_int(wy);
+
+    uint32_t id = ws->FindToplevelAt(lx, ly);
     napi_value result;
     napi_create_uint32(env, id, &result);
     return result;

@@ -108,9 +108,7 @@ struct DesktopPage {
               this.twoFingerLastMidY = midY;
               this.twoFingerAccumY = 0;
               this.twoFingerAccumX = 0;
-              const wpx = Math.round(midX / 2);
-              const wpy = Math.round(midY / 2);
-              this.twoFingerTl = testNapi.findToplevelAt(wpx, wpy) as number ?? 0;
+              this.twoFingerTl = testNapi.findToplevelAt(midX, midY) as number ?? 0;
               this.scrollLogCounter = 0;
               hilog.info(DOMAIN, 'CLICK-PIPE', '[ArkTS] SCROLL-START tl=%{public}d fingers=%{public}d',
                 this.twoFingerTl, ev.touches.length);
@@ -156,12 +154,10 @@ struct DesktopPage {
           const py = Math.round(vp2px(t.y));
 
           if (ev.type === TouchType.Down) {
-            // 查找目标 toplevel
-            const wpx = Math.round(px / 2);
-            const wpy = Math.round(py / 2);
-            const tl: number = testNapi.findToplevelAt(wpx, wpy) as number;
+            // 查找目标 toplevel (px,py 为物理坐标, findToplevelAt 内部通过 viewport 转逻辑坐标)
+            const tl: number = testNapi.findToplevelAt(px, py) as number;
             if (tl <= 0) {
-              hilog.info(DOMAIN, 'CLICK-PIPE', '[ArkTS] TOUCH skipped (no toplevel at %{public}d,%{public}d)', wpx, wpy);
+              hilog.info(DOMAIN, 'CLICK-PIPE', '[ArkTS] TOUCH skipped (no toplevel at %{public}d,%{public}d)', px, py);
               return;
             }
             hilog.info(DOMAIN, 'CLICK-PIPE', '[ArkTS] TOUCH tl=%{public}d px=(%{public}d,%{public}d)', tl, px, py);
@@ -287,8 +283,8 @@ struct DesktopPage {
       .onAxisEvent((ev?: AxisEvent) => {
         const rootId = WineWindowManager.getInstance().getDesktopRootId();
         if (rootId <= 0 || !ev) return;
-        const wpx = Math.round(vp2px(ev.x) / 2);
-        const wpy = Math.round(vp2px(ev.y) / 2);
+        const wpx = Math.round(vp2px(ev.x));
+        const wpy = Math.round(vp2px(ev.y));
         const vert = ev.getVerticalAxisValue();
         const horiz = ev.getHorizontalAxisValue();
         const step = ev.scrollStep ?? 0;

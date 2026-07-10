@@ -172,7 +172,21 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
     }
     else
     {
-        OH_LOG_INFO(LOG_APP, "[Launch-Async] non-desktop mode, skip explorer shell");
+        // 非桌面模式: 启动 explorer 文件管理器窗口
+#ifdef __aarch64__
+        std::string exEntry = p->homeDir + "|" + p->winehuaBin + "|explorer";
+#else
+        std::string exEntry = p->homeDir + "|" + p->winehuaBin + "|wine|explorer";
+#endif
+        NativeChildProcess_Args exArgs = {};
+        exArgs.entryParams = const_cast<char*>(exEntry.c_str());
+        NativeChildProcess_Options exOpts = {};
+        exOpts.isolationMode = NCP_ISOLATION_MODE_NORMAL;
+        int32_t exPid = -1;
+        auto exRet = OH_Ability_StartNativeChildProcess(
+            "libwine_child.so:Main", exArgs, exOpts, &exPid);
+        OH_LOG_INFO(LOG_APP, "[Launch-Async] explorer window pid=%{public}d ret=%{public}d",
+                    exPid, (int)exRet);
     }
     return true;
 }
