@@ -11,6 +11,7 @@
 #include <cstring>
 #include <cerrno>
 #include <algorithm>
+#include <atomic>
 #include <string>
 #include <thread>
 #include <vector>
@@ -22,6 +23,9 @@
 // -- 全局状态 --
 static std::mutex gProcMutex;
 static std::vector<WineProcessEntry> gProcRegistry;
+
+// 前向声明
+static void EnsureMonitorRunning();
 
 // -- 注册表辅助函数 --
 WineProcessEntry* AddProcess(pid_t pid, const std::string& exeFullPath, int stdoutFd) {
@@ -39,6 +43,7 @@ WineProcessEntry* AddProcess(pid_t pid, const std::string& exeFullPath, int stdo
     });
     OH_LOG_INFO(LOG_APP, "[ProcReg] add pid=%{public}d name=%{public}s total=%{public}zu",
                 pid, basename.c_str(), gProcRegistry.size());
+    EnsureMonitorRunning();
     return &gProcRegistry.back();
 }
 
@@ -111,6 +116,51 @@ void sigchld_handler(int) {
             snprintf(msg, sizeof(msg), "%d:exited", pid);
             napi_call_threadsafe_function(gStateTsfn, strdup(msg), napi_tsfn_blocking);
         }
+    }
+}
+
+// -- NCP 进程存活监控 --
+// NCP 子进程由 appspawn 创建，不是主进程的 fork() 子进程，
+// SIGCHLD 收不到它们的退出事件。通过 /proc/<pid> 轮询检测退出。
+static std::atomic<bool> gMonitorRunning{false};
+static std::thread gMonitorThread;
+
+static void ProcessMonitorLoop() {
+    OH_LOG_INFO(LOG_APP, "[ProcMon] started");
+    while (gMonitorRunning.load(std::memory_order_relaxed)) {
+        sleep(1);
+
+        std::vector<pid_t> exitedPids;
+        {
+            std::lock_guard<std::mutex> lock(gProcMutex);
+            for (const auto& entry : gProcRegistry) {
+                if (!entry.running) continue;
+                char procPath[64];
+                snprintf(procPath, sizeof(procPath), "/proc/%d", entry.pid);
+                if (access(procPath, F_OK) != 0) {
+                    exitedPids.push_back(entry.pid);
+                }
+            }
+        }
+
+        for (pid_t pid : exitedPids) {
+            OH_LOG_INFO(LOG_APP, "[ProcMon] pid=%{public}d no longer alive", pid);
+            RemoveProcess(pid);
+            if (gStateTsfn) {
+                char msg[64];
+                snprintf(msg, sizeof(msg), "%d:exited", pid);
+                napi_call_threadsafe_function(gStateTsfn, strdup(msg), napi_tsfn_blocking);
+            }
+        }
+    }
+    OH_LOG_INFO(LOG_APP, "[ProcMon] stopped");
+}
+
+static void EnsureMonitorRunning() {
+    if (!gMonitorRunning.load(std::memory_order_acquire)) {
+        gMonitorRunning.store(true, std::memory_order_release);
+        gMonitorThread = std::thread(ProcessMonitorLoop);
+        gMonitorThread.detach();
     }
 }
 
