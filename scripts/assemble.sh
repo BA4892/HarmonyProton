@@ -214,10 +214,9 @@ assemble_pad() {
         done
         log "  i386-windows → $(ls "$wine_data/bin/i386-windows" | wc -l) files (ALL)"
 
-        # 32-bit exe stubs (notepad 等), 放在 bin/i386-windows/.
+        # 32-bit exe stubs, 放在 bin/i386-windows/.
         # Wine 通过 WINEARCH 或 exe header 判断 32/64, 自动加载对应 DLL.
-        for exe in "$BUILD_DIR/wine-i386-pe/programs/notepad/i386-windows/notepad.exe" \
-                   "$BUILD_DIR/wine-i386-pe/programs/winecfg/i386-windows/winecfg.exe"; do
+        for exe in "$BUILD_DIR/wine-i386-pe/programs/"*/i386-windows/*.exe; do
             [ -f "$exe" ] && cp "$exe" "$wine_data/bin/i386-windows/"
         done
         log "  i386 exe stubs → $(ls "$wine_data/bin/i386-windows"/*.exe 2>/dev/null | wc -l) files"

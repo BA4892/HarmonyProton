@@ -95,7 +95,6 @@ struct Index {
   @State initOverlayVisible: boolean = false;
   @State initOverlayText: string = '';
   private hasRawfileWineData: boolean = false;
-  _wow64Done: boolean = false;
 
   aboutToAppear(): void {
     this.hasRawfileWineData = this.detectRawfileWineData();
@@ -114,11 +113,6 @@ struct Index {
         this.setInitStatus('已就绪', false);
         // wineboot 可能还在后台初始化 prefix，轮询等待 drive_c 就绪
         this.waitForPrefix();
-        // 一次性: 填充 syswow64/ (OHOS 沙箱不支持 symlink, wineboot Wow64Install 失败)
-        if (!this._wow64Done) {
-          this._wow64Done = true;
-          setTimeout(() => { this.setupWow64(); }, 3000);
-        }
       } else if (stateMsg == 'wine-running') {
         this.setInitStatus('运行中', false);
         this.refreshProcessList();
@@ -255,35 +249,6 @@ struct Index {
     }
     // 超时，仍然尝试刷新一次
     this.refreshPrefix();
-  }
-
-  // 一次性: 填充 syswow64/ (OHOS 沙箱不支持 symlink, wineboot Wow64Install 失败)
-  // build_dir=NULL 导致 Wine 不从 i386-windows/ 加载, 只查 wineprefix 目录.
-  private setupWow64 = (): void => {
-    try {
-      hilog.info(DOMAIN, 'wow64', 'setupWow64 START FILES_BASE=%{public}s WINE_BIN=%{public}s', FILES_BASE, WINE_BIN);
-      let syswow64 = FILES_BASE + '/.wine/drive_c/windows/syswow64';
-      let srcDir = WINE_BIN + '/i386-windows';
-      hilog.info(DOMAIN, 'wow64', 'syswow64=%{public}s srcDir=%{public}s', syswow64, srcDir);
-      // 先检查 srcDir 是否存在
-      if (!fs.accessSync(srcDir)) {
-        hilog.error(DOMAIN, 'wow64', 'srcDir NOT accessible: %{public}s', srcDir);
-        return;
-      }
-      fs.mkdirSync(syswow64, true);
-      let dllFiles = fs.listFileSync(srcDir);
-      hilog.info(DOMAIN, 'wow64', 'srcDir has %{public}d entries', dllFiles.length);
-      let count = 0;
-      for (let f of dllFiles) {
-        if (f.endsWith('.dll') || f.endsWith('.drv') || f.endsWith('.sys') || f.endsWith('.exe')) {
-          fs.copyFileSync(srcDir + '/' + f, syswow64 + '/' + f);
-          count++;
-        }
-      }
-      hilog.info(DOMAIN, 'wow64', 'syswow64 populated: %{public}d DLLs', count);
-    } catch (e) {
-      hilog.error(DOMAIN, 'wow64', 'setupWow64 EXCEPTION: %{public}s', JSON.stringify(e));
-    }
   }
 
   private refreshProcessList = (): void => {
