@@ -281,7 +281,7 @@ HKLM,%FontSubStr%,"Courier New",,"Noto Sans Mono"' "$wine_data/share/wine/wine.i
     echo "  rawfile/$zip_name"
 }
 
-log "=== 组装布局 ($NATIVE_ARCH, $DEVICE_TYPE) ==="
+log "=== 组装布局 ($NATIVE_ARCH) ==="
 
 # 统一使用 rawfile zip 布局
 assemble_pad

@@ -21,7 +21,7 @@ WINE32_SENTINEL="$BUILD_DIR/dlls/ntdll/i386-windows/ntdll.dll"
 # 确保 host tools 存在
 if [ ! -f "$WINE_TOOLS/tools/winegcc/winegcc" ]; then
     warn "wine-native tools not found at $WINE_TOOLS, building first..."
-    NATIVE_ARCH=x86_64 DEVICE_TYPE=pc bash "$SCRIPT_DIR/build_wine.sh"
+    NATIVE_ARCH=x86_64 bash "$SCRIPT_DIR/build_wine.sh"
 fi
 
 mkdir -p "$BUILD_DIR"

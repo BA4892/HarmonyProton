@@ -1,10 +1,10 @@
 # Makefile — Wine for HarmonyOS 构建编排
 #
 # 用法:
-#   make                                          # 默认: x86_64 PC 全量构建
-#   make NATIVE_ARCH=x86_64 DEVICE_TYPE=pc
-#   make NATIVE_ARCH=arm64-v8a DEVICE_TYPE=pad
-#   make NATIVE_ARCH=all DEVICE_TYPE=pc           # 双架构 HAP
+#   make                                          # 默认: x86_64 全量构建
+#   make NATIVE_ARCH=x86_64
+#   make NATIVE_ARCH=arm64-v8a
+#   make NATIVE_ARCH=all                          # 双架构 HAP
 #
 #   单个模块: make deps | wine | box64 | native | assemble | hap
 #   清理:     make clean
@@ -13,11 +13,9 @@ ROOT := $(realpath $(dir $(lastword $(MAKEFILE_LIST))))
 
 # ── 配置 ──
 NATIVE_ARCH ?= x86_64
-DEVICE_TYPE ?= pc
 export NATIVE_ARCH
-export DEVICE_TYPE
 
-CONFIG    := $(NATIVE_ARCH)-$(DEVICE_TYPE)
+CONFIG    := $(NATIVE_ARCH)
 BUILD_DIR := $(ROOT)/build
 STAMPS    := $(BUILD_DIR)/.stamps
 SCRIPTS   := $(ROOT)/scripts
@@ -124,12 +122,12 @@ $(STAMPS)/wine32: $(SCRIPTS)/build_wine32_pe.sh $(SCRIPTS)/env.sh $(STAMPS)/deps
 	fi
 
 # ============================================================
-# box64 — ARM64 翻译器 (始终 arm64-v8a 架构, PC: 可执行文件, Pad: .so)
+# box64 — ARM64 翻译器 (始终 arm64-v8a 架构, 编译为 box64.so dlopen 加载)
 # ============================================================
 .PHONY: box64
-box64: $(STAMPS)/box64-arm64-v8a-$(DEVICE_TYPE)
+box64: $(STAMPS)/box64-arm64-v8a
 
-$(STAMPS)/box64-arm64-v8a-$(DEVICE_TYPE): $(SCRIPTS)/build_box64.sh $(SCRIPTS)/env.sh FORCE | $(STAMPS)
+$(STAMPS)/box64-arm64-v8a: $(SCRIPTS)/build_box64.sh $(SCRIPTS)/env.sh FORCE | $(STAMPS)
 	@if [ "$(NATIVE_ARCH)" = "x86_64" ]; then \
 	    echo "  [box64] skip (x86_64)"; \
 	    mkdir -p $(dir $@) && touch $@; \
@@ -141,7 +139,7 @@ $(STAMPS)/box64-arm64-v8a-$(DEVICE_TYPE): $(SCRIPTS)/build_box64.sh $(SCRIPTS)/e
 	           2>/dev/null | grep -q .; then \
 	    echo "  [box64] up to date"; \
 	else \
-	    echo "=== box64 ($(DEVICE_TYPE)) ==="; \
+	    echo "=== box64 ==="; \
 	    NATIVE_ARCH=arm64-v8a bash $(SCRIPTS)/build_box64.sh && touch $@; \
 	fi
 
@@ -182,31 +180,23 @@ $(foreach a,arm64-v8a x86_64,$(eval $(call native_rule,$(a))))
 # assemble — 组装布局 (架构 + 设备类型相关)
 # ============================================================
 .PHONY: assemble
-assemble: $(foreach a,$(ARCHES),$(STAMPS)/$(a)/assemble-$(DEVICE_TYPE))
+assemble: $(foreach a,$(ARCHES),$(STAMPS)/$(a)/assemble)
 
 define assemble_rule
-.PHONY: assemble-$(1)-pc assemble-$(1)-pad
+.PHONY: assemble-$(1)
 
-assemble-$(1)-pc:  $$(STAMPS)/$(1)/assemble-pc
-assemble-$(1)-pad: $$(STAMPS)/$(1)/assemble-pad
+assemble-$(1): $$(STAMPS)/$(1)/assemble
 
-$$(STAMPS)/$(1)/assemble-pc: $(SCRIPTS)/assemble.sh $(SCRIPTS)/env.sh \
-	$$(STAMPS)/wine-$(1)-pc $$(STAMPS)/$(1)/native | $$(STAMPS)/$(1)
-	@echo "=== assemble ($(1), pc) ==="
-	NATIVE_ARCH=$(1) DEVICE_TYPE=pc bash $(SCRIPTS)/assemble.sh
-	@touch $$@
-
-$$(STAMPS)/$(1)/assemble-pad: $(SCRIPTS)/assemble.sh $(SCRIPTS)/env.sh \
-	$$(STAMPS)/wine-$(1)-pad $$(STAMPS)/$(1)/native | $$(STAMPS)/$(1)
-	@echo "=== assemble ($(1), pad) ==="
-	NATIVE_ARCH=$(1) DEVICE_TYPE=pad bash $(SCRIPTS)/assemble.sh
+$$(STAMPS)/$(1)/assemble: $(SCRIPTS)/assemble.sh $(SCRIPTS)/env.sh \
+	$$(STAMPS)/wine-$(1) $$(STAMPS)/$(1)/native | $$(STAMPS)/$(1)
+	@echo "=== assemble ($(1)) ==="
+	NATIVE_ARCH=$(1) bash $(SCRIPTS)/assemble.sh
 	@touch $$@
 endef
 $(foreach a,arm64-v8a x86_64,$(eval $(call assemble_rule,$(a))))
 
 # arm64 assemble 额外依赖 box64 + wine32 (WoW64 32-bit PE DLL)
-$(STAMPS)/arm64-v8a/assemble-pc:  $(STAMPS)/box64-arm64-v8a-pc  $(STAMPS)/wine32
-$(STAMPS)/arm64-v8a/assemble-pad: $(STAMPS)/box64-arm64-v8a-pad $(STAMPS)/wine32
+$(STAMPS)/arm64-v8a/assemble: $(STAMPS)/box64-arm64-v8a $(STAMPS)/wine32
 
 # ============================================================
 # hap — HAP 构建 + 签名 (统一 rawfile zip)
@@ -239,14 +229,14 @@ clean:
 # ============================================================
 .PHONY: help
 help:
-	@echo "用法: make [target] [NATIVE_ARCH=x86_64|arm64-v8a|all] [DEVICE_TYPE=pc|pad]"
+	@echo "用法: make [target] [NATIVE_ARCH=x86_64|arm64-v8a|all]"
 	@echo ""
-	@echo "默认: NATIVE_ARCH=x86_64 DEVICE_TYPE=pc"
+	@echo "默认: NATIVE_ARCH=x86_64"
 	@echo ""
 	@echo "全部构建:"
 	@echo "  make                                          # 默认配置全量 → HAP"
-	@echo "  make NATIVE_ARCH=arm64-v8a DEVICE_TYPE=pad    # ARM64 Pad"
-	@echo "  make NATIVE_ARCH=all DEVICE_TYPE=pc           # 双架构 PC HAP"
+	@echo "  make NATIVE_ARCH=arm64-v8a                    # ARM64"
+	@echo "  make NATIVE_ARCH=all                          # 双架构 HAP"
 	@echo ""
 	@echo "单模块:"
 	@echo "  make deps      # 交叉编译依赖 → sysroot-ext"

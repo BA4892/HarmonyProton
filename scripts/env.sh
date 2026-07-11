@@ -44,12 +44,7 @@ case "$NATIVE_ARCH" in
         ;;
 esac
 
-# ── 设备类型 ──
-# pc:  普通鸿蒙设备 (broker+NCP, 无 fork/execve)
-# pad: 鸿蒙 Pad (broker+NCP, 无 fork/execve)
-DEVICE_TYPE="${DEVICE_TYPE:-pc}"
-
-# ── 设备上的 Wine 运行时根目录 (均由 rawfile zip 解压) ──
+# ── 设备上的 Wine 运行时根目录 (由 rawfile zip 解压) ──
 WINE_DEVICE_ROOT="/data/storage/el2/base/files/wine"
 
 # 源码路径

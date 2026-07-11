@@ -117,16 +117,6 @@ for_each_arch_assemble() {
     fi
 }
 
-# Pad assemble (pad / pad-hap 共用)
-for_each_arch_assemble_pad() {
-    if [ "$arch" = "all" ]; then
-        NATIVE_ARCH=arm64-v8a bash "$SCRIPTS/assemble.sh"
-        NATIVE_ARCH=x86_64 bash "$SCRIPTS/assemble.sh"
-    else
-        NATIVE_ARCH="$NATIVE_ARCH" bash "$SCRIPTS/assemble.sh"
-    fi
-}
-
 # ── 命令处理 ──
 case "$cmd" in
     deps)
@@ -166,25 +156,22 @@ case "$cmd" in
         ;;
     pad)
         # Pad 构建 (fork-only, 无 execve)
-        export DEVICE_TYPE=pad
         run_deps
         run_wine
         [ "$NATIVE_ARCH" = "arm64-v8a" ] && run_box64 || true
         for_each_arch run_native
-        for_each_arch_assemble_pad
+        for_each_arch_assemble
         NATIVE_ARCH="$NATIVE_ARCH" bash "$SCRIPTS/package.sh" hap
         log "Pad HAP 构建完成"
         ;;
     pad-hap)
         # Pad 仅 HAP (只改 ArkTS/napi_init.cpp 时用，跳过 Wine 重编译)
-        export DEVICE_TYPE=pad
         for_each_arch run_native
-        for_each_arch_assemble_pad
+        for_each_arch_assemble
         NATIVE_ARCH="$NATIVE_ARCH" bash "$SCRIPTS/package.sh" hap
         log "Pad HAP 构建完成"
         ;;
     pad-deploy)
-        export DEVICE_TYPE=pad
         bash "$SCRIPTS/package.sh" deploy "$device_ip"
         ;;
     *)

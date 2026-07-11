@@ -116,18 +116,12 @@ build_ohos_unix() {
 build_wineserver() {
     log "--- 编译 wineserver (含 OHOS 修复) ---"
     local out="$BUILD_DIR/wine_server"
-    # Pad: 数据文件在应用 sandbox 内, 路径不同
-    local bindir datadir
-    if [ "$DEVICE_TYPE" = "pad" ]; then
-        bindir="$WINE_DEVICE_ROOT/bin"
-        datadir="$WINE_DEVICE_ROOT/share"
-    else
-        bindir="/opt/winehua/bin"
-        datadir="/opt/winehua/share"
-    fi
+    # 数据文件在应用 sandbox 内
+    local bindir="$WINE_DEVICE_ROOT/bin"
+    local datadir="$WINE_DEVICE_ROOT/share"
     local wine_include="-I$WINE_SRC/include -I$WINE_SRC/include/wine -I$WINE_SRC/server -I$BUILD_DIR/wine-ohos/include"
-    # ARM64 (pad/pc): Box64 加载 x86_64 wineserver ELF，用 x86_64 目标编译
-    # x86_64 Pad: 系统 linker 直接加载 libwineserver.so (原生 .so)
+    # ARM64: Box64 加载 x86_64 wineserver ELF，用 x86_64 目标编译
+    # x86_64: 系统 linker 直接加载 libwineserver.so (原生 .so)
     local srv_target="$NATIVE_TARGET"
     if [ "$NATIVE_ARCH" = "arm64-v8a" ]; then
         srv_target="$TARGET"
@@ -139,9 +133,9 @@ build_wineserver() {
 
     mkdir -p "$out"
     local need_rebuild=0
-    # Pad: libwineserver.so (x86_64) 或 wineserver (ARM64 Box64)
+    # x86_64: libwineserver.so (dlopen), ARM64: wineserver (Box64 加载)
     local target_binary="$out/wineserver"
-    if [ "$DEVICE_TYPE" = "pad" ] && [ "$NATIVE_ARCH" != "arm64-v8a" ]; then
+    if [ "$NATIVE_ARCH" != "arm64-v8a" ]; then
         target_binary="$out/libwineserver.so"
     fi
     if [ ! -f "$target_binary" ]; then
@@ -152,7 +146,7 @@ build_wineserver() {
         done
     fi
     if [ $need_rebuild -eq 0 ]; then
-        # Pad (x86_64): 确保 libwineserver.so 已复制到 NATIVE_LIBS
+        # 确保 libwineserver.so 已复制到 NATIVE_LIBS
         if [ -f "$out/libwineserver.so" ] && [ ! -f "$NATIVE_LIBS/libwineserver.so" ]; then
             cp "$out/libwineserver.so" "$NATIVE_LIBS/"
         fi
@@ -165,24 +159,20 @@ build_wineserver() {
     # musl_compat.c 已在 WINE_SRC/server/ 中, 遍历编译时已打包
 
     if [ "$NATIVE_ARCH" = "arm64-v8a" ]; then
-        # ARM64 (pad/pc): 编译为 x86_64 PIE 可执行文件，Box64 加载
+        # ARM64: 编译为 x86_64 PIE 可执行文件，Box64 加载
         log "  wineserver → x86_64 ELF (Box64 loads, arm64)"
         $CLANG --target=$TARGET --sysroot=$SYSROOT -fuse-ld=lld -pie \
             -o "$out/wineserver" "$out"/*.o -lm
         log "wineserver: $out/wineserver"
-    elif [ "$DEVICE_TYPE" = "pad" ]; then
-        # x86_64 Pad: 编译为共享库 (fork+dlopen 替代 execve)
-        log "  wineserver → libwineserver.so (Pad $NATIVE_ARCH)"
+    else
+        # x86_64: 编译为共享库 (dlopen 加载)
+        log "  wineserver → libwineserver.so ($NATIVE_ARCH)"
         $CLANG --target=$NATIVE_TARGET --sysroot=$SYSROOT -fuse-ld=lld \
             -shared -Wl,-soname,libwineserver.so \
             -o "$out/libwineserver.so" "$out"/*.o -lm
         mkdir -p "$NATIVE_LIBS"
         cp "$out/libwineserver.so" "$NATIVE_LIBS/"
         log "  → $NATIVE_LIBS/libwineserver.so"
-    else
-        $CLANG --target=$NATIVE_TARGET --sysroot=$SYSROOT -fuse-ld=lld \
-            -o "$out/wineserver" "$out"/*.o -lm
-        log "wineserver: $out/wineserver"
     fi
 }
 
