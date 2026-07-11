@@ -216,9 +216,9 @@ hap: assemble
 clean:
 	@echo "=== clean ==="
 	rm -rf $(BUILD_DIR)
-	rm -f $(ROOT)/entry/libs/arm64-v8a/*.so
+	rm -f $(ROOT)/entry/libs/arm64-v8a/*.so*
 	rm -f $(ROOT)/entry/libs/arm64-v8a/virgl_test_server
-	rm -f $(ROOT)/entry/libs/x86_64/*.so
+	rm -f $(ROOT)/entry/libs/x86_64/*.so*
 	rm -f $(ROOT)/entry/libs/x86_64/virgl_test_server
 	rm -rf $(ROOT)/entry/build
 	rm -f $(ROOT)/entry/src/main/resources/rawfile/wine-data.zip

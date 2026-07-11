@@ -53,7 +53,7 @@ apt-get update && apt-get install -y \
   pkgconf zip git file python3 python3-pip         `# 工具` \
   libexpat1-dev libxml2-dev libffi-dev             `# wayland-scanner 原生构建 (wayland 依赖 libffi)` \
   libfreetype-dev                                  `# sfnt2fon 字体工具 (Wine 字体 .fon 生成)` \
-  gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64                             `# Wine OHOS 交叉 PE 编译` \
+  gcc-mingw-w64-i686 g++-mingw-w64-i686 gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64                             `# Wine OHOS 交叉 PE 编译` \
   default-jdk                                      `# HAP 签名 (java)` \
  && apt-get clean && rm -rf /var/lib/apt/lists/*
 ```
@@ -183,5 +183,5 @@ make clean
 
 - `scripts/env.sh` 自动检测 `DEVICE_TYPE` 并设置 `PAD_CFLAGS=-DPAD_MODE`、交叉编译工具链等
 - Wine native 构建只编译 host 工具（winegcc 等），不编译 DLL，通过 autoconf cache variables 绕过所有库检测
-- `gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64` 是 OHOS 交叉构建需要的 PE 编译器后端，不是 native 构建用的
+- `gcc-mingw-w64-i686 g++-mingw-w64-i686 gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64` 是 OHOS 交叉构建需要的 PE 编译器后端，不是 native 构建用的
 - Ohos SDK 中的 BiSheng 工具链（`ld.lld`）是闭源预编译的，依赖旧版系统库
