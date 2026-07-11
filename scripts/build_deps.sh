@@ -53,6 +53,30 @@ fi
 # Native compositor 依赖 (wayland-server for HAP) 在 build.sh 中按架构单独调用:
 #   bash scripts/build_native.sh
 
+# Wine Mono (.NET 运行时) — 预编译 MSI, 默认跳过
+# 设置 BUILD_WINE_MONO=1 启用 (增加 ~80MB)
+if [ "${BUILD_WINE_MONO:-0}" = "1" ]; then
+    WINE_MONO_VER="10.0.0"
+    WINE_MONO_MSI="wine-mono-${WINE_MONO_VER}-x86.msi"
+    WINE_MONO_URL="https://dl.winehq.org/wine/wine-mono/${WINE_MONO_VER}/${WINE_MONO_MSI}"
+    WINE_MONO_DIR="$BUILD_DIR/wine-ohos/share/wine/mono"
+    WINE_MONO_PATH="$WINE_MONO_DIR/$WINE_MONO_MSI"
+    if [ ! -f "$WINE_MONO_PATH" ]; then
+        log "=== 下载 Wine Mono ${WINE_MONO_VER} ==="
+        mkdir -p "$WINE_MONO_DIR"
+        if command -v curl >/dev/null 2>&1; then
+            curl -L -o "$WINE_MONO_PATH" "$WINE_MONO_URL" || warn "Wine Mono 下载失败, .NET 应用将无法运行"
+        elif command -v wget >/dev/null 2>&1; then
+            wget -O "$WINE_MONO_PATH" "$WINE_MONO_URL" || warn "Wine Mono 下载失败"
+        else
+            warn "无 curl/wget, 跳过 Wine Mono"
+        fi
+        [ -f "$WINE_MONO_PATH" ] && log "Wine Mono → $WINE_MONO_PATH"
+    fi
+else
+    log "Wine Mono: SKIP (设置 BUILD_WINE_MONO=1 启用 .NET 运行时)"
+fi
+
 log "模拟层依赖就绪: $SYSROOT_EXT"
 echo ""
 find "$SYSROOT_EXT" -type f | sort

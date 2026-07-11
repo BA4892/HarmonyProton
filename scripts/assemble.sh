@@ -18,6 +18,7 @@ assemble_pad() {
     mkdir -p "$wine_data/share/wine/nls"
     mkdir -p "$wine_data/share/wine/fonts"
     mkdir -p "$wine_data/share/wine/winmd"
+    mkdir -p "$wine_data/share/wine/mono"
     mkdir -p "$wine_data/share/X11"
 
     # -- 1. 原生 .so → libs/$NATIVE_ARCH/ (由各 build 脚本完成) --
@@ -240,6 +241,11 @@ assemble_pad() {
     cp "$BUILD_DIR/wine-ohos/nls/"*.nls "$wine_data/share/wine/nls/"
     # winmd
     cp "$BUILD_DIR/wine-ohos/include/"*.winmd "$wine_data/share/wine/winmd/"
+    # Wine Mono (.NET 运行时)
+    if ls "$BUILD_DIR/wine-ohos/share/wine/mono/"*.msi >/dev/null 2>&1; then
+        cp "$BUILD_DIR/wine-ohos/share/wine/mono/"*.msi "$wine_data/share/wine/mono/"
+        log "    wine-mono.msi → rawfile share/wine/mono/"
+    fi
     # wine.inf (含 OHOS font substitutes)
     cp "$BUILD_DIR/wine-ohos/loader/wine.inf" "$wine_data/share/wine/"
     sed -i '/^\[MCI\]$/i\
