@@ -588,13 +588,35 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                                    contentH >= self->outputH_ * 8 / 10);
 
                 if (isExplorer && isFullSize) {
-                    if (rootId == 0) {
-                        OH_LOG_INFO(LOG_APP, "[MW] desktop root: #%{public}u appId=explorer",
-                                    sd->toplevelId);
-                        PluginManager::GetInstance()->MoveRendererToToplevel(0, sd->toplevelId);
-                        self->SetDesktopRootToplevelId(sd->toplevelId);
-                        self->FireToplevelEvent(sd->toplevelId, "desktop_root", "{}");
-                        rootId = sd->toplevelId;
+                    if (!self->desktopRootRecognitionEnabled_) {
+                        if (!sd->title.empty()) {
+                            self->pendingDesktopRootToplevelId_ = sd->toplevelId;
+                            self->backgroundLayers_.erase(sd->toplevelId);
+                            OH_LOG_INFO(LOG_APP,
+                                        "[MW] full-size explorer #%{public}u pending as desktop root while recognition is disabled title=%{public}s",
+                                        sd->toplevelId, sd->title.c_str());
+                        } else {
+                            self->backgroundLayers_.insert(sd->toplevelId);
+                            OH_LOG_INFO(LOG_APP,
+                                        "[MW] full-size explorer #%{public}u ignored while desktop root recognition is disabled (no title)",
+                                        sd->toplevelId);
+                        }
+                    } else if (rootId == 0) {
+                        if (self->pendingDesktopRootToplevelId_ > 0 &&
+                            self->pendingDesktopRootToplevelId_ != sd->toplevelId) {
+                            self->backgroundLayers_.insert(sd->toplevelId);
+                            OH_LOG_INFO(LOG_APP,
+                                        "[MW] full-size explorer #%{public}u -> background, pending root #%{public}u exists",
+                                        sd->toplevelId, self->pendingDesktopRootToplevelId_);
+                        } else {
+                            OH_LOG_INFO(LOG_APP, "[MW] desktop root: #%{public}u appId=explorer",
+                                        sd->toplevelId);
+                            PluginManager::GetInstance()->MoveRendererToToplevel(0, sd->toplevelId);
+                            self->SetDesktopRootToplevelId(sd->toplevelId);
+                            self->pendingDesktopRootToplevelId_ = 0;
+                            self->FireToplevelEvent(sd->toplevelId, "desktop_root", "{}");
+                            rootId = sd->toplevelId;
+                        }
                     } else if (!sd->title.empty()) {
                         wl_resource* oldSurf = self->GetSurfaceForToplevel(rootId);
                         auto* oldSd = oldSurf ? static_cast<SurfaceData*>(wl_resource_get_user_data(oldSurf)) : nullptr;
@@ -985,6 +1007,40 @@ bool WaylandServer::ProcessMoveGrabMotion(wl_fixed_t wx, wl_fixed_t wy) {
 void WaylandServer::FireToplevelEvent(uint32_t id, const char* event, const char* jsonData) {
     OH_LOG_INFO(LOG_APP, "[MW] FireToplevel id=%{public}u event=%{public}s data=%{public}s", id, event, jsonData);
     if (toplevelCb_) toplevelCb_(id, event, jsonData);
+}
+
+void WaylandServer::SetDesktopRootRecognitionEnabled(bool enabled) {
+    std::lock_guard<std::mutex> lk(toplevelMutex_);
+    desktopRootRecognitionEnabled_ = enabled;
+    OH_LOG_INFO(LOG_APP, "[MW] desktop root recognition %{public}s",
+                enabled ? "enabled" : "disabled");
+}
+
+void WaylandServer::PromotePendingDesktopRoot() {
+    uint32_t id = 0;
+    {
+        std::lock_guard<std::mutex> lk(toplevelMutex_);
+        id = pendingDesktopRootToplevelId_;
+        if (id == 0 || toplevelPixels_.find(id) == toplevelPixels_.end()) {
+            if (id != 0) {
+                OH_LOG_WARN(LOG_APP, "[MW] pending desktop root #%{public}u has no pixels, skip", id);
+                pendingDesktopRootToplevelId_ = 0;
+            }
+            return;
+        }
+        if (desktopRootToplevelId_ == id) {
+            pendingDesktopRootToplevelId_ = 0;
+            return;
+        }
+        if (desktopRootToplevelId_ > 0)
+            backgroundLayers_.insert(desktopRootToplevelId_);
+        backgroundLayers_.erase(id);
+        PluginManager::GetInstance()->MoveRendererToToplevel(desktopRootToplevelId_, id);
+        desktopRootToplevelId_ = id;
+        pendingDesktopRootToplevelId_ = 0;
+    }
+    FireToplevelEvent(id, "desktop_root", "{}");
+    OH_LOG_INFO(LOG_APP, "[MW] promoted pending desktop root #%{public}u", id);
 }
 
 void WaylandServer::RegisterToplevelResource(uint32_t toplevelId, wl_resource* tl) {

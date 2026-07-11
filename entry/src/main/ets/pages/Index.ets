@@ -16,6 +16,65 @@ const BOX64 = `${WINE_BIN}/box64`;
 
 const DRIVE_C = '/data/storage/el2/base/files/.wine/drive_c';
 
+function pathExists(path: string): boolean {
+  try {
+    fs.accessSync(path);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function readTextIfExists(path: string): string {
+  try {
+    return fs.readTextSync(path, { encoding: 'utf-8' }).trim();
+  } catch (_) {
+    return '';
+  }
+}
+
+function writeTextFile(path: string, text: string): void {
+  const file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+  try {
+    fs.writeSync(file.fd, text);
+  } finally {
+    fs.closeSync(file);
+  }
+}
+
+function ensureDirectory(path: string): boolean {
+  try {
+    if (!pathExists(path)) {
+      fs.mkdirSync(path, true);
+    }
+    return pathExists(path);
+  } catch (e) {
+    hilog.warn(DOMAIN, 'wine', 'mkdir failed path=%{public}s err=%{public}s', path, JSON.stringify(e));
+    return false;
+  }
+}
+
+function removePathRecursive(path: string): void {
+  let st: fs.Stat;
+  try {
+    st = fs.lstatSync(path);
+  } catch (e) {
+    hilog.warn(DOMAIN, 'wine', 'removePath: skip missing path=%{public}s err=%{public}s', path, JSON.stringify(e));
+    return;
+  }
+
+  if (st.isSymbolicLink() || !st.isDirectory()) {
+    fs.unlinkSync(path);
+    return;
+  }
+
+  const names = fs.listFileSync(path);
+  for (const name of names) {
+    removePathRecursive(`${path}/${name}`);
+  }
+  fs.rmdirSync(path);
+}
+
 interface ProcessInfo {
   pid: number;
   name: string;
@@ -33,9 +92,14 @@ struct Index {
   @State entries: string[] = [];
   @State dirStack: string[] = [];
   @State processList: ProcessInfo[] = [];
+  @State initOverlayVisible: boolean = false;
+  @State initOverlayText: string = '';
+  private hasRawfileWineData: boolean = false;
   _wow64Done: boolean = false;
 
   aboutToAppear(): void {
+    this.hasRawfileWineData = this.detectRawfileWineData();
+
     testNapi.setStateCallback((s: string) => {
       hilog.info(DOMAIN, 'wine', 'state: %{public}s', s);
       this.state = s;
@@ -45,9 +109,9 @@ struct Index {
       const stateMsg = colonIdx >= 0 ? s.substring(colonIdx + 1) : s;
 
       if (stateMsg == 'wineserver-starting' || stateMsg == 'wineboot-starting') {
-        this.statusText = 'Wine 正在初始化...';
+        this.setInitStatus('Wine 正在初始化...', true);
       } else if (stateMsg == 'wine-ready') {
-        this.statusText = '已就绪';
+        this.setInitStatus('已就绪', false);
         // wineboot 可能还在后台初始化 prefix，轮询等待 drive_c 就绪
         this.waitForPrefix();
         // 一次性: 填充 syswow64/ (OHOS 沙箱不支持 symlink, wineboot Wow64Install 失败)
@@ -56,22 +120,42 @@ struct Index {
           setTimeout(() => { this.setupWow64(); }, 3000);
         }
       } else if (stateMsg == 'wine-running') {
-        this.statusText = '运行中';
+        this.setInitStatus('运行中', false);
         this.refreshProcessList();
       } else if (stateMsg == 'exited') {
         this.refreshProcessList();
         const running = this.processList.filter(p => p.state === 'running');
         if (running.length === 0) {
-          this.statusText = '已就绪';
+          this.setInitStatus('已就绪', false);
         }
       } else if (stateMsg == 'wine-failed') {
-        this.statusText = '启动失败';
+        this.setInitStatus('启动失败', false);
         this.refreshProcessList();
       }
     });
     this.refreshPrefix();
     // 下一帧自动初始化 (避免阻塞 UI 首次渲染)
     setTimeout(() => this.doInit(), 0);
+  }
+
+  private detectRawfileWineData(): boolean {
+    const ctx = getContext(this);
+    const rm = ctx.resourceManager;
+    try {
+      const rawFd = rm.getRawFdSync('wine-data.zip');
+      hilog.info(DOMAIN, 'wine', 'rawfile: wine-data.zip exists len=%{public}d', rawFd.length);
+      rm.closeRawFdSync('wine-data.zip');
+      return true;
+    } catch (_) {
+      hilog.info(DOMAIN, 'wine', 'rawfile: wine-data.zip not packaged');
+      return false;
+    }
+  }
+
+  private setInitStatus(text: string, visible: boolean): void {
+    this.statusText = text;
+    this.initOverlayText = text;
+    this.initOverlayVisible = visible;
   }
 
   // Pad: 从 rawfile 取出 wine-data.zip → zlib.decompressFile 解压到 files/wine/
@@ -87,13 +171,12 @@ struct Index {
     } catch (_) {}
     hilog.info(DOMAIN, 'wine', 'extract: marker not found, start extracting');
 
-    try {
-      const ctx = getContext(this);
-      const rm = ctx.resourceManager;
+    const ctx = getContext(this);
+    const rm = ctx.resourceManager;
+    const rawFd = rm.getRawFdSync('wine-data.zip');
 
+    try {
       // 流式拷贝: getRawFdSync 获取 fd → 分块读取 → 写入临时文件
-      hilog.info(DOMAIN, 'wine', 'extract: getRawFdSync wine-data.zip...');
-      const rawFd = rm.getRawFdSync('wine-data.zip');
       hilog.info(DOMAIN, 'wine', 'extract: rawFd fd=%{public}d offset=%{public}d length=%{public}d',
         rawFd.fd, rawFd.offset, rawFd.length);
 
@@ -116,7 +199,6 @@ struct Index {
         totalWritten += n;
       }
       fs.closeSync(dst);
-      rm.closeRawFdSync('wine-data.zip');
       hilog.info(DOMAIN, 'wine', 'extract: stream copy ok, totalWritten=%{public}d', totalWritten);
 
       // 确保目标目录存在
@@ -135,13 +217,14 @@ struct Index {
     } catch (e) {
       hilog.error(DOMAIN, 'wine', 'extract FAIL: %{public}s', JSON.stringify(e));
       this.statusText = '解压失败';
+    } finally {
+      rm.closeRawFdSync('wine-data.zip');
     }
   }
 
   private refreshPrefix = (): void => {
     try {
-      let names = fs.listFileSync(DRIVE_C);
-      this.prefixReady = names.length > 0;
+      this.prefixReady = testNapi.checkWinePrefix();
       if (this.prefixReady) {
         this.curDir = DRIVE_C;
         this.dirStack = [];
@@ -155,19 +238,19 @@ struct Index {
     }
   }
 
-  // wineboot 后台异步初始化 prefix，轮询直到 drive_c 有内容
+  // wineboot 后台异步初始化 prefix，轮询直到 registry 和核心目录完整
   private waitForPrefix = async (): Promise<void> => {
     for (let i = 0; i < 90; i++) {
       try {
-        let names = fs.listFileSync(DRIVE_C);
-        if (names.length > 0) {
+        if (testNapi.checkWinePrefix()) {
           this.prefixReady = true;
+          this.initOverlayVisible = false;
           this.curDir = DRIVE_C;
           this.dirStack = [];
           this.listDir(DRIVE_C);
           return;
         }
-      } catch (e) { /* drive_c 还没出现 */ }
+      } catch (e) { /* prefix 还没初始化完成 */ }
       await new Promise<void>(r => setTimeout(r, 1000));
     }
     // 超时，仍然尝试刷新一次
@@ -276,33 +359,33 @@ struct Index {
     let needExtract = true;
     try { needExtract = !fs.accessSync(`${WINE_ROOT}/share/wine/wine.inf`); } catch (_) {}
     if (needExtract) {
-      this.statusText = '解压数据...';
+      this.setInitStatus('解压数据...', true);
       hilog.info(DOMAIN, 'wine', 'auto-init: extracting wine data...');
       await this.extractWineData();
     }
     hilog.info(DOMAIN, 'wine', 'auto-init: starting Wine...');
-    this.statusText = '启动服务...';
+    this.setInitStatus('启动服务...', true);
     const ok: boolean = testNapi.startServer(SOCK);
     if (!ok) {
-      this.statusText = '启动服务失败';
+      this.setInitStatus('启动服务失败', false);
       return;
     }
     testNapi.launchClient(BOX64, [], SOCK, `${BIN_DIR}:${WINE_LIB}`, zHome);
   }
 
   private doReset = (): void => {
-    this.statusText = '正在清空...';
+    this.setInitStatus('正在清空...', true);
     try {
       testNapi.resetWinePrefix();
       this.state = 'idle';
       this.prefixReady = false;
       this.processList = [];
       this.entries = [];
-      this.statusText = '已清空';
+      this.setInitStatus('已清空', false);
       setTimeout(() => this.doInit(), 500);
     } catch (e) {
       hilog.error(DOMAIN, 'wine', 'reset error: %{public}s', JSON.stringify(e));
-      this.statusText = '清空失败';
+      this.setInitStatus('清空失败', false);
     }
   }
 
@@ -318,6 +401,7 @@ struct Index {
   }
 
   build() {
+    Stack() {
     Row() {
       // ============================================================
       //  侧边栏
@@ -501,6 +585,33 @@ struct Index {
       }
       .layoutWeight(1).height('100%')
       .backgroundColor('#111')
+    }
+    .width('100%').height('100%')
+    if (this.initOverlayVisible && !this.prefixReady) {
+      Column() {
+        LoadingProgress()
+          .width(42)
+          .height(42)
+          .color('#7db8ff')
+          .margin({ bottom: 18 })
+        Text('正在准备 Wine')
+          .fontSize(20)
+          .fontWeight(FontWeight.Medium)
+          .fontColor('#f4f7fb')
+          .margin({ bottom: 8 })
+        Text(this.initOverlayText)
+          .fontSize(15)
+          .fontColor('#aeb8c6')
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .width(360)
+      .padding({ left: 28, right: 28, top: 26, bottom: 26 })
+      .backgroundColor('#20242b')
+      .borderRadius(8)
+      .alignItems(HorizontalAlign.Center)
+      .shadow({ radius: 18, color: '#66000000', offsetX: 0, offsetY: 8 })
+    }
     }
     .width('100%').height('100%')
   }

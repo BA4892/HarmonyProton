@@ -81,6 +81,8 @@ public:
     bool IsDesktopMode() const { return desktopMode_; }
     void SetDesktopRootToplevelId(uint32_t id) { desktopRootToplevelId_ = id; }
     uint32_t GetDesktopRootToplevelId() const { return desktopRootToplevelId_; }
+    void SetDesktopRootRecognitionEnabled(bool enabled);
+    void PromotePendingDesktopRoot();
 
     // -- wayland 协议实现 --
     static void compositor_bind(wl_client*, void*, uint32_t, uint32_t);
@@ -185,6 +187,8 @@ private:
     // Desktop 合成模式
     bool desktopMode_ = false;
     uint32_t desktopRootToplevelId_ = 0;
+    uint32_t pendingDesktopRootToplevelId_ = 0;
+    bool desktopRootRecognitionEnabled_ = true;
     // 交互式窗口移动 (xdg_toplevel.move)
     uint32_t moveGrabToplevelId_ = 0;
     uint32_t moveGrabSerial_ = 0;

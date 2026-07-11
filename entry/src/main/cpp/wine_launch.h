@@ -17,3 +17,4 @@ struct LaunchParams {
 };
 
 void LaunchThreadFunc(LaunchParams* p);
+bool IsWinePrefixInitialized();
