@@ -163,18 +163,13 @@ assemble_pad() {
     fi
 
     # -- 2. PE DLL + 数据文件 → rawfile (两种架构共用) --
-    # x86_64-windows/
-    for dll in "$BUILD_DIR/wine-ohos/dlls/"*/x86_64-windows/*.dll; do
-        cp "$dll" "$wine_data/bin/x86_64-windows/"
-    done
-    for drv in "$BUILD_DIR/wine-ohos/dlls/"*/x86_64-windows/*.drv; do
-        cp "$drv" "$wine_data/bin/x86_64-windows/"
-    done
-    for exe in "$BUILD_DIR/wine-ohos/dlls/"*/x86_64-windows/*.exe; do
-        cp "$exe" "$wine_data/bin/x86_64-windows/"
-    done
-    for sys in "$BUILD_DIR/wine-ohos/dlls/"*/x86_64-windows/*.sys; do
-        cp "$sys" "$wine_data/bin/x86_64-windows/"
+    # x86_64-windows/ — 复制所有运行时 PE 文件
+    # 注意: .cpl 不打包, wineboot 初始化时 mscoree.dll 触发 appwiz.cpl
+    # → install_mono → DialogBoxW 模态框在 OHOS 无头环境永久阻塞
+    for ext in dll drv exe sys acm ax ocx tlb; do
+        for f in "$BUILD_DIR/wine-ohos/dlls/"*/x86_64-windows/*.$ext; do
+            [ -f "$f" ] && cp "$f" "$wine_data/bin/x86_64-windows/"
+        done
     done
     log "  x86_64-windows → $(ls "$wine_data/bin/x86_64-windows" | wc -l) files"
 
@@ -202,16 +197,12 @@ assemble_pad() {
     # 完整列表在 build/wine-i386-pe/dlls/*/i386-windows/*.dll.
     # 日后需要某个缺失的 DLL 时, 在此处加名即可.
     if [ -d "$BUILD_DIR/wine-i386-pe" ]; then
-        # 32-bit PE DLL for WoW64: copy ALL dlls for now, trim later
+        # 32-bit PE DLL for WoW64: 复制所有运行时 PE 文件
         mkdir -p "$wine_data/bin/i386-windows"
-        for dll in "$BUILD_DIR/wine-i386-pe/dlls/"*/i386-windows/*.dll; do
-            cp "$dll" "$wine_data/bin/i386-windows/"
-        done
-        for drv in "$BUILD_DIR/wine-i386-pe/dlls/"*/i386-windows/*.drv; do
-            cp "$drv" "$wine_data/bin/i386-windows/"
-        done
-        for sys in "$BUILD_DIR/wine-i386-pe/dlls/"*/i386-windows/*.sys; do
-            cp "$sys" "$wine_data/bin/i386-windows/"
+        for ext in dll drv exe sys acm ax ocx tlb; do
+            for f in "$BUILD_DIR/wine-i386-pe/dlls/"*/i386-windows/*.$ext; do
+                [ -f "$f" ] && cp "$f" "$wine_data/bin/i386-windows/"
+            done
         done
         log "  i386-windows → $(ls "$wine_data/bin/i386-windows" | wc -l) files (ALL)"
 
