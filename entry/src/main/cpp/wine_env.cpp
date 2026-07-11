@@ -37,6 +37,7 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
                                       const std::string& homeDir) {
     std::string shareDir = binDir + "/../share";
     std::string xkbDir = shareDir + "/X11/xkb";
+    std::string midiSoundfontPath = binDir + "/../audio/winehua-gm.sf2";
     std::string runtimeLibPath = binDir + ":" + binDir + "/x86_64-unix:" + binDir + "/../lib/x86_64";
     winehua::GraphicsBackendState graphicsState = winehua::GraphicsBroker::GetInstance().GetState();
     std::string guestReceiverLibDir;
@@ -65,6 +66,7 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
         "XKB_CONFIG_ROOT=" + xkbDir,
         "PATH=/usr/local/bin:/data/app/bin:/usr/bin:/vendor/bin:" + binDir + "/x86_64-windows:" + binDir + "/i386-windows:" + binDir,
         "TMPDIR=" WINE_TMPDIR,
+        "MIDI_SOUNDFONT_PATH=" + midiSoundfontPath,
     };
     AppendBox64PerfStrings(env);
 #ifdef __aarch64__

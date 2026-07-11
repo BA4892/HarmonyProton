@@ -119,7 +119,8 @@ void AudioBroker::Stop()
         stream->MarkClosed();
     }
     streams_.clear();
-    PublishSnapshotLocked();
+    PublishSnapshotsLocked();
+    StopCapturerLocked();
     StopRendererLocked();
     OH_LOG_INFO(LOG_APP, "[AudioBroker] stopped");
 }
@@ -169,7 +170,13 @@ void AudioBroker::CleanupClientStreams(uint32_t connectionId)
         }
     }
 
-    if (changed) PublishSnapshotLocked();
+    if (changed)
+    {
+        PublishSnapshotsLocked();
+        if (!HasStartedCaptureStreamLocked() && capturerRunning_ && capturer_)
+            OH_AudioCapturer_Stop(capturer_);
+        if (!HasStartedCaptureStreamLocked()) capturerRunning_ = false;
+    }
 }
 
 int32_t AudioBroker::OpenStream(uint32_t connectionId,
@@ -188,20 +195,34 @@ int32_t AudioBroker::OpenStream(uint32_t connectionId,
     std::memset(resp, 0, sizeof(*resp));
     *outRingFd = -1;
 
-    if (!running_ || !renderer_) return -EIO;
+    if (!running_) return -EIO;
     if (req.sample_rate != kAudioMixSampleRate || req.channels != kAudioMixChannels ||
         req.sample_format != WINEHUA_AUDIO_SAMPLE_S16LE)
         return -EINVAL;
+
+    const bool isCapture = (req.flags & WINEHUA_AUDIO_STREAM_FLAG_CAPTURE) != 0;
+    if (isCapture)
+    {
+        if (!EnsureCapturerLocked()) return -EIO;
+    }
+    else if (!renderer_)
+    {
+        return -EIO;
+    }
 
     format.sampleRate = kAudioMixSampleRate;
     format.channels = kAudioMixChannels;
     format.sampleFormat = WINEHUA_AUDIO_SAMPLE_S16LE;
     format.frameSize = kAudioMixFrameSize;
-    format.preferredPeriodFrames = rendererCallbackFrames_ ? rendererCallbackFrames_ : kAudioTargetCallbackFrames;
+    format.preferredPeriodFrames = isCapture
+        ? (capturerCallbackFrames_ ? capturerCallbackFrames_ : kAudioTargetCallbackFrames)
+        : (rendererCallbackFrames_ ? rendererCallbackFrames_ : kAudioTargetCallbackFrames);
 
     streamId = nextStreamId_++;
     stream = std::make_shared<AudioStream>(
-        streamId, connectionId, clientPid, processName, format, ComputeRingCapacityFrames(format.preferredPeriodFrames));
+        streamId, connectionId, clientPid, processName, format,
+        ComputeRingCapacityFrames(format.preferredPeriodFrames),
+        isCapture ? AudioStreamDirection::Capture : AudioStreamDirection::Render);
     if (!stream->Create())
     {
         OH_LOG_ERROR(LOG_APP, "[AudioBroker] failed to create ring for stream=%{public}u", streamId);
@@ -225,7 +246,7 @@ int32_t AudioBroker::OpenStream(uint32_t connectionId,
                 resp->ring_capacity_frames, resp->preferred_period_frames);
 
     streams_.emplace(streamId, stream);
-    PublishSnapshotLocked();
+    PublishSnapshotsLocked();
     return 0;
 }
 
@@ -238,6 +259,21 @@ int32_t AudioBroker::StartStream(uint32_t connectionId, uint32_t streamId)
 
     if (ownerStatus != 0) return ownerStatus;
     it->second->SetStarted(true);
+
+    if (it->second->direction() == AudioStreamDirection::Capture && capturer_)
+    {
+        if (!capturerRunning_)
+        {
+            if (OH_AudioCapturer_Start(capturer_) != AUDIOSTREAM_SUCCESS)
+            {
+                it->second->SetStarted(false);
+                OH_LOG_ERROR(LOG_APP, "[AudioBroker] failed to start capturer for stream id=%{public}u", streamId);
+                return -EIO;
+            }
+            capturerRunning_ = true;
+        }
+    }
+
     OH_LOG_INFO(LOG_APP, "[AudioBroker] start stream id=%{public}u", streamId);
     return 0;
 }
@@ -251,6 +287,14 @@ int32_t AudioBroker::StopStream(uint32_t connectionId, uint32_t streamId)
 
     if (ownerStatus != 0) return ownerStatus;
     it->second->SetStarted(false);
+
+    if (it->second->direction() == AudioStreamDirection::Capture && capturerRunning_ && capturer_ &&
+        !HasStartedCaptureStreamLocked())
+    {
+        OH_AudioCapturer_Stop(capturer_);
+        capturerRunning_ = false;
+    }
+
     OH_LOG_INFO(LOG_APP, "[AudioBroker] stop stream id=%{public}u", streamId);
     return 0;
 }
@@ -264,6 +308,8 @@ int32_t AudioBroker::ResetStream(uint32_t connectionId, uint32_t streamId)
 
     if (ownerStatus != 0) return ownerStatus;
     it->second->Reset();
+    if (it->second->direction() == AudioStreamDirection::Capture && capturerRunning_ && capturer_)
+        OH_AudioCapturer_Flush(capturer_);
     return 0;
 }
 
@@ -276,9 +322,15 @@ int32_t AudioBroker::CloseStream(uint32_t connectionId, uint32_t streamId)
 
     if (ownerStatus != 0) return ownerStatus;
     LogStreamStats("close", it->second);
+    const bool wasCapture = it->second->direction() == AudioStreamDirection::Capture;
     it->second->MarkClosed();
     streams_.erase(it);
-    PublishSnapshotLocked();
+    PublishSnapshotsLocked();
+    if (wasCapture && capturerRunning_ && capturer_ && !HasStartedCaptureStreamLocked())
+    {
+        OH_AudioCapturer_Stop(capturer_);
+        capturerRunning_ = false;
+    }
     return 0;
 }
 
@@ -373,6 +425,66 @@ bool AudioBroker::EnsureRendererLocked()
     return true;
 }
 
+bool AudioBroker::EnsureCapturerLocked()
+{
+    OH_AudioStreamBuilder* builder = nullptr;
+    OH_AudioStream_Result result = AUDIOSTREAM_SUCCESS;
+    int32_t callbackFrames = 0;
+
+    if (capturer_) return true;
+
+    result = OH_AudioStreamBuilder_Create(&builder, AUDIOSTREAM_TYPE_CAPTURER);
+    if (result != AUDIOSTREAM_SUCCESS || !builder)
+    {
+        OH_LOG_ERROR(LOG_APP, "[AudioBroker] capturer builder create failed result=%{public}d",
+                     static_cast<int>(result));
+        return false;
+    }
+
+    result = OH_AudioStreamBuilder_SetSamplingRate(builder, kAudioMixSampleRate);
+    if (result == AUDIOSTREAM_SUCCESS) result = OH_AudioStreamBuilder_SetChannelCount(builder, kAudioMixChannels);
+    if (result == AUDIOSTREAM_SUCCESS) result = OH_AudioStreamBuilder_SetSampleFormat(builder, AUDIOSTREAM_SAMPLE_S16LE);
+    if (result == AUDIOSTREAM_SUCCESS)
+        result = OH_AudioStreamBuilder_SetEncodingType(builder, AUDIOSTREAM_ENCODING_TYPE_RAW);
+    if (result == AUDIOSTREAM_SUCCESS)
+        result = OH_AudioStreamBuilder_SetLatencyMode(builder, AUDIOSTREAM_LATENCY_MODE_NORMAL);
+    if (result == AUDIOSTREAM_SUCCESS)
+        result = OH_AudioStreamBuilder_SetCapturerInfo(builder, AUDIOSTREAM_SOURCE_TYPE_MIC);
+    if (result == AUDIOSTREAM_SUCCESS)
+        result = OH_AudioStreamBuilder_SetFrameSizeInCallback(builder, kAudioTargetCallbackFrames);
+    if (result == AUDIOSTREAM_SUCCESS)
+        result = OH_AudioStreamBuilder_SetCapturerReadDataCallback(builder, OnReadData, this);
+
+    if (result != AUDIOSTREAM_SUCCESS)
+    {
+        OH_LOG_ERROR(LOG_APP, "[AudioBroker] capturer builder configure failed result=%{public}d",
+                     static_cast<int>(result));
+        OH_AudioStreamBuilder_Destroy(builder);
+        return false;
+    }
+
+    result = OH_AudioStreamBuilder_GenerateCapturer(builder, &capturer_);
+    OH_AudioStreamBuilder_Destroy(builder);
+    if (result != AUDIOSTREAM_SUCCESS || !capturer_)
+    {
+        capturer_ = nullptr;
+        OH_LOG_ERROR(LOG_APP, "[AudioBroker] capturer generate failed result=%{public}d",
+                     static_cast<int>(result));
+        return false;
+    }
+
+    if (OH_AudioCapturer_GetFrameSizeInCallback(capturer_, &callbackFrames) == AUDIOSTREAM_SUCCESS &&
+        callbackFrames > 0)
+        capturerCallbackFrames_ = static_cast<uint32_t>(callbackFrames);
+    else
+        capturerCallbackFrames_ = kAudioTargetCallbackFrames;
+
+    capturerRunning_ = false;
+    OH_LOG_INFO(LOG_APP, "[AudioBroker] capturer ready rate=48000 ch=2 callbackFrames=%{public}u",
+                capturerCallbackFrames_);
+    return true;
+}
+
 void AudioBroker::StopRendererLocked()
 {
     if (!renderer_) return;
@@ -381,19 +493,47 @@ void AudioBroker::StopRendererLocked()
     renderer_ = nullptr;
 }
 
-void AudioBroker::PublishSnapshotLocked()
+void AudioBroker::StopCapturerLocked()
 {
-    auto snapshot = std::make_shared<StreamSnapshot>();
+    if (!capturer_) return;
+    if (capturerRunning_) OH_AudioCapturer_Stop(capturer_);
+    OH_AudioCapturer_Release(capturer_);
+    capturer_ = nullptr;
+    capturerRunning_ = false;
+    capturerCallbackFrames_ = 0;
+}
 
-    snapshot->reserve(streams_.size());
+bool AudioBroker::HasStartedCaptureStreamLocked() const
+{
     for (const auto& [streamId, stream] : streams_)
     {
-        if (stream && stream->state() != WINEHUA_AUDIO_STREAM_CLOSED)
-            snapshot->push_back(stream);
+        if (stream && stream->direction() == AudioStreamDirection::Capture && stream->started())
+            return true;
+    }
+    return false;
+}
+
+void AudioBroker::PublishSnapshotsLocked()
+{
+    auto renderSnapshot = std::make_shared<StreamSnapshot>();
+    auto captureSnapshot = std::make_shared<StreamSnapshot>();
+
+    renderSnapshot->reserve(streams_.size());
+    captureSnapshot->reserve(streams_.size());
+    for (const auto& [streamId, stream] : streams_)
+    {
+        if (!stream || stream->state() == WINEHUA_AUDIO_STREAM_CLOSED) continue;
+
+        if (stream->direction() == AudioStreamDirection::Capture)
+            captureSnapshot->push_back(stream);
+        else
+            renderSnapshot->push_back(stream);
     }
 
-    std::shared_ptr<const StreamSnapshot> constSnapshot = snapshot;
-    std::atomic_store_explicit(&renderSnapshot_, constSnapshot, std::memory_order_release);
+    std::shared_ptr<const StreamSnapshot> constRenderSnapshot = renderSnapshot;
+    std::shared_ptr<const StreamSnapshot> constCaptureSnapshot = captureSnapshot;
+    std::atomic_store_explicit(&renderSnapshot_, constRenderSnapshot, std::memory_order_release);
+    std::atomic_store_explicit(&captureSnapshot_, constCaptureSnapshot, std::memory_order_release);
 }
 
 void AudioBroker::MixStreamsS16(const std::shared_ptr<const StreamSnapshot>& snapshot, int16_t* dst, uint32_t frames)
@@ -410,7 +550,7 @@ void AudioBroker::MixStreamsS16(const std::shared_ptr<const StreamSnapshot>& sna
         size_t gotFrames;
         size_t gotSamples;
 
-        if (!stream || !stream->started()) continue;
+        if (!stream || stream->direction() != AudioStreamDirection::Render || !stream->started()) continue;
 
         gotFrames = stream->ReadFrames(mixScratch_.data(), frames);
         if (gotFrames < frames) stream->IncrementUnderrun();
@@ -430,6 +570,22 @@ void AudioBroker::MixStreamsS16(const std::shared_ptr<const StreamSnapshot>& sna
         if (mixed > 32767) mixed = 32767;
         if (mixed < -32768) mixed = -32768;
         dst[i] = static_cast<int16_t>(mixed);
+    }
+}
+
+void AudioBroker::DistributeCaptureFramesS16(const std::shared_ptr<const StreamSnapshot>& snapshot,
+                                             const int16_t* src, uint32_t frames)
+{
+    if (!snapshot || snapshot->empty() || !src || !frames) return;
+
+    for (const auto& stream : *snapshot)
+    {
+        size_t written;
+
+        if (!stream || stream->direction() != AudioStreamDirection::Capture || !stream->started()) continue;
+
+        written = stream->WriteFrames(src, frames);
+        if (written < frames) stream->IncrementOverflow();
     }
 }
 
@@ -454,6 +610,24 @@ OH_AudioData_Callback_Result AudioBroker::OnWriteData(OH_AudioRenderer* renderer
 
     broker->MixStreamsS16(snapshot, static_cast<int16_t*>(audioData), frames);
     return AUDIO_DATA_CALLBACK_RESULT_VALID;
+}
+
+void AudioBroker::OnReadData(OH_AudioCapturer* capturer,
+                             void* userData,
+                             void* audioData,
+                             int32_t audioDataSize)
+{
+    auto* broker = static_cast<AudioBroker*>(userData);
+    auto snapshot = broker ? std::atomic_load_explicit(&broker->captureSnapshot_, std::memory_order_acquire) : nullptr;
+    uint32_t frames;
+
+    (void)capturer;
+    if (!broker || !audioData || audioDataSize <= 0) return;
+
+    frames = static_cast<uint32_t>(audioDataSize / kAudioMixFrameSize);
+    if (!frames) return;
+
+    broker->DistributeCaptureFramesS16(snapshot, static_cast<const int16_t*>(audioData), frames);
 }
 
 } // namespace winehua

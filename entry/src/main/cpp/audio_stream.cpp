@@ -18,13 +18,15 @@ AudioStream::AudioStream(uint32_t streamId,
                          uint32_t ownerPid,
                          std::string processName,
                          const AudioStreamFormat& format,
-                         uint32_t ringCapacityFrames)
+                         uint32_t ringCapacityFrames,
+                         AudioStreamDirection direction)
     : streamId_(streamId),
       ownerConnectionId_(ownerConnectionId),
       ownerPid_(ownerPid),
       processName_(std::move(processName)),
       format_(format),
-      ringCapacityFrames_(ringCapacityFrames)
+      ringCapacityFrames_(ringCapacityFrames),
+      direction_(direction)
 {
 }
 
@@ -75,6 +77,12 @@ size_t AudioStream::ReadFrames(void* dst, size_t frames)
     readFrames = winehua_audio_ring_read_frames(ring_, dst, frames);
     totalFramesRead_.fetch_add(static_cast<uint64_t>(readFrames), std::memory_order_relaxed);
     return readFrames;
+}
+
+size_t AudioStream::WriteFrames(const void* src, size_t frames)
+{
+    if (!ring_) return 0;
+    return winehua_audio_ring_write_frames(ring_, src, frames);
 }
 
 void AudioStream::Reset()

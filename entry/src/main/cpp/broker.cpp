@@ -13,6 +13,7 @@
 #include "broker.h"
 #include "wait_utils.h"
 #include "wine_constants.h"
+#include "audio_broker.h"
 
 // 由 LaunchPadMode 在启动 Broker 前设置
 std::string gBrokerHomeDir;
@@ -222,6 +223,16 @@ static void HandleRequest(int conn_fd)
 
     NativeChildProcess_FdList fdList = {};
     fdList.head = (nNodes > 0) ? &nodes[0] : nullptr;
+
+    // 音频 bootstrap fd (仅音频支持进程需要)
+    int audioBootstrapFd = winehua::AudioBroker::GetInstance().CreateBootstrapHandle();
+    if (audioBootstrapFd >= 0 && nNodes < kMaxFds) {
+        nodes[nNodes].fdName = const_cast<char*>("wine_audio_bootstrap");
+        nodes[nNodes].fd = audioBootstrapFd;
+        nodes[nNodes].next = nullptr;
+        if (nNodes > 0) nodes[nNodes - 1].next = &nodes[nNodes];
+        nNodes++;
+    }
 
     NativeChildProcess_Args args = {};
     args.entryParams = entryParamsCopy;

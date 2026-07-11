@@ -20,6 +20,12 @@ struct AudioStreamFormat
     uint32_t preferredPeriodFrames = 0;
 };
 
+enum class AudioStreamDirection
+{
+    Render,
+    Capture,
+};
+
 class AudioStream
 {
 public:
@@ -28,12 +34,14 @@ public:
                 uint32_t ownerPid,
                 std::string processName,
                 const AudioStreamFormat& format,
-                uint32_t ringCapacityFrames);
+                uint32_t ringCapacityFrames,
+                AudioStreamDirection direction);
     ~AudioStream();
 
     bool Create();
 
     size_t ReadFrames(void* dst, size_t frames);
+    size_t WriteFrames(const void* src, size_t frames);
     void Reset();
     void SetStarted(bool started);
     void MarkClosed();
@@ -45,6 +53,7 @@ public:
     uint32_t owner_pid() const { return ownerPid_; }
     const std::string& process_name() const { return processName_; }
     const AudioStreamFormat& format() const { return format_; }
+    AudioStreamDirection direction() const { return direction_; }
 
     bool started() const;
     uint32_t state() const;
@@ -67,6 +76,7 @@ private:
     std::string processName_;
     AudioStreamFormat format_;
     uint32_t ringCapacityFrames_;
+    AudioStreamDirection direction_;
     int ringFd_ = -1;
     size_t ringMappingSize_ = 0;
     WinehuaAudioRingBuffer* ring_ = nullptr;

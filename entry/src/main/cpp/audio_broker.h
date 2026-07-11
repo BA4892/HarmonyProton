@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include <ohaudio/native_audiocapturer.h>
 #include <ohaudio/native_audiostreambuilder.h>
 
 #include "audio_ipc_protocol.h"
@@ -52,14 +53,23 @@ private:
     AudioBroker& operator=(const AudioBroker&) = delete;
 
     bool EnsureRendererLocked();
+    bool EnsureCapturerLocked();
     void StopRendererLocked();
-    void PublishSnapshotLocked();
+    void StopCapturerLocked();
+    bool HasStartedCaptureStreamLocked() const;
+    void PublishSnapshotsLocked();
     void MixStreamsS16(const std::shared_ptr<const StreamSnapshot>& snapshot, int16_t* dst, uint32_t frames);
+    void DistributeCaptureFramesS16(const std::shared_ptr<const StreamSnapshot>& snapshot,
+                                    const int16_t* src, uint32_t frames);
 
     static OH_AudioData_Callback_Result OnWriteData(OH_AudioRenderer* renderer,
                                                     void* userData,
                                                     void* audioData,
                                                     int32_t audioDataSize);
+    static void OnReadData(OH_AudioCapturer* capturer,
+                           void* userData,
+                           void* audioData,
+                           int32_t audioDataSize);
 
     mutable std::mutex mutex_;
     bool running_ = false;
@@ -67,9 +77,13 @@ private:
     uint32_t nextStreamId_ = 1;
     OH_AudioRenderer* renderer_ = nullptr;
     uint32_t rendererCallbackFrames_ = 0;
+    OH_AudioCapturer* capturer_ = nullptr;
+    uint32_t capturerCallbackFrames_ = 0;
+    bool capturerRunning_ = false;
     std::unique_ptr<AudioIpcServer> server_;
     std::unordered_map<uint32_t, StreamPtr> streams_;
     std::shared_ptr<const StreamSnapshot> renderSnapshot_;
+    std::shared_ptr<const StreamSnapshot> captureSnapshot_;
     std::vector<int16_t> mixScratch_;
     std::vector<int32_t> mixAccum_;
 };

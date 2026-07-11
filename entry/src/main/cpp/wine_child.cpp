@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <strings.h>
 #include <string>
 #include <dlfcn.h>
 #include <sys/stat.h>
@@ -56,7 +57,65 @@ static void* stderr_reader_thread(void* arg) {
 #define LOG_DOMAIN 0x0000
 #define LOG_TAG "WineChild"
 
-static void setup_wine_env(const char* binDir, const char* homeDir)
+static const char *default_winedebug_profile(void)
+{
+    return "-all";
+}
+
+static const char *midi_diag_winedebug_profile(void)
+{
+    return "-all,trace+driver,trace+winmm,trace+mmdevapi,"
+           "trace+ohosaudio,warn+ohosaudio,warn+module";
+}
+
+static const char *sdl_audio_diag_winedebug_profile(void)
+{
+    return "-all,trace+driver,trace+winmm,trace+mmdevapi,"
+           "warn+mmdevapi,err+mmdevapi,trace+dsound,warn+dsound,"
+           "err+dsound,trace+ohosaudio,warn+ohosaudio,err+ohosaudio,"
+           "warn+module,err+module";
+}
+
+static const char *basename_of_path(const char *path)
+{
+    const char *slash;
+
+    if (!path || !path[0]) return path;
+    slash = strrchr(path, '/');
+    if (!slash) slash = strrchr(path, '\\');
+    return slash ? slash + 1 : path;
+}
+
+static bool is_audio_test_exe(int argc, char *argv[])
+{
+    const char *base;
+
+    if (argc <= 0 || !argv[0]) return false;
+    base = basename_of_path(argv[0]);
+    return !strcasecmp(base, "winehua_audio_test.exe") ||
+           !strcasecmp(base, "winehua_audio_test32.exe");
+}
+
+static bool is_sdl_audio_test_exe(int argc, char *argv[])
+{
+    const char *base;
+
+    if (argc <= 0 || !argv[0]) return false;
+    base = basename_of_path(argv[0]);
+    return !strcasecmp(base, "mj_x86.exe") || !strcasecmp(base, "mj_x86d.exe");
+}
+
+static const char *select_winedebug_profile(int argc, char *argv[])
+{
+    const char *override = getenv("WINEHUA_WINEDEBUG");
+
+    if (override && override[0]) return override;
+    if (is_audio_test_exe(argc, argv)) return midi_diag_winedebug_profile();
+    if (is_sdl_audio_test_exe(argc, argv)) return sdl_audio_diag_winedebug_profile();
+    return default_winedebug_profile();
+}
+
+static void setup_wine_env(const char* binDir, const char* homeDir, const char *winedebug)
 {
     std::string shareDir = std::string(binDir) + "/../share";
     std::string libDir = std::string(binDir) + "/x86_64-unix";
@@ -107,7 +166,9 @@ static void setup_wine_env(const char* binDir, const char* homeDir)
                     + binDir + "/x86_64-windows:" + binDir + "/i386-windows:" + binDir).c_str(), 1);
     setenv("TMPDIR", WINE_TMPDIR, 1);
     setenv("XDG_RUNTIME_DIR", WINE_PREFIX, 1);
-    setenv("WINEDEBUG", "-all", 1);  // -all=关闭全部调试频道
+    std::string midiSoundfontPath = std::string(binDir) + "/../audio/winehua-gm.sf2";
+    setenv("MIDI_SOUNDFONT_PATH", midiSoundfontPath.c_str(), 1);
+    setenv("WINEDEBUG", winedebug && winedebug[0] ? winedebug : default_winedebug_profile(), 1);
 }
 
 extern "C" void Main(NativeChildProcess_Args args)
@@ -147,7 +208,9 @@ extern "C" void Main(NativeChildProcess_Args args)
                 homeDir ? homeDir : "(null)", binDir, argc, argc > 0 ? argv[0] : "(none)");
 
     // 2. Step A: 设置 Wine 环境变量 baseline (硬编码默认值, 确保非 broker 路径可用)
-    setup_wine_env(binDir, homeDir);
+    const char *winedebug = select_winedebug_profile(argc, argv);
+    OH_LOG_INFO(LOG_APP, "[WineChild] WINEDEBUG=%{public}s", winedebug);
+    setup_wine_env(binDir, homeDir, winedebug);
 
     // 3. 从父进程 fdList 读取 fds (按 fdName 区分)
     //    环境变量转发 fd (wine_env) 先读到缓冲区, 最后一步 apply
