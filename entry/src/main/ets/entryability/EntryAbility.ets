@@ -1,7 +1,6 @@
 import { AbilityConstant, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
-import { BusinessError } from '@kit.BasicServicesKit';
 import { WineWindowManager } from '../service/WineWindowManager';
 
 const DOMAIN = 0x0000;
@@ -21,26 +20,8 @@ export default class EntryAbility extends UIAbility {
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
+    // Main window is created, set main page for this ability
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onWindowStageCreate');
-
-    // 沉浸模式必须在 WineWindowManager.init() 之前设置:
-    // init() 会通过 getWindowAvoidArea 计算 output 尺寸, 需要此时 avoid area 已归零
-    try {
-      const mw = windowStage.getMainWindowSync();
-      if (mw) {
-        mw.setWindowLayoutFullScreen(true).catch((e: BusinessError) => {
-          hilog.error(DOMAIN, 'testTag', 'fullScreen failed: %{public}s', JSON.stringify(e));
-        });
-        mw.setSpecificSystemBarEnabled('status', false).catch((e: BusinessError) => {
-          hilog.error(DOMAIN, 'testTag', 'statusBar failed: %{public}s', JSON.stringify(e));
-        });
-        mw.setSpecificSystemBarEnabled('navigationIndicator', false).catch((e: BusinessError) => {
-          hilog.error(DOMAIN, 'testTag', 'navBar failed: %{public}s', JSON.stringify(e));
-        });
-      }
-    } catch (e) {
-      hilog.error(DOMAIN, 'testTag', 'immersive ERR: %{public}s', JSON.stringify(e));
-    }
 
     // 初始化多窗口管理器
     WineWindowManager.getInstance().init(windowStage, this.context);
@@ -50,6 +31,7 @@ export default class EntryAbility extends UIAbility {
         hilog.error(DOMAIN, 'testTag', 'Failed to load the content. Cause: %{public}s', JSON.stringify(err));
         return;
       }
+      // loadContent 成功后隐藏窗口装饰
       let mainWin = windowStage.getMainWindowSync();
       if (mainWin) {
         mainWin.setWindowDecorVisible(false);
