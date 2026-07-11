@@ -1,10 +1,11 @@
 #include "graphics_broker.h"
 
-#include "egl_renderer.h"
 #include "wait_utils.h"
 #include "wayland_server.h"
 
-#include <EGL/egl.h>
+#ifdef __OHOS__
+#include <AbilityKit/native_child_process.h>
+#endif
 
 #include <dirent.h>
 #include <sys/stat.h>
@@ -29,42 +30,12 @@ namespace winehua {
 
 namespace {
 
-using VirglGlContext = void*;
+using PFNWinehuaVtestMain = int (*)(int argc, char** argv);
 
-struct VirglGlCtxParam
-{
-    int version;
-    bool shared;
-    int major_ver;
-    int minor_ver;
-    int compat_ctx;
-};
-
-struct VirglRendererCallbacks
-{
-    int version;
-    void (*write_fence)(void* cookie, uint32_t fence);
-    VirglGlContext (*create_gl_context)(void* cookie, int scanout_idx, VirglGlCtxParam* param);
-    void (*destroy_gl_context)(void* cookie, VirglGlContext ctx);
-    int (*make_current)(void* cookie, int scanout_idx, VirglGlContext ctx);
-    int (*get_drm_fd)(void* cookie);
-    void (*write_context_fence)(void* cookie, uint32_t ctx_id, uint32_t ring_idx, uint64_t fence_id);
-    int (*get_server_fd)(void* cookie, uint32_t version);
-    void* (*get_egl_display)(void* cookie);
-};
-
-using PFNVirglRendererInit = int (*)(void* cookie, int flags, VirglRendererCallbacks* cb);
-using PFNVirglRendererCleanup = void (*)(void* cookie);
-
-constexpr int VIRGL_RENDERER_CALLBACKS_VERSION = 4;
-constexpr int VIRGL_RENDERER_USE_GLES = 1 << 4;
+constexpr const char* VIRGL_SERVER_PROGRAM = "virgl_test_server";
+constexpr const char* VIRGL_VTEST_LIBRARY = "libwinehua_vtest_server.so";
 constexpr const char* GUEST_GFX_DIRNAME = "guest_gfx";
 constexpr const char* GUEST_GFX_ENVFILE = "winehua-guest-gfx.env";
-
-struct ExternalEglContext
-{
-    EGLContext context = EGL_NO_CONTEXT;
-};
 
 bool EnsureDir(const std::string& path)
 {
@@ -106,6 +77,22 @@ bool DirHasSharedObjectWithPrefix(const std::string& dir, const std::string& pre
 
     closedir(handle);
     return false;
+}
+
+std::string DirNameCopy(const std::string& path)
+{
+    size_t slash = path.find_last_of('/');
+    if (slash == std::string::npos) return ".";
+    if (slash == 0) return "/";
+    return path.substr(0, slash);
+}
+
+std::string CurrentSharedObjectDir()
+{
+    Dl_info info = {};
+    if (dladdr(reinterpret_cast<void*>(&CurrentSharedObjectDir), &info) && info.dli_fname && info.dli_fname[0])
+        return DirNameCopy(info.dli_fname);
+    return "";
 }
 
 std::string ToLower(std::string value)
@@ -235,105 +222,34 @@ void StartChildLogReader(int fd, pid_t pid, const char* tag)
     }).detach();
 }
 
-EGLConfig ChooseVirglEglConfig(EGLDisplay display, bool preferEs3)
+bool IsProcessRunningBySignal(pid_t pid)
 {
-    EGLConfig config = nullptr;
-    EGLint numConfigs = 0;
-    EGLint renderableType = EGL_OPENGL_ES2_BIT;
-#ifdef EGL_OPENGL_ES3_BIT_KHR
-    if (preferEs3) renderableType = EGL_OPENGL_ES3_BIT_KHR;
-#else
-    (void)preferEs3;
-#endif
-    EGLint attrs[] = {
-        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
-        EGL_RED_SIZE, 8,
-        EGL_GREEN_SIZE, 8,
-        EGL_BLUE_SIZE, 8,
-        EGL_ALPHA_SIZE, 8,
-        EGL_RENDERABLE_TYPE, renderableType,
-        EGL_NONE,
-    };
-
-    if (!eglChooseConfig(display, attrs, &config, 1, &numConfigs) || numConfigs < 1) return nullptr;
-    return config;
+    if (pid <= 0) return false;
+    if (kill(pid, 0) == 0) return true;
+    return errno == EPERM;
 }
 
-void VirglWriteFence(void*, uint32_t)
+void TerminateTrackedProcess(pid_t pid, bool usesNcp)
 {
-}
+    if (pid <= 0) return;
 
-void VirglWriteContextFence(void*, uint32_t, uint32_t, uint64_t)
-{
-}
-
-void* VirglGetEglDisplay(void*)
-{
-    EGLDisplay display = EglRenderer::GetSharedDisplay();
-    if (display == EGL_NO_DISPLAY) return nullptr;
-    return display;
-}
-
-VirglGlContext VirglCreateGlContext(void*, int, VirglGlCtxParam* param)
-{
-    EGLDisplay display = EglRenderer::GetSharedDisplay();
-    ExternalEglContext* external = nullptr;
-    EGLContext sharedContext = EGL_NO_CONTEXT;
-    EGLConfig config = nullptr;
-    EGLint majorVersion = 3;
-    EGLint contextAttrs[] = {
-        EGL_CONTEXT_CLIENT_VERSION, 3,
-        EGL_NONE,
-    };
-
-    if (display == EGL_NO_DISPLAY) return nullptr;
-    if (!eglBindAPI(EGL_OPENGL_ES_API)) return nullptr;
-
-    if (param && param->major_ver > 0) majorVersion = param->major_ver;
-    if (majorVersion < 2) majorVersion = 2;
-    contextAttrs[1] = majorVersion >= 3 ? 3 : 2;
-
-    config = ChooseVirglEglConfig(display, contextAttrs[1] >= 3);
-    if (!config && contextAttrs[1] >= 3)
+    kill(pid, SIGTERM);
+    if (usesNcp)
     {
-        contextAttrs[1] = 2;
-        config = ChooseVirglEglConfig(display, false);
-    }
-    if (!config) return nullptr;
-
-    if (param && param->shared) sharedContext = eglGetCurrentContext();
-
-    external = new ExternalEglContext();
-    external->context = eglCreateContext(display, config, sharedContext, contextAttrs);
-    if (external->context == EGL_NO_CONTEXT)
-    {
-        delete external;
-        return nullptr;
+        WaitFor("virgl native child exit", [pid]() { return !IsProcessRunningBySignal(pid); }, 2000, 100);
+        if (IsProcessRunningBySignal(pid)) kill(pid, SIGKILL);
+        return;
     }
 
-    return external;
-}
-
-void VirglDestroyGlContext(void*, VirglGlContext ctx)
-{
-    ExternalEglContext* external = static_cast<ExternalEglContext*>(ctx);
-    EGLDisplay display = EglRenderer::GetSharedDisplay();
-
-    if (!external) return;
-    if (display != EGL_NO_DISPLAY && external->context != EGL_NO_CONTEXT)
-        eglDestroyContext(display, external->context);
-    delete external;
-}
-
-int VirglMakeCurrent(void*, int, VirglGlContext ctx)
-{
-    ExternalEglContext* external = static_cast<ExternalEglContext*>(ctx);
-    EGLDisplay display = EglRenderer::GetSharedDisplay();
-    EGLContext eglContext = external ? external->context : EGL_NO_CONTEXT;
-
-    if (display == EGL_NO_DISPLAY) return -1;
-    if (!eglBindAPI(EGL_OPENGL_ES_API)) return -1;
-    return eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, eglContext) ? 0 : -1;
+    for (int i = 0; i < 20; ++i)
+    {
+        int status = 0;
+        pid_t waited = waitpid(pid, &status, WNOHANG);
+        if (waited == pid || (waited < 0 && errno == ECHILD)) return;
+        usleep(100000);
+    }
+    kill(pid, SIGKILL);
+    waitpid(pid, nullptr, 0);
 }
 
 } // namespace
@@ -360,7 +276,23 @@ void GraphicsBroker::SetWineRuntimeBinaryDir(const std::string& wineBinDir)
 
     wineRuntimeBinDir_ = wineBinDir;
     virglServerProgramPath_.clear();
-    if (!wineRuntimeBinDir_.empty()) virglServerProgramPath_ = wineRuntimeBinDir_ + "/virgl_test_server";
+    virglVtestLibraryPath_.clear();
+    if (!wineRuntimeBinDir_.empty())
+    {
+        std::string bundleDir = CurrentSharedObjectDir();
+        std::string bundleVtestLibrary;
+
+        virglServerProgramPath_ = wineRuntimeBinDir_ + "/" + VIRGL_SERVER_PROGRAM;
+        if (!bundleDir.empty())
+            bundleVtestLibrary = bundleDir + "/" + VIRGL_VTEST_LIBRARY;
+
+        if (FileExists(bundleVtestLibrary))
+            virglVtestLibraryPath_ = bundleVtestLibrary;
+
+        OH_LOG_INFO(LOG_APP, "[GraphicsBroker] host helper=%{public}s server=%{public}s",
+                    virglVtestLibraryPath_.empty() ? "(none)" : virglVtestLibraryPath_.c_str(),
+                    virglServerProgramPath_.c_str());
+    }
     RefreshGuestReceiverStateLocked();
 }
 
@@ -378,7 +310,6 @@ bool GraphicsBroker::EnsureStarted(const std::string& runtimeDir)
     if (requestedBackend_ == GraphicsBackend::Virgl) {
         RefreshVirglStateLocked();
         StartVirglSocketServerLocked();
-        ProbeVirglRuntimeSmokeLocked();
     } else {
         lastError_.clear();
     }
@@ -390,13 +321,16 @@ void GraphicsBroker::Stop()
 {
     std::string socketPath;
     int serverPid = -1;
+    bool serverUsesNcp = false;
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
         virglServerRunning_.store(false, std::memory_order_release);
         socketPath = virglSocketPath_;
         serverPid = virglServerPid_;
+        serverUsesNcp = virglServerUsesNcp_;
         virglServerPid_ = -1;
+        virglServerUsesNcp_ = false;
         virglSocketReady_ = false;
         activeBackend_ = GraphicsBackend::Shm;
         started_ = false;
@@ -405,8 +339,7 @@ void GraphicsBroker::Stop()
 
     if (serverPid > 0)
     {
-        kill(serverPid, SIGTERM);
-        waitpid(serverPid, nullptr, 0);
+        TerminateTrackedProcess(serverPid, serverUsesNcp);
     }
     if (!socketPath.empty()) unlink(socketPath.c_str());
 }
@@ -420,7 +353,6 @@ void GraphicsBroker::SetRequestedBackend(GraphicsBackend backend)
     if (started_ && requestedBackend_ == GraphicsBackend::Virgl) {
         RefreshVirglStateLocked();
         StartVirglSocketServerLocked();
-        ProbeVirglRuntimeSmokeLocked();
     } else if (requestedBackend_ == GraphicsBackend::Shm) {
         lastError_.clear();
     }
@@ -441,14 +373,11 @@ GraphicsBackendState GraphicsBroker::GetState() const
     state.guestReceiverError = guestReceiverError_;
     state.virglSocketReady = virglSocketReady_;
     state.virglLibraryPresent = virglLibraryPresent_;
-    state.virglSmokeAttempted = virglSmokeAttempted_;
-    state.virglSmokeSucceeded = virglSmokeSucceeded_;
     state.zeroCopyFramePath = false;
     state.runtimeDir = runtimeDir_;
     state.virglSocketPath = virglSocketPath_;
     state.virglLibraryPath = virglLibraryPath_;
     state.frameTransportMode = "wl_shm+cpu_copy+gl_upload";
-    state.virglSmokeError = virglSmokeError_;
     state.lastError = lastError_;
     return state;
 }
@@ -481,6 +410,22 @@ void GraphicsBroker::AppendWineEnv(std::vector<std::string>& env) const
                   ((state.active == GraphicsBackend::Virgl) ? "1" : "0"));
     if (state.active == GraphicsBackend::Virgl)
     {
+        if (!state.guestReceiverRuntimeDir.empty())
+        {
+            std::string guestLibDir = state.guestReceiverRuntimeDir + "/lib";
+            env.push_back("EGL_PLATFORM=wayland");
+            if (FileExists(guestLibDir + "/libEGL.so"))
+                env.push_back("WINEHUA_EGL_LIBRARY_PATH=" + guestLibDir + "/libEGL.so");
+            env.push_back("BOX64_EMULATED_LIBS=libEGL.so:libEGL.so.1:libGLESv2.so:libGLESv2.so.2:"
+                          "libGLESv1_CM.so:libGLESv1_CM.so.1:libGL.so:libGL.so.1:"
+                          "libwayland-client.so:libwayland-client.so.0:libwayland-server.so:"
+                          "libwayland-server.so.0:libwayland-egl.so:libwayland-egl.so.1:"
+                          "libdrm.so:libdrm.so.2:libffi.so:libffi.so.8");
+            if (DirExists(guestLibDir + "/dri")) env.push_back("LIBGL_DRIVERS_PATH=" + guestLibDir + "/dri");
+            if (DirExists(guestLibDir + "/egl")) env.push_back("EGL_DRIVERS_PATH=" + guestLibDir + "/egl");
+        }
+        env.push_back("WINEHUA_WAYLAND_READBACK=1");
+        env.push_back("WINEHUA_GL_STALL_DIAG=1");
         for (const std::string& extra : guestEnv) env.push_back(extra);
         if (!state.virglSocketPath.empty()) env.push_back("VTEST_SOCKET_NAME=" + state.virglSocketPath);
     }
@@ -541,6 +486,19 @@ bool GraphicsBroker::EnsureRuntimeLocked(const std::string& runtimeDir)
 
 bool GraphicsBroker::IsVirglServerProcessAliveLocked()
 {
+#ifdef __OHOS__
+    if (virglServerUsesNcp_)
+    {
+        if (IsProcessRunningBySignal(virglServerPid_)) return true;
+
+        lastError_ = "virgl native child process is not running";
+        virglServerPid_ = -1;
+        virglServerUsesNcp_ = false;
+        virglServerRunning_.store(false, std::memory_order_release);
+        virglSocketReady_ = false;
+        return false;
+    }
+#endif
     int status = 0;
     pid_t waited = 0;
 
@@ -558,6 +516,7 @@ bool GraphicsBroker::IsVirglServerProcessAliveLocked()
                     virglServerPid_, statusText.c_str());
     }
     virglServerPid_ = -1;
+    virglServerUsesNcp_ = false;
     virglServerRunning_.store(false, std::memory_order_release);
     virglSocketReady_ = false;
     return false;
@@ -568,9 +527,6 @@ void GraphicsBroker::RefreshVirglStateLocked()
     bool loaded = false;
     virglLibraryPath_ = ProbeVirglLibraryLocked(&loaded);
     virglLibraryPresent_ = loaded;
-    virglSmokeAttempted_ = false;
-    virglSmokeSucceeded_ = false;
-    virglSmokeError_.clear();
     if (!virglLibraryPresent_) lastError_ = "virglrenderer library not found; using shm fallback";
 }
 
@@ -651,65 +607,17 @@ void GraphicsBroker::RefreshGuestReceiverStateLocked()
                 guestReceiverRuntimeDir_.c_str());
 }
 
-void GraphicsBroker::ProbeVirglRuntimeSmokeLocked()
-{
-    void* handle = nullptr;
-    PFNVirglRendererInit virglRendererInit = nullptr;
-    PFNVirglRendererCleanup virglRendererCleanup = nullptr;
-
-    virglSmokeAttempted_ = false;
-    virglSmokeSucceeded_ = false;
-    virglSmokeError_.clear();
-
-    if (!virglLibraryPresent_ || virglLibraryPath_.empty())
-    {
-        virglSmokeError_ = "virglrenderer library not found";
-        return;
-    }
-
-    handle = dlopen(virglLibraryPath_.c_str(), RTLD_NOW | RTLD_LOCAL);
-    if (!handle)
-    {
-        virglSmokeAttempted_ = true;
-        virglSmokeError_ = std::string("dlopen failed: ") + dlerror();
-        return;
-    }
-
-    virglRendererInit = reinterpret_cast<PFNVirglRendererInit>(dlsym(handle, "virgl_renderer_init"));
-    virglRendererCleanup = reinterpret_cast<PFNVirglRendererCleanup>(dlsym(handle, "virgl_renderer_cleanup"));
-    if (!virglRendererInit || !virglRendererCleanup)
-    {
-        virglSmokeAttempted_ = true;
-        virglSmokeError_ = "required virglrenderer symbols are missing";
-        dlclose(handle);
-        return;
-    }
-
-    /*
-     * Do not call virgl_renderer_init() inside the host Ability for now.
-     * On OHOS this probe can tear down the shared EGL/Wayland host state and
-     * crash the entire app before the Windows smoke exe even starts.
-     *
-     * For Step 1 we keep the probe intentionally shallow: the bundled library
-     * loads and the required entrypoints resolve, but real virgl command
-     * transport is still not wired into the guest path yet.
-     */
-    virglSmokeError_ = "host-side virgl init probe disabled on OHOS; library/symbol check only";
-    OH_LOG_WARN(LOG_APP, "[GraphicsBroker] skipping in-process virgl init probe: %{public}s",
-                virglSmokeError_.c_str());
-
-    dlclose(handle);
-}
-
 void GraphicsBroker::StartVirglSocketServerLocked()
 {
     std::string serverPath;
     std::string serverDir;
     std::string ldLibraryPath;
-    std::string guestLibDir;
     int logPipe[2] = {-1, -1};
     bool logPipeOk = false;
-    bool reuseGuestMesaRuntime = false;
+    bool usingDedicatedHostRuntime = false;
+    bool usingCallableVtest = false;
+    void* vtestHandle = nullptr;
+    PFNWinehuaVtestMain vtestMain = nullptr;
     pid_t pid = -1;
 
     if (!runtimeReady_ || virglSocketPath_.empty()) return;
@@ -720,33 +628,114 @@ void GraphicsBroker::StartVirglSocketServerLocked()
         return;
     }
 
-    serverPath = virglServerProgramPath_.empty() ? (wineRuntimeBinDir_ + "/virgl_test_server") : virglServerProgramPath_;
-    if (access(serverPath.c_str(), X_OK) != 0)
+#ifdef __OHOS__
+    if (virglVtestLibraryPath_.empty() || !FileExists(virglVtestLibraryPath_))
     {
-        lastError_ = "virgl_test_server is missing from HNP runtime: " + serverPath;
+        lastError_ = "ARM64 virgl vtest helper is missing from the bundle";
         return;
     }
 
-    serverDir = wineRuntimeBinDir_;
-    ldLibraryPath = wineRuntimeBinDir_ + ":" + wineRuntimeBinDir_ + "/x86_64-unix:" + wineRuntimeBinDir_ + "/../lib/x86_64";
-    guestLibDir = guestReceiverRuntimeDir_.empty() ? std::string() : (guestReceiverRuntimeDir_ + "/lib");
-    if (guestReceiverPresent_ && DirExists(guestLibDir))
+    serverDir = DirNameCopy(virglVtestLibraryPath_);
+    ldLibraryPath = serverDir;
+    unlink(virglSocketPath_.c_str());
     {
-        /*
-         * Reuse the bundled guest Mesa/EGL runtime for virgl_test_server on
-         * OHOS. The host app process does not ship a system-visible libEGL.so.1,
-         * so the vtest server must see the guest receiver's libEGL/libGLES
-         * payload to bring up a surfaceless GLES context.
-         *
-         * Do not forward GALLIUM_DRIVER=virpipe here: the host side must stay a
-         * renderer, not recurse back into the guest transport.
-         */
-        ldLibraryPath = guestLibDir + ":" + ldLibraryPath;
-        reuseGuestMesaRuntime = true;
+        const char* requestedSyncMode = getenv("WINEHUA_VIRGL_SYNC_MODE");
+        std::string syncMode = requestedSyncMode ? requestedSyncMode : "egl-main";
+        if (syncMode != "egl-thread" && syncMode != "egl-main" && syncMode != "native-fd")
+        {
+            OH_LOG_WARN(LOG_APP, "[GraphicsBroker] invalid sync mode %{public}s; using egl-thread",
+                        syncMode.c_str());
+            syncMode = "egl-thread";
+        }
+        std::string virglLogPath = DirNameCopy(virglSocketPath_) + "/virgl_host.log";
+        std::string entryParams = virglVtestLibraryPath_ + "|" + virglSocketPath_ +
+                                  "|__env=LD_LIBRARY_PATH=" + ldLibraryPath +
+                                  "|__env=VTEST_USE_GLES=1" +
+                                  "|__env=VTEST_USE_EGL_SURFACELESS=1" +
+                                  "|__env=VTEST_SYNC_GL_FINISH=1" +
+                                  "|__env=WINEHUA_VIRGL_SYNC_MODE=" + syncMode +
+                                  "|__env=WINEHUA_VIRGL_LOG_PATH=" + virglLogPath +
+                                  "|__env=EGL_PLATFORM=surfaceless";
+        if (syncMode == "egl-thread")
+            entryParams += "|__env=VIRGL_DISABLE_NATIVE_FENCE_FD=1";
+        NativeChildProcess_Args childArgs = {};
+        NativeChildProcess_Options options = {};
+        int32_t childPid = -1;
+
+        childArgs.entryParams = const_cast<char*>(entryParams.c_str());
+        options.isolationMode = NCP_ISOLATION_MODE_NORMAL;
+        int32_t ret = OH_Ability_StartNativeChildProcess(
+            "libvirgl_child.so:Main", childArgs, options, &childPid);
+        OH_LOG_INFO(LOG_APP,
+                    "[GraphicsBroker] NCP virgl_child ret=%{public}d pid=%{public}d helper=%{public}s "
+                    "socket=%{public}s hostLib=%{public}s sync=%{public}s log=%{public}s",
+                    ret, childPid, virglVtestLibraryPath_.c_str(), virglSocketPath_.c_str(),
+                    ldLibraryPath.c_str(), syncMode.c_str(), virglLogPath.c_str());
+        if (ret != NCP_NO_ERROR || childPid <= 0)
+        {
+            lastError_ = "failed to start virgl native child process ret=" + std::to_string(ret);
+            virglServerPid_ = -1;
+            virglServerUsesNcp_ = false;
+            virglServerRunning_.store(false, std::memory_order_release);
+            virglSocketReady_ = false;
+            return;
+        }
+        pid = static_cast<pid_t>(childPid);
+        virglServerUsesNcp_ = true;
+    }
+#else
+    serverPath = virglServerProgramPath_.empty() ? (wineRuntimeBinDir_ + "/virgl_test_server") : virglServerProgramPath_;
+    if (!virglVtestLibraryPath_.empty())
+    {
+        vtestHandle = dlopen(virglVtestLibraryPath_.c_str(), RTLD_NOW | RTLD_LOCAL);
+        if (!vtestHandle)
+        {
+            OH_LOG_WARN(LOG_APP, "[GraphicsBroker] dlopen %{public}s failed: %{public}s",
+                        virglVtestLibraryPath_.c_str(), dlerror());
+        }
+        else
+        {
+            vtestMain = reinterpret_cast<PFNWinehuaVtestMain>(dlsym(vtestHandle, "winehua_vtest_main"));
+            if (!vtestMain)
+            {
+                OH_LOG_WARN(LOG_APP, "[GraphicsBroker] winehua_vtest_main missing in %{public}s: %{public}s",
+                            virglVtestLibraryPath_.c_str(), dlerror());
+            }
+            else
+            {
+                usingCallableVtest = true;
+            }
+        }
+    }
+    if (!usingCallableVtest && vtestHandle)
+    {
+        dlclose(vtestHandle);
+        vtestHandle = nullptr;
+    }
+
+    if (!usingCallableVtest && access(serverPath.c_str(), X_OK) != 0)
+    {
+        lastError_ = "virgl vtest helper is unavailable and virgl_test_server is missing from runtime: " + serverPath;
+        OH_LOG_WARN(LOG_APP, "[GraphicsBroker] %{public}s errno=%{public}d (%{public}s)",
+                    lastError_.c_str(), errno, strerror(errno));
+        return;
+    }
+
+    serverDir = usingCallableVtest ? DirNameCopy(virglVtestLibraryPath_) : DirNameCopy(serverPath);
+    usingDedicatedHostRuntime = (serverDir != wineRuntimeBinDir_);
+    if (usingDedicatedHostRuntime)
+    {
+        ldLibraryPath = serverDir;
+    }
+    else
+    {
+        ldLibraryPath = wineRuntimeBinDir_ + ":" + wineRuntimeBinDir_ + "/x86_64-unix:" + wineRuntimeBinDir_ + "/../lib/x86_64";
     }
     OH_LOG_INFO(LOG_APP,
-                "[GraphicsBroker] virgl_test_server runtime: reuseGuestMesa=%{public}d libPath=%{public}s",
-                reuseGuestMesaRuntime ? 1 : 0,
+                "[GraphicsBroker] virgl_test_server runtime: callable=%{public}d dedicatedHostRuntime=%{public}d serverDir=%{public}s libPath=%{public}s",
+                usingCallableVtest ? 1 : 0,
+                usingDedicatedHostRuntime ? 1 : 0,
+                serverDir.c_str(),
                 ldLibraryPath.c_str());
     logPipeOk = (pipe(logPipe) == 0);
     if (!logPipeOk)
@@ -764,6 +753,7 @@ void GraphicsBroker::StartVirglSocketServerLocked()
             close(logPipe[0]);
             close(logPipe[1]);
         }
+        if (vtestHandle) dlclose(vtestHandle);
         lastError_ = std::string("failed to fork virgl_test_server: ") + strerror(errno);
         virglServerPid_ = -1;
         virglServerRunning_.store(false, std::memory_order_release);
@@ -784,13 +774,25 @@ void GraphicsBroker::StartVirglSocketServerLocked()
         setenv("VTEST_USE_GLES", "1", 1);
         setenv("VTEST_USE_EGL_SURFACELESS", "1", 1);
         setenv("EGL_PLATFORM", "surfaceless", 1);
-        if (reuseGuestMesaRuntime)
-        {
-            setenv("LIBGL_ALWAYS_SOFTWARE", "1", 1);
-            setenv("MESA_LOADER_DRIVER_OVERRIDE", "swrast", 1);
-            unsetenv("GALLIUM_DRIVER");
-        }
+        unsetenv("GALLIUM_DRIVER");
+        unsetenv("MESA_LOADER_DRIVER_OVERRIDE");
+        unsetenv("LIBGL_ALWAYS_SOFTWARE");
         chdir(serverDir.c_str());
+        if (usingCallableVtest && vtestMain)
+        {
+            char* args[] = {
+                const_cast<char*>("virgl_test_server"),
+                const_cast<char*>("--no-fork"),
+                const_cast<char*>("--use-egl-surfaceless"),
+                const_cast<char*>("--use-gles"),
+                const_cast<char*>("--socket-path"),
+                const_cast<char*>(virglSocketPath_.c_str()),
+                nullptr,
+            };
+            int rc = vtestMain(6, args);
+            dprintf(STDERR_FILENO, "virgl_test_server callable exited: %d\n", rc);
+            _exit(rc == 0 ? 0 : 127);
+        }
         execl(serverPath.c_str(),
               "virgl_test_server",
               "--no-fork",
@@ -808,6 +810,8 @@ void GraphicsBroker::StartVirglSocketServerLocked()
         close(logPipe[1]);
         StartChildLogReader(logPipe[0], pid, "virgl-test");
     }
+    if (vtestHandle) dlclose(vtestHandle);
+#endif
 
     virglServerPid_ = pid;
     virglServerRunning_.store(true, std::memory_order_release);
@@ -829,10 +833,10 @@ void GraphicsBroker::StartVirglSocketServerLocked()
 
     if (virglServerPid_ > 0)
     {
-        kill(virglServerPid_, SIGTERM);
-        waitpid(virglServerPid_, nullptr, 0);
+        TerminateTrackedProcess(virglServerPid_, virglServerUsesNcp_);
     }
     virglServerPid_ = -1;
+    virglServerUsesNcp_ = false;
     virglServerRunning_.store(false, std::memory_order_release);
     virglSocketReady_ = false;
     lastError_ = "timed out waiting for virgl_test_server socket";
@@ -850,11 +854,7 @@ void GraphicsBroker::UpdateActiveBackendLocked()
     {
         activeBackend_ = GraphicsBackend::Virgl;
         loggedVirglFallback_ = false;
-        if (!virglSmokeAttempted_ && !virglSmokeError_.empty()) {
-            lastError_ = "virgl host probe skipped on OHOS; relying on guest receiver bundle for runtime validation";
-        } else {
-            lastError_.clear();
-        }
+        lastError_.clear();
         return;
     }
 
@@ -873,8 +873,6 @@ void GraphicsBroker::UpdateActiveBackendLocked()
             lastError_ = "virgl host is ready, but no guest 3D receiver bundle was staged "
                          "(guest_gfx/winehua-guest-gfx.env missing); Windows OpenGL/DX still uses stock wayland/EGL; using shm fallback";
         }
-    } else if (virglSmokeAttempted_ && !virglSmokeSucceeded_) {
-        lastError_ = "virgl external-EGL smoke failed: " + virglSmokeError_ + "; using shm fallback";
     } else {
         lastError_ = "VirGL runtime prerequisites are not satisfied yet; using shm fallback";
     }

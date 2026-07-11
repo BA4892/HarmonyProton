@@ -21,6 +21,16 @@ assemble_pad() {
     mkdir -p "$wine_data/share/wine/mono"
     mkdir -p "$wine_data/share/X11"
 
+    # SoundFont (MIDI 音色库)
+    local soundfont="$WINEHUA/entry/src/main/resources/rawfile/winehua-gm.sf2"
+    if [ -f "$soundfont" ]; then
+        mkdir -p "$wine_data/audio"
+        cp "$soundfont" "$wine_data/audio/winehua-gm.sf2"
+        log "    winehua-gm.sf2 → rawfile audio/"
+    else
+        warn "winehua-gm.sf2 not found; MIDI output will be unavailable"
+    fi
+
     # -- 1. 原生 .so → libs/$NATIVE_ARCH/ (由各 build 脚本完成) --
     mkdir -p "$NATIVE_LIBS"
 

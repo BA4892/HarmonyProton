@@ -203,6 +203,30 @@ static bool IsWineserverSocketReady() {
     return found;
 }
 
+static void PrepareDesktopSessionGraphicsEnv(const LaunchParams& params)
+{
+    OH_LOG_INFO(LOG_APP, "[Launch-Async] preparing GL env for desktop child processes");
+    auto& gb = winehua::GraphicsBroker::GetInstance();
+    gb.SetWineRuntimeBinaryDir(params.winehuaBin);
+    gb.SetRequestedBackend(winehua::GraphicsBackend::Virgl);
+    gb.EnsureStarted(params.sockDir);
+
+    winehua::GraphicsBackendState state = gb.GetState();
+    if (state.active != winehua::GraphicsBackend::Virgl) {
+        OH_LOG_ERROR(LOG_APP,
+                     "[Launch-Async] desktop GL env unavailable: requested=%{public}s active=%{public}s error=%{public}s",
+                     winehua::GraphicsBroker::BackendName(state.requested),
+                     winehua::GraphicsBroker::BackendName(state.active),
+                     state.lastError.c_str());
+        return;
+    }
+
+    std::vector<std::string> env;
+    gb.AppendWineEnv(env);
+    SetBrokerSessionEnv(std::move(env));
+    LogGraphicsBackendStateForLaunch("DesktopSession");
+}
+
 static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
     // 通过 fdList 传递 audio bootstrap fd (仅 explorer 需要音频)
     NativeChildProcess_Fd audioFdNode;
@@ -238,6 +262,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
         napi_call_threadsafe_function(gStateTsfn, strdup("wineboot-starting"), napi_tsfn_blocking);
 
     gBrokerHomeDir = p->homeDir;
+    ClearBrokerSessionEnv();
     StartBrokerServer();
     setenv("PROCESSBROKER", WINE_BROKER_SOCKET, 1);
 
@@ -289,6 +314,8 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
     }
 
     // -- explorer desktop shell (仅 desktop 模式) --
+    PrepareDesktopSessionGraphicsEnv(*p);
+
     if (WaylandServer::GetInstance()->IsDesktopMode())
     {
         auto* ws = WaylandServer::GetInstance();
@@ -343,6 +370,7 @@ void LaunchThreadFunc(LaunchParams* p) {
                 (p->winehuaBin + "/../share/X11/xkb").c_str());
 
     winehua::GraphicsBroker::GetInstance().SetWineRuntimeBinaryDir(p->winehuaBin);
+    winehua::GraphicsBroker::GetInstance().SetRequestedBackend(winehua::GraphicsBackend::Virgl);
     winehua::GraphicsBroker::GetInstance().EnsureStarted(p->sockDir);
 
     int audioBootstrapFd = CreateAudioBootstrapFd(p->sockDir);

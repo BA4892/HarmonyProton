@@ -171,24 +171,53 @@ static void setup_wine_env(const char* binDir, const char* homeDir, const char *
     setenv("WINEDEBUG", winedebug && winedebug[0] ? winedebug : default_winedebug_profile(), 1);
 }
 
+static void apply_entry_param_env_overrides(const std::vector<std::string>& envOverrides)
+{
+    for (const std::string& envLine : envOverrides)
+    {
+        size_t sep = envLine.find('=');
+        if (sep == std::string::npos || sep == 0)
+        {
+            OH_LOG_WARN(LOG_APP, "[WineChild] ignoring malformed __env token: %{public}s",
+                        envLine.c_str());
+            continue;
+        }
+
+        std::string key = envLine.substr(0, sep);
+        std::string value = envLine.substr(sep + 1);
+        setenv(key.c_str(), value.c_str(), 1);
+        if (key == "WINEHUA_BOOTSTRAP_PHASE")
+            OH_LOG_INFO(LOG_APP, "[WineChild] env override %{public}s=%{public}s",
+                        key.c_str(), value.c_str());
+    }
+}
+
 extern "C" void Main(NativeChildProcess_Args args)
 {
     OH_LOG_INFO(LOG_APP, "[WineChild] Main() ENTER pid=%{public}d entryParams=%{public}s",
                 getpid(), args.entryParams ? args.entryParams : "(null)");
 
-    // 1. 解析 entryParams: "homeDir|binDir|arg0|arg1|..."
+    // 1. 解析 entryParams: "homeDir|binDir|arg0|arg1|...|__env=KEY=VALUE|..."
     const char* entryParams = args.entryParams ? args.entryParams : "";
     char* buf = strdup(entryParams);
     char* homeDir = strtok(buf, "|");
     char* binDir = strtok(nullptr, "|");
     if (!binDir) { OH_LOG_ERROR(LOG_APP, "[WineChild] entryParams parse failed (no binDir)"); free(buf); return; }
 
-    // 统计 argc, argv
+    // 统计 argc, argv, 收集 __env= 覆盖
     int argc = 0;
     char* argv[64];
     char* tok;
+    std::vector<std::string> envOverrides;
     while ((tok = strtok(nullptr, "|")) && argc < 63)
+    {
+        if (strncmp(tok, "__env=", 6) == 0)
+        {
+            envOverrides.emplace_back(tok + 6);
+            continue;
+        }
         argv[argc++] = tok;
+    }
     argv[argc] = nullptr;
 
     // 检查 __winehua_desktop__ 标记: 有 → desktop 模式, 需要传 env 给 wine
@@ -272,6 +301,8 @@ extern "C" void Main(NativeChildProcess_Args args)
         OH_LOG_INFO(LOG_APP, "[WineChild] applied %{public}d env vars from forwarded environ", applied);
         free(envBuf);
     }
+
+    apply_entry_param_env_overrides(envOverrides);
 
     // 覆盖 per-process fd 变量 (转发 env 中的是父进程 fd 号, 本进程无效)
     // 等价于 fork+exec 路径中 exec_wineloader 的 putenv("WINESERVERSOCKET")

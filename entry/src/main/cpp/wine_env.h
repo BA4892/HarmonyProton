@@ -45,6 +45,10 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
 // -- Audio bootstrap --
 int CreateAudioBootstrapFd(const std::string& runtimeDir);
 
+// -- Broker --
+size_t AppendMissingEntryParamsEnvOverrides(std::string& entryParams,
+                                            const std::vector<std::string>& env);
+
 // -- Graphics 辅助 --
 std::string BasenameOfPath(const std::string& path);
 bool IsGraphicsSmokeExePath(const std::string& path);

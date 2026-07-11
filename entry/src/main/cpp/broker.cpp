@@ -13,8 +13,8 @@
 #include "broker.h"
 #include "wait_utils.h"
 #include "wine_constants.h"
+#include "wine_env.h"
 #include "audio_broker.h"
-
 // 由 LaunchPadMode 在启动 Broker 前设置
 std::string gBrokerHomeDir;
 
@@ -28,6 +28,9 @@ std::string gBrokerHomeDir;
 #include <cstdlib>
 #include <thread>
 #include <atomic>
+#include <mutex>
+#include <utility>
+#include <vector>
 #include <AbilityKit/native_child_process.h>
 
 #undef LOG_DOMAIN
@@ -39,6 +42,8 @@ std::string gBrokerHomeDir;
 static const char* kBrokerSocketPath = WINE_BROKER_SOCKET;
 
 static std::atomic<bool> gBrokerRunning{false};
+static std::mutex gBrokerSessionEnvMutex;
+static std::vector<std::string> gBrokerSessionEnv;
 
 // 处理单个请求: recvmsg(entryParams + fd) → StartNativeChildProcess → sendmsg(childPid, status)
 static void HandleRequest(int conn_fd)
@@ -154,6 +159,19 @@ static void HandleRequest(int conn_fd)
     // 复制 entryParams 并加上 homeDir 前缀 (与 LaunchPadMode 新格式一致)
     std::string fullParams = gBrokerHomeDir.empty() ? entryParamsRaw
                             : (gBrokerHomeDir + "|" + entryParamsRaw);
+    std::vector<std::string> sessionEnv;
+    {
+        std::lock_guard<std::mutex> lock(gBrokerSessionEnvMutex);
+        sessionEnv = gBrokerSessionEnv;
+    }
+    if (!sessionEnv.empty()) {
+        size_t appended = AppendMissingEntryParamsEnvOverrides(fullParams, sessionEnv);
+        if (appended > 0) {
+            OH_LOG_INFO(LOG_APP,
+                        "[Broker] appended missing session env overrides count=%{public}zu/%{public}zu",
+                        appended, sessionEnv.size());
+        }
+    }
     char* entryParamsCopy = strdup(fullParams.c_str());
 
     // 建 fd 链表: 名字取自 FDS 行; 无 FDS 行且恰好 1 个 fd 时回退旧命名 wineserver_sock
@@ -221,19 +239,16 @@ static void HandleRequest(int conn_fd)
         }
     }
 
-    NativeChildProcess_FdList fdList = {};
-    fdList.head = (nNodes > 0) ? &nodes[0] : nullptr;
-
-    // 音频 bootstrap fd (仅音频支持进程需要)
     int audioBootstrapFd = winehua::AudioBroker::GetInstance().CreateBootstrapHandle();
     if (audioBootstrapFd >= 0 && nNodes < kMaxFds) {
         nodes[nNodes].fdName = const_cast<char*>("wine_audio_bootstrap");
         nodes[nNodes].fd = audioBootstrapFd;
-        nodes[nNodes].next = nullptr;
         if (nNodes > 0) nodes[nNodes - 1].next = &nodes[nNodes];
         nNodes++;
     }
 
+    NativeChildProcess_FdList fdList = {};
+    fdList.head = (nNodes > 0) ? &nodes[0] : nullptr;
     NativeChildProcess_Args args = {};
     args.entryParams = entryParamsCopy;
     args.fdList = fdList;
@@ -263,6 +278,25 @@ static void HandleRequest(int conn_fd)
     }
 
     close(conn_fd);
+}
+
+void SetBrokerSessionEnv(std::vector<std::string> env)
+{
+    size_t count = env.size();
+    {
+        std::lock_guard<std::mutex> lock(gBrokerSessionEnvMutex);
+        gBrokerSessionEnv = std::move(env);
+    }
+    OH_LOG_INFO(LOG_APP, "[Broker] session env set count=%{public}zu", count);
+}
+
+void ClearBrokerSessionEnv()
+{
+    {
+        std::lock_guard<std::mutex> lock(gBrokerSessionEnvMutex);
+        gBrokerSessionEnv.clear();
+    }
+    OH_LOG_INFO(LOG_APP, "[Broker] session env cleared");
 }
 
 // Broker 线程主循环

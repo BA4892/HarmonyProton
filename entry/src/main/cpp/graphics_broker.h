@@ -22,8 +22,6 @@ struct GraphicsBackendState
     bool guestReceiverPresent = false;
     bool virglSocketReady = false;
     bool virglLibraryPresent = false;
-    bool virglSmokeAttempted = false;
-    bool virglSmokeSucceeded = false;
     bool zeroCopyFramePath = false;
     std::string runtimeDir;
     std::string guestReceiverRuntimeDir;
@@ -32,7 +30,6 @@ struct GraphicsBackendState
     std::string virglSocketPath;
     std::string virglLibraryPath;
     std::string frameTransportMode;
-    std::string virglSmokeError;
     std::string lastError;
 };
 
@@ -67,7 +64,6 @@ private:
     bool IsVirglServerProcessAliveLocked();
     void RefreshVirglStateLocked();
     void RefreshGuestReceiverStateLocked();
-    void ProbeVirglRuntimeSmokeLocked();
     void StartVirglSocketServerLocked();
     void UpdateActiveBackendLocked();
     std::string ProbeVirglLibraryLocked(bool* outLoaded) const;
@@ -80,8 +76,6 @@ private:
     bool guestReceiverPresent_ = false;
     bool virglSocketReady_ = false;
     bool virglLibraryPresent_ = false;
-    bool virglSmokeAttempted_ = false;
-    bool virglSmokeSucceeded_ = false;
     bool loggedVirglFallback_ = false;
     std::string runtimeDir_;
     std::string wineRuntimeBinDir_;
@@ -90,11 +84,12 @@ private:
     std::string guestReceiverError_;
     std::vector<std::string> guestReceiverEnv_;
     std::string virglServerProgramPath_;
+    std::string virglVtestLibraryPath_;
     std::string virglSocketPath_;
     std::string virglLibraryPath_;
-    std::string virglSmokeError_;
     std::string lastError_;
     int virglServerPid_ = -1;
+    bool virglServerUsesNcp_ = false;
     std::atomic<bool> virglServerRunning_{false};
 };
 

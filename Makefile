@@ -158,7 +158,12 @@ native-$(1): $$(STAMPS)/$(1)/native
 
 $$(STAMPS)/$(1)/native: $(SCRIPTS)/build_native.sh $(SCRIPTS)/env.sh FORCE | $$(STAMPS)/$(1)
 	@sentinel="$(NATIVE_SENTINEL_$(subst -,_,$(1)))"; \
-	if [ -f $$@ ] && [ -f "$$$$sentinel" ] && \
+	libs_dir="$(ROOT)/entry/libs/$(1)"; \
+		if [ -f $$@ ] && [ -f "$$$$sentinel" ] && \
+		    [ -f "$$$$libs_dir/libfreetype.so.6" ] && \
+		    [ -f "$$$$libs_dir/libxkbcommon.so.0" ] && \
+		    [ -f "$$$$libs_dir/libxml2.so.2" ] && \
+		    [ -f "$$$$libs_dir/libwinehua_vtest_server.so" ] && \
 	    ! find $(ROOT)/thirdparty/wayland \
 	           $(ROOT)/thirdparty/libffi \
 	           $(ROOT)/thirdparty/libepoxy \

@@ -150,6 +150,18 @@ copy_support_lib_if_present() {
     cp -L "$candidate" "$OUTPUT_ROOT/lib/$dest_name"
 }
 
+copy_guest_runtime_lib_if_present() {
+    local dest_name="$1"
+    shift
+    local candidate=""
+
+    [ -f "$OUTPUT_ROOT/lib/$dest_name" ] && return 0
+
+    candidate="$(find_first_existing_file "$@" || true)"
+    [ -n "$candidate" ] || return 0
+    cp -L "$candidate" "$OUTPUT_ROOT/lib/$dest_name"
+}
+
 materialize_bundle_alias() {
     local alias_name="$1"
     shift
@@ -262,6 +274,41 @@ copy_support_lib_if_present "libdrm.so" \
     "$SYSROOT_EXT_LIB/libdrm.so" \
     "$SYSROOT_EXT_LIB/libdrm.so.2" \
     "$SYSROOT_EXT_LIB/libdrm.so.2.4.0"
+copy_support_lib_if_present "libwayland-client.so.0" \
+    "$SYSROOT_EXT_LIB/libwayland-client.so.0"
+copy_support_lib_if_present "libwayland-client.so" \
+    "$SYSROOT_EXT_LIB/libwayland-client.so" \
+    "$SYSROOT_EXT_LIB/libwayland-client.so.0"
+copy_support_lib_if_present "libwayland-server.so.0" \
+    "$SYSROOT_EXT_LIB/libwayland-server.so.0"
+copy_support_lib_if_present "libwayland-server.so" \
+    "$SYSROOT_EXT_LIB/libwayland-server.so" \
+    "$SYSROOT_EXT_LIB/libwayland-server.so.0"
+copy_support_lib_if_present "libwayland-egl.so.1" \
+    "$SYSROOT_EXT_LIB/libwayland-egl.so.1"
+copy_support_lib_if_present "libwayland-egl.so" \
+    "$SYSROOT_EXT_LIB/libwayland-egl.so" \
+    "$SYSROOT_EXT_LIB/libwayland-egl.so.1"
+copy_support_lib_if_present "libffi.so.8" \
+    "$SYSROOT_EXT_LIB/libffi.so.8"
+copy_support_lib_if_present "libffi.so" \
+    "$SYSROOT_EXT_LIB/libffi.so" \
+    "$SYSROOT_EXT_LIB/libffi.so.8"
+copy_guest_runtime_lib_if_present "libz.so" \
+    "$SYSROOT_EXT_LIB/libz.so" \
+    "$SYSROOT/usr/lib/x86_64-linux-ohos/libz.so" \
+    "$ROOT/build/staging/wine-data/bin/x86_64-unix/libz.so" \
+    "$ROOT/build/merged_wine_data/bin/x86_64-unix/libz.so" \
+    "$ROOT/build/merged_wine_data/bin/guest_gfx/lib/libz.so"
+copy_guest_runtime_lib_if_present "libc++_shared.so" \
+    "$SYSROOT_EXT_LIB/libc++_shared.so" \
+    "$SYSROOT/usr/lib/x86_64-linux-ohos/libc++_shared.so" \
+    "$OHOS_SDK/native/llvm/lib/x86_64-linux-ohos/libc++_shared.so" \
+    "$TOOL_HOME/sdk/default/openharmony/native/llvm/lib/x86_64-linux-ohos/libc++_shared.so" \
+    "$TOOL_HOME/sdk/default/hms/native/BiSheng/lib/x86_64-linux-ohos/libc++_shared.so" \
+    "$ROOT/build/staging/wine-data/bin/x86_64-unix/libc++_shared.so" \
+    "$ROOT/build/merged_wine_data/bin/x86_64-unix/libc++_shared.so" \
+    "$ROOT/build/merged_wine_data/bin/guest_gfx/lib/libc++_shared.so"
 if [ -d "$INSTALL_ROOT/share/glvnd/egl_vendor.d" ]; then
     copy_tree_if_present "$INSTALL_ROOT/share/glvnd/egl_vendor.d" "$OUTPUT_ROOT/lib/egl_vendor.d"
 fi

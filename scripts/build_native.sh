@@ -66,9 +66,124 @@ build_libffi() {
     log "libffi ($NATIVE_ARCH) → $NATIVE_LIBS"
 }
 
-# ── 2. wayland (server + client) ──
+copy_soname_with_linker_alias() {
+    local src="$1"
+    local soname="$2"
+    local linker="${3:-}"
+
+    [ -f "$src" ] || err "native lib source missing: $src"
+    cp "$src" "$NATIVE_LIBS/$soname"
+    if [ -n "$linker" ]; then
+        cp "$src" "$NATIVE_LIBS/$linker"
+    fi
+}
+
+# ── 2. ARM64 bridge libs used by Box64 wrapped native libraries ──
+remove_native_egl_linker_stubs() {
+    # The Native SDK files are link-time stubs. OHOS host processes must load
+    # the public runtime implementations from /system/lib64 instead.
+    rm -f "$NATIVE_LIBS/libEGL.so" "$NATIVE_LIBS/libEGL.so.1"
+}
+
+build_native_freetype() {
+    if [ -f "$NATIVE_LIBS/libfreetype.so.6" ] && [ -f "$NATIVE_LIBS/libfreetype.so" ]; then
+        log "freetype ($NATIVE_ARCH) 已就绪，跳过"
+        return 0
+    fi
+
+    log "--- freetype ($NATIVE_ARCH) ---"
+    local src="$ROOT/thirdparty/freetype"
+    local build="$NATIVE_BUILD/freetype"
+    rm -rf "$build"
+    cmake "$src" -B "$build" -GNinja \
+        -DCMAKE_SYSTEM_NAME=Linux \
+        -DCMAKE_SYSTEM_PROCESSOR="$NATIVE_CPU" \
+        -DCMAKE_C_COMPILER="$OHOS_SDK/native/llvm/bin/clang" \
+        -DCMAKE_C_COMPILER_TARGET="$NATIVE_TARGET" \
+        -DCMAKE_SYSROOT="$SYSROOT" \
+        -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+        -DCMAKE_C_FLAGS="--target=$NATIVE_TARGET --sysroot=$SYSROOT -fPIC -D__MUSL__" \
+        -DCMAKE_SHARED_LINKER_FLAGS="--target=$NATIVE_TARGET --sysroot=$SYSROOT -fuse-ld=lld" \
+        -DCMAKE_EXE_LINKER_FLAGS="--target=$NATIVE_TARGET --sysroot=$SYSROOT -fuse-ld=lld" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DFT_DISABLE_ZLIB=ON \
+        -DFT_DISABLE_BROTLI=ON \
+        -DFT_DISABLE_HARFBUZZ=ON \
+        -DFT_DISABLE_PNG=ON \
+        -DFT_DISABLE_BZIP2=ON \
+        -DBUILD_SHARED_LIBS=ON
+    ninja -C "$build"
+
+    copy_soname_with_linker_alias "$build/libfreetype.so.6.20.2" "libfreetype.so.6" "libfreetype.so"
+    log "freetype ($NATIVE_ARCH) → $NATIVE_LIBS"
+}
+
+build_native_libxml2() {
+    if [ -f "$NATIVE_LIBS/libxml2.so.2" ] \
+       && [ -f "$NATIVE_LIBS/libxml2.so" ] \
+       && [ -d "$NATIVE_BUILD/libxml2/install/include/libxml2/libxml" ] \
+       && [ -f "$NATIVE_BUILD/libxml2/install/lib/pkgconfig/libxml-2.0.pc" ]; then
+        log "libxml2 ($NATIVE_ARCH) 已就绪，跳过"
+        return 0
+    fi
+
+    log "--- libxml2 ($NATIVE_ARCH) ---"
+    local src="$ROOT/thirdparty/libxml2"
+    local build="$NATIVE_BUILD/libxml2"
+    rm -rf "$build"
+    cmake -S "$src" -B "$build" -GNinja \
+        -DCMAKE_TOOLCHAIN_FILE="$OHOS_SDK/native/build/cmake/ohos.toolchain.cmake" \
+        -DOHOS_ARCH="$NATIVE_ARCH" -DOHOS_PLATFORM=OHOS \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DLIBXML2_WITH_PYTHON=OFF -DLIBXML2_WITH_TESTS=OFF \
+        -DLIBXML2_WITH_PROGRAMS=OFF -DLIBXML2_WITH_HTTP=OFF \
+        -DLIBXML2_WITH_FTP=OFF -DLIBXML2_WITH_MODULES=OFF \
+        -DLIBXML2_WITH_LZMA=OFF -DLIBXML2_WITH_ZLIB=OFF -DLIBXML2_WITH_ICONV=OFF \
+        -DCMAKE_INSTALL_PREFIX="$build/install"
+    cmake --build "$build"
+    cmake --install "$build"
+
+    copy_soname_with_linker_alias "$build/libxml2.so.2.12.0" "libxml2.so.2" "libxml2.so"
+    log "libxml2 ($NATIVE_ARCH) → $NATIVE_LIBS"
+}
+
+build_native_xkbcommon() {
+    if [ -f "$NATIVE_LIBS/libxkbcommon.so.0" ] \
+       && [ -f "$NATIVE_LIBS/libxkbcommon.so" ] \
+       && [ -f "$NATIVE_LIBS/libxkbregistry.so.0" ] \
+       && [ -f "$NATIVE_LIBS/libxkbregistry.so" ]; then
+        log "xkbcommon ($NATIVE_ARCH) 已就绪，跳过"
+        return 0
+    fi
+
+    log "--- xkbcommon ($NATIVE_ARCH) ---"
+    local src="$ROOT/thirdparty/libxkbcommon"
+    local build="$NATIVE_BUILD/xkbcommon"
+    local cross
+    cross="$(gen_native_cross)"
+
+    rm -rf "$build"
+    export PKG_CONFIG_PATH="$NATIVE_BUILD/libxml2/install/lib/pkgconfig:$NATIVE_BUILD/libffi/install/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+    meson setup "$build" "$src" \
+        --cross-file "$cross" \
+        -Denable-x11=false \
+        -Denable-wayland=false \
+        -Denable-xkbregistry=true \
+        -Denable-tools=false \
+        -Denable-docs=false \
+        -Denable-bash-completion=false
+    ninja -C "$build"
+
+    copy_soname_with_linker_alias "$build/libxkbcommon.so.0.0.0" "libxkbcommon.so.0" "libxkbcommon.so"
+    copy_soname_with_linker_alias "$build/libxkbregistry.so.0.0.0" "libxkbregistry.so.0" "libxkbregistry.so"
+    log "xkbcommon ($NATIVE_ARCH) → $NATIVE_LIBS"
+}
+
+# ── 3. wayland (server + client) ──
 build_wayland() {
-    if [ -f "$NATIVE_LIBS/libwayland-server.so.0" ]; then
+    if [ -f "$NATIVE_LIBS/libwayland-server.so.0" ] \
+       && [ -f "$NATIVE_LIBS/libwayland-client.so.0" ] \
+       && [ -f "$NATIVE_LIBS/libwayland-egl.so.1" ]; then
         log "wayland ($NATIVE_ARCH) 已就绪，跳过"
         return 0
     fi
@@ -90,8 +205,10 @@ build_wayland() {
     # 安装 .so 到 Native libs
     cp "$build/src/libwayland-server.so.0.22.0" "$NATIVE_LIBS/libwayland-server.so.0"
     cp "$build/src/libwayland-client.so.0.22.0" "$NATIVE_LIBS/libwayland-client.so.0"
+    cp "$build/egl/libwayland-egl.so.1.22.0" "$NATIVE_LIBS/libwayland-egl.so.1"
     ln -sf libwayland-server.so.0 "$NATIVE_LIBS/libwayland-server.so"
     ln -sf libwayland-client.so.0 "$NATIVE_LIBS/libwayland-client.so"
+    ln -sf libwayland-egl.so.1 "$NATIVE_LIBS/libwayland-egl.so"
 
     log "wayland ($NATIVE_ARCH) → $NATIVE_LIBS"
 }
@@ -195,17 +312,24 @@ find_python_with_yaml() {
 }
 
 build_virglrenderer() {
-    if [ -f "$NATIVE_LIBS/libvirglrenderer.so.1" ] && [ -x "$NATIVE_LIBS/virgl_test_server" ]; then
-        log "virglrenderer ($NATIVE_ARCH) 已就绪，跳过"
-        return 0
-    fi
-
-    log "--- virglrenderer ($NATIVE_ARCH) ---"
     local src="$ROOT/thirdparty/virglrenderer"
     local build="$NATIVE_BUILD/virglrenderer"
     local cross
     local epoxy_pc="$NATIVE_BUILD/libepoxy/install/lib/pkgconfig"
     local python_with_yaml
+
+    rm -f "$NATIVE_LIBS/libvirgl_test_server.so"
+
+    if [ -f "$NATIVE_LIBS/libvirglrenderer.so.1" ] && \
+       [ -f "$NATIVE_LIBS/libwinehua_vtest_server.so" ] && \
+       [ -x "$NATIVE_LIBS/virgl_test_server" ] && \
+       ! find "$src" -newer "$NATIVE_LIBS/libwinehua_vtest_server.so" -type f \
+           \( -name '*.c' -o -name '*.h' -o -name 'meson.build' \) 2>/dev/null | grep -q .; then
+        log "virglrenderer ($NATIVE_ARCH) 已就绪，跳过"
+        return 0
+    fi
+
+    log "--- virglrenderer ($NATIVE_ARCH) ---"
 
     [ -d "$src" ] || err "thirdparty/virglrenderer is missing"
     [ -d "$epoxy_pc" ] || err "libepoxy pkg-config directory is missing, build libepoxy first: $epoxy_pc"
@@ -244,17 +368,24 @@ build_virglrenderer() {
         find "$build" -name 'virgl_test_server' -type f -exec cp {} "$NATIVE_LIBS/virgl_test_server" \;
     cp "$build/install/bin/virgl_test_server" "$NATIVE_LIBS/" 2>/dev/null || true
     chmod +x "$NATIVE_LIBS/virgl_test_server" 2>/dev/null || true
+    cp "$build/install/lib/libwinehua_vtest_server.so" "$NATIVE_LIBS/" 2>/dev/null || \
+        find "$build" -name 'libwinehua_vtest_server.so' -type f -exec cp {} "$NATIVE_LIBS/libwinehua_vtest_server.so" \;
+    rm -f "$NATIVE_LIBS/libvirgl_test_server.so"
 
     log "virglrenderer ($NATIVE_ARCH) → $NATIVE_LIBS"
 }
 
 # ── main ──
 build_libffi
+build_native_freetype
+build_native_libxml2
+build_native_xkbcommon
 build_wayland
 build_protocols
 install_headers
 build_libepoxy
 build_virglrenderer
+remove_native_egl_linker_stubs
 
 log "Native compositor 依赖就绪 ($NATIVE_ARCH)"
 log "  libs:  $NATIVE_LIBS"

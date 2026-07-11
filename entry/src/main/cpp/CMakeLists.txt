@@ -56,3 +56,6 @@ target_link_libraries(entry PUBLIC
 
 add_library(wine_child SHARED wine_child.cpp)
 target_link_libraries(wine_child PUBLIC libhilog_ndk.z.so libchild_process.so)
+
+add_library(virgl_child SHARED virgl_child.cpp)
+target_link_libraries(virgl_child PUBLIC libhilog_ndk.z.so libchild_process.so)

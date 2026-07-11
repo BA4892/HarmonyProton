@@ -361,8 +361,8 @@ pkg-config = '$PKG_CONFIG_BIN'
 wayland-scanner = '$WAYLAND_SCANNER'
 
 [built-in options]
-c_args = ['--target=$TARGET', '--sysroot=$SYSROOT', '-I$SYSROOT_EXT_INC', '-fno-emulated-tls']
-cpp_args = ['--target=$TARGET', '--sysroot=$SYSROOT', '-I$SYSROOT_EXT_INC', '-fno-emulated-tls']
+c_args = ['--target=$TARGET', '--sysroot=$SYSROOT', '-I$SYSROOT_EXT_INC', '-fno-emulated-tls', '-U__OHOS_FAMILY__', '-DDETECT_OS_OHOS=0']
+cpp_args = ['--target=$TARGET', '--sysroot=$SYSROOT', '-I$SYSROOT_EXT_INC', '-fno-emulated-tls', '-U__OHOS_FAMILY__', '-DDETECT_OS_OHOS=0']
 c_link_args = ['--target=$TARGET', '--sysroot=$SYSROOT', '-fuse-ld=lld', '-L$SYSROOT_EXT_LIB']
 cpp_link_args = ['--target=$TARGET', '--sysroot=$SYSROOT', '-fuse-ld=lld', '-L$SYSROOT_EXT_LIB']
 pkg_config_path = ['$SYSROOT_EXT_PC', '$SYSROOT/usr/lib/pkgconfig']
@@ -727,8 +727,8 @@ MESON_ARGS=(
 
 # OHOS SDK (native, 非完整系统) 缺少 hilog/log.h。
 # 覆盖 __OHOS_FAMILY__ 触发的 DETECT_OS_OHOS, 用标准 Linux 日志路径。
-export CFLAGS="${CFLAGS:-} -DDETECT_OS_OHOS=0"
-export CXXFLAGS="${CXXFLAGS:-} -DDETECT_OS_OHOS=0"
+export CFLAGS="${CFLAGS:-} -U__OHOS_FAMILY__ -DDETECT_OS_OHOS=0"
+export CXXFLAGS="${CXXFLAGS:-} -U__OHOS_FAMILY__ -DDETECT_OS_OHOS=0"
 
 log "=== Build OHOS guest_gfx receiver ($NATIVE_ARCH) ==="
 log "platform: $PLATFORM"

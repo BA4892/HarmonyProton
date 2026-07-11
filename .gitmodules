@@ -32,7 +32,8 @@
 	url = https://github.com/winehua/virglrenderer.git
 [submodule "thirdparty/libepoxy"]
 	path = thirdparty/libepoxy
-	url = https://github.com/anholt/libepoxy.git
+	url = https://github.com/winehua/libepoxy.git
+	branch = dev
 [submodule "thirdparty/mesa"]
 	path = thirdparty/mesa
 	url = https://gitee.com/openharmony/third_party_mesa3d.git
