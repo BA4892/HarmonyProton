@@ -46,6 +46,7 @@ target_link_libraries(entry PUBLIC
     libace_napi.z.so
     libace_ndk.z.so
     libnative_window.so
+    libnative_vsync.so
     libEGL.so
     libGLESv3.so
     libhilog_ndk.z.so

@@ -8,6 +8,7 @@
 #include <vector>
 #include <mutex>
 #include <fcntl.h>
+#include <native_vsync/native_vsync.h>
 #include <unistd.h>
 
 #undef LOG_TAG
@@ -150,6 +151,17 @@ struct RendererPerfWindow {
 
 float EglRenderer::globalDisplayScale_ = 1.0f;
 
+void EglRenderer::OnVSync(long long timestamp, void* data)
+{
+    static_cast<void>(timestamp);
+    auto* renderer = static_cast<EglRenderer*>(data);
+    {
+        std::lock_guard<std::mutex> lock(renderer->vsyncMutex_);
+        ++renderer->vsyncSequence_;
+    }
+    renderer->vsyncCv_.notify_one();
+}
+
 EGLDisplay EglRenderer::GetSharedDisplay() {
     std::call_once(gDisplayOnce, []() {
         gSharedDisplay = eglGetDisplay(EGL_DEFAULT_DISPLAY);
@@ -251,6 +263,12 @@ void EglRenderer::RenderLoop() {
         return;
     }
 
+    // NativeVSync owns frame scheduling. Disable EGL's independent swap pacing
+    // so a frame does not wait once for VSync and again inside eglSwapBuffers.
+    const bool swapIntervalDisabled = eglSwapInterval(display_, 0) == EGL_TRUE;
+    OH_LOG_INFO(LOG_APP, "[MW-RNDR] tl=%{public}u eglSwapInterval(0)=%{public}s",
+                toplevelId_, swapIntervalDisabled ? "OK" : "FAIL");
+
     // 2. 着色器
     GLuint vs = CompileShader(GL_VERTEX_SHADER, kVS);
     GLuint fs = CompileShader(GL_FRAGMENT_SHADER, kFS);
@@ -276,7 +294,7 @@ void EglRenderer::RenderLoop() {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    // 5. 渲染循环: 60fps, 每帧按 toplevelId 取帧
+    // 5. 渲染循环: 跟随硬件 VSync, 每次只取最新的 toplevel 帧
     FpsCounter fps("render");
     std::vector<uint8_t> px;
     int fw = 0, fh = 0;
@@ -284,14 +302,88 @@ void EglRenderer::RenderLoop() {
     bool firstFrameLogged = false;
     bool rendered = false;  // 首帧已渲染后, 无新帧时跳过 GPU 绘制
     RendererPerfWindow perf;
-    auto paceFrame = [](uint64_t startedUs) {
-        constexpr uint64_t kFramePeriodUs = 16667;
-        const uint64_t elapsedUs = PerfNowUs() - startedUs;
-        if (elapsedUs < kFramePeriodUs)
-            usleep(static_cast<useconds_t>(kFramePeriodUs - elapsedUs));
+
+    static constexpr long long kFallbackPeriodNs = 16666667;
+    static constexpr auto kVSyncTimeout = std::chrono::milliseconds(100);
+    const char vsyncName[] = "WineHuaRenderer";
+    OH_NativeVSync* nativeVsync = OH_NativeVSync_Create(vsyncName, sizeof(vsyncName) - 1);
+    if (nativeVsync) {
+        OH_NativeVSync_ExpectedRateRange expectedRate = {60, 120, 120};
+        const int rateResult = OH_NativeVSync_SetExpectedFrameRateRange(
+            nativeVsync, &expectedRate);
+        OH_LOG_INFO(LOG_APP,
+                    "[MW-RNDR] tl=%{public}u request frame rate min=%{public}d "
+                    "max=%{public}d expected=%{public}d result=%{public}d",
+                    toplevelId_, expectedRate.min, expectedRate.max,
+                    expectedRate.expected, rateResult);
+    }
+    long long vsyncPeriodNs = kFallbackPeriodNs;
+    long long loggedPeriodNs = 0;
+    unsigned int vsyncFailures = 0;
+    auto fallbackDeadline = PerfClock::now();
+
+    auto waitForFrameTick = [&]() -> bool {
+        if (!running_) return false;
+
+        if (nativeVsync) {
+            uint64_t requestedSequence;
+            {
+                std::lock_guard<std::mutex> lock(vsyncMutex_);
+                requestedSequence = vsyncSequence_;
+            }
+
+            const int requestResult = OH_NativeVSync_RequestFrame(
+                nativeVsync, &EglRenderer::OnVSync, this);
+            if (requestResult == 0) {
+                std::unique_lock<std::mutex> lock(vsyncMutex_);
+                const bool signaled = vsyncCv_.wait_for(lock, kVSyncTimeout, [&]() {
+                    return !running_ || vsyncSequence_ != requestedSequence;
+                });
+                lock.unlock();
+
+                if (!running_) return false;
+                if (signaled) {
+                    long long period = 0;
+                    if (OH_NativeVSync_GetPeriod(nativeVsync, &period) == 0 && period > 0) {
+                        vsyncPeriodNs = period;
+                        const long long periodDelta = period > loggedPeriodNs
+                            ? period - loggedPeriodNs : loggedPeriodNs - period;
+                        if (loggedPeriodNs == 0 || periodDelta >= 500000) {
+                            const double refreshRate = 1000000000.0 / static_cast<double>(period);
+                            OH_LOG_INFO(LOG_APP,
+                                        "[MW-RNDR] tl=%{public}u NativeVSync period=%{public}lldns "
+                                        "rate=%{public}.2fHz",
+                                        toplevelId_, period, refreshRate);
+                            loggedPeriodNs = period;
+                        }
+                    }
+                    vsyncFailures = 0;
+                    fallbackDeadline = PerfClock::now();
+                    return true;
+                }
+            }
+
+            ++vsyncFailures;
+            if (vsyncFailures == 1 || vsyncFailures % 120 == 0) {
+                OH_LOG_WARN(LOG_APP,
+                            "[MW-RNDR] tl=%{public}u NativeVSync unavailable "
+                            "request=%{public}d failures=%{public}u, using deadline fallback",
+                            toplevelId_, requestResult, vsyncFailures);
+            }
+        }
+
+        const auto period = std::chrono::nanoseconds(
+            vsyncPeriodNs > 0 ? vsyncPeriodNs : kFallbackPeriodNs);
+        const auto now = PerfClock::now();
+        fallbackDeadline += period;
+        if (fallbackDeadline <= now || fallbackDeadline - now > period * 2)
+            fallbackDeadline = now + period;
+        std::this_thread::sleep_until(fallbackDeadline);
+        return running_;
     };
 
-    OH_LOG_INFO(LOG_APP, "[MW-RNDR] tl=%{public}u render loop started", toplevelId_);
+    OH_LOG_INFO(LOG_APP, "[MW-RNDR] tl=%{public}u render loop started pacing=%{public}s",
+                toplevelId_, nativeVsync ? "NativeVSync" : "deadline-60Hz");
 
     while (running_) {
         const uint64_t frameStartedUs = PerfNowUs();
@@ -345,8 +437,8 @@ void EglRenderer::RenderLoop() {
 
         // 无新帧且已渲染过首帧 → 跳过 GPU 绘制, 静态桌面节省 GPU 功耗
         if (!haveFrame && rendered) {
-            paceFrame(frameStartedUs);
             loopCount++;
+            if (!waitForFrameTick()) break;
             continue;
         }
 
@@ -426,12 +518,15 @@ void EglRenderer::RenderLoop() {
         }
         fps.Tick();
         loopCount++;
-        paceFrame(frameStartedUs);
+        if (!waitForFrameTick()) break;
     }
+
+    if (nativeVsync) OH_NativeVSync_Destroy(nativeVsync);
 }
 
 void EglRenderer::Shutdown() {
     running_ = false;
+    vsyncCv_.notify_all();
     if (thread_.joinable()) thread_.join();
     if (display_ != EGL_NO_DISPLAY) {
         eglMakeCurrent(display_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);

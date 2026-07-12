@@ -6,6 +6,8 @@
 #include <thread>
 #include <atomic>
 #include <cstdint>
+#include <condition_variable>
+#include <mutex>
 
 // 最小 EGL 渲染器: 从 WaylandServer 取帧 -> GL 纹理 -> XComponent 上屏
 // 所有实例共享同一个 EGLDisplay (避免反复 init/terminate 导致 GPU 驱动竞争)
@@ -39,6 +41,7 @@ public:
 
 private:
     void RenderLoop();
+    static void OnVSync(long long timestamp, void* data);
 
     OHNativeWindow* window_ = nullptr;
     EGLDisplay display_ = EGL_NO_DISPLAY;
@@ -57,6 +60,9 @@ private:
     int lastLoggedW_ = 0, lastLoggedH_ = 0;  // 上次输出 resize 日志时的 surface 尺寸
     std::thread thread_;
     std::atomic<bool> running_{false};
+    std::mutex vsyncMutex_;
+    std::condition_variable vsyncCv_;
+    uint64_t vsyncSequence_ = 0;
 
     uint32_t toplevelId_ = 0;
 
