@@ -864,9 +864,10 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
             return true;
         }
 
-        // 从干净的 root 帧复制一份用于合成，避免污染 toplevelPixels_[root]。
-        // （否则下次合成时上次写入的子窗口像素会残留）
-        std::vector<uint8_t> composited = rit->second;
+        // 复用 renderer 持有的输出容量，避免每帧分配和释放 4 MB 合成缓冲。
+        // 仍从干净 root 帧复制，不能污染 toplevelPixels_[root]。
+        out = rit->second;
+        auto& composited = out;
         const auto rootCopied = TakeClock::now();
 
         // 按 Z-order 合成: 先合成的在后面, 后合成的覆盖前面。
@@ -956,7 +957,6 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
         }
         const auto subsurfacesComposited = TakeClock::now();
 
-        out = std::move(composited);
         const auto outputMoved = TakeClock::now();
         auto elapsedUs = [](TakeClock::time_point begin, TakeClock::time_point end) {
             return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
