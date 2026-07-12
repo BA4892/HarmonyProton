@@ -652,6 +652,18 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
             if (parentSd && parentSd->hasToplevel) {
                 uint32_t parentId = parentSd->toplevelId;
                 if (self->IsDesktopMode()) {
+                    const uint32_t shmFormat = wl_shm_buffer_get_format(shm);
+                    bool opaque = shmFormat != 0;
+                    if (!opaque) {
+                        opaque = true;
+                        const uint8_t* pixels = sd->pixels.data();
+                        for (size_t i = 3; i < sd->pixels.size(); i += 4) {
+                            if (pixels[i] != 0xff) {
+                                opaque = false;
+                                break;
+                            }
+                        }
+                    }
                     // Desktop 模式: 存 layer, 在 TakeToplevelFrame 中合成 (不污染 toplevelPixels_)
                     std::lock_guard<std::mutex> lk(self->toplevelMutex_);
                     SubsurfaceLayer layer;
@@ -700,7 +712,8 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                         layer.y = wineY + sy;
                     }
                     layer.parentToplevel = parentId;
-                    layer.shmFormat = wl_shm_buffer_get_format(shm);
+                    layer.shmFormat = shmFormat;
+                    layer.opaque = opaque;
                     layer.vpDstW = sd->vpDstW; layer.vpDstH = sd->vpDstH;
                     layer.dmgX = sd->damageX; layer.dmgY = sd->damageY;
                     layer.dmgW = sd->damageW; layer.dmgH = sd->damageH;
@@ -954,13 +967,13 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
                 renderH = damageBottom - damageTop;
             }
             // WL_SHM_FORMAT_ARGB8888=0 (有alpha), WL_SHM_FORMAT_XRGB8888=1 (无alpha)
-            bool isArgb = (layer.shmFormat == 0);
+            const bool needsAlphaBlend = layer.shmFormat == 0 && !layer.opaque;
             for (int y = 0; y < renderH; y++) {
                 const uint8_t* srcRow = layer.pixels.data() +
                     ((renderSrcY + y) * layer.w + renderSrcX) * 4;
                 uint8_t* dstRow = composited.data() +
                     ((renderDstY + y) * rootW + renderDstX) * 4;
-                if (!isArgb) {
+                if (!needsAlphaBlend) {
                     std::memcpy(dstRow, srcRow, static_cast<size_t>(renderW) * 4);
                     continue;
                 }

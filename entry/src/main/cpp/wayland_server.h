@@ -200,6 +200,7 @@ private:
         int x = 0, y = 0, w = 0, h = 0;
         uint32_t parentToplevel = 0;
         uint32_t shmFormat = 1;
+        bool opaque = false;
         int32_t dmgX = 0, dmgY = 0, dmgW = 0, dmgH = 0;  // damage 包围盒
         int32_t vpDstW = -1, vpDstH = -1;                // viewport destination
         bool isExternal = false;  // 外部菜单 (任务栏等), 输入坐标需用 Wine 基底
