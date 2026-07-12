@@ -790,7 +790,47 @@ bool WaylandServer::TakeFrame(std::vector<uint8_t>& out, int& w, int& h) {
 }
 
 bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, int& w, int& h) {
-    std::lock_guard<std::mutex> lk(toplevelMutex_);
+    struct TakeBreakdownWindow {
+        uint64_t count = 0;
+        uint64_t sums[6] = {};
+        uint64_t maxima[6] = {};
+
+        void Add(uint64_t lockWait, uint64_t rootCopy, uint64_t children,
+                 uint64_t subsurfaces, uint64_t output, uint64_t total) {
+            const uint64_t values[6] = {lockWait, rootCopy, children, subsurfaces, output, total};
+            for (size_t i = 0; i < 6; ++i) {
+                sums[i] += values[i];
+                maxima[i] = std::max(maxima[i], values[i]);
+            }
+            if (++count != 120) return;
+            OH_LOG_INFO(LOG_APP,
+                        "[GL-TAKE] samples=120 avg_us=%{public}llu/%{public}llu/%{public}llu/%{public}llu/%{public}llu/%{public}llu "
+                        "max_us=%{public}llu/%{public}llu/%{public}llu/%{public}llu/%{public}llu/%{public}llu",
+                        static_cast<unsigned long long>(sums[0] / count),
+                        static_cast<unsigned long long>(sums[1] / count),
+                        static_cast<unsigned long long>(sums[2] / count),
+                        static_cast<unsigned long long>(sums[3] / count),
+                        static_cast<unsigned long long>(sums[4] / count),
+                        static_cast<unsigned long long>(sums[5] / count),
+                        static_cast<unsigned long long>(maxima[0]),
+                        static_cast<unsigned long long>(maxima[1]),
+                        static_cast<unsigned long long>(maxima[2]),
+                        static_cast<unsigned long long>(maxima[3]),
+                        static_cast<unsigned long long>(maxima[4]),
+                        static_cast<unsigned long long>(maxima[5]));
+            count = 0;
+            for (size_t i = 0; i < 6; ++i) {
+                sums[i] = 0;
+                maxima[i] = 0;
+            }
+        }
+    };
+    static TakeBreakdownWindow breakdown;
+
+    using TakeClock = std::chrono::steady_clock;
+    const auto takeStarted = TakeClock::now();
+    std::unique_lock<std::mutex> lk(toplevelMutex_);
+    const auto lockAcquired = TakeClock::now();
 
     // Desktop mode: 合成所有非 root toplevel 到 root framebuffer
     // 因为 Wine 不会在子窗口变化时重新提交桌面 surface，
@@ -824,9 +864,10 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
             return true;
         }
 
-        // 从干净的 root 帧复制一份用于合成，避免污染 toplevelPixels_[root]
+        // 从干净的 root 帧复制一份用于合成，避免污染 toplevelPixels_[root]。
         // （否则下次合成时上次写入的子窗口像素会残留）
         std::vector<uint8_t> composited = rit->second;
+        const auto rootCopied = TakeClock::now();
 
         // 按 Z-order 合成: 先合成的在后面, 后合成的覆盖前面。
         // Wine explorer 会创建多个全尺寸 toplevel (#1=背景层, #3=新桌面),
@@ -856,6 +897,7 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
                 memcpy(&dstRow[dstX * 4], &srcRow[srcX * 4], copyW * 4);
             }
         }
+        const auto childrenComposited = TakeClock::now();
 
         // 合成 subsurface 弹出层 (菜单/popup)
         for (auto& layer : subsurfaceLayers_) {
@@ -912,8 +954,20 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
                 }
             }
         }
+        const auto subsurfacesComposited = TakeClock::now();
 
         out = std::move(composited);
+        const auto outputMoved = TakeClock::now();
+        auto elapsedUs = [](TakeClock::time_point begin, TakeClock::time_point end) {
+            return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                end - begin).count());
+        };
+        breakdown.Add(elapsedUs(takeStarted, lockAcquired),
+                      elapsedUs(lockAcquired, rootCopied),
+                      elapsedUs(rootCopied, childrenComposited),
+                      elapsedUs(childrenComposited, subsurfacesComposited),
+                      elapsedUs(subsurfacesComposited, outputMoved),
+                      elapsedUs(takeStarted, outputMoved));
         w = rootW;
         h = rootH;
         toplevelDirty_[id] = false;

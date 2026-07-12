@@ -1,6 +1,9 @@
 #include "egl_renderer.h"
 #include "wayland_server.h"
 #include "fps_counter.h"
+#include <algorithm>
+#include <array>
+#include <chrono>
 #include <vector>
 #include <mutex>
 #include <unistd.h>
@@ -12,6 +15,90 @@
 // -- 共享 EGLDisplay: 整个进程只初始化一次, 避免反复 init/terminate 导致 GPU 驱动竞争 --
 static EGLDisplay gSharedDisplay = EGL_NO_DISPLAY;
 static std::once_flag gDisplayOnce;
+
+namespace {
+
+using PerfClock = std::chrono::steady_clock;
+
+static uint64_t PerfNowUs()
+{
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+        PerfClock::now().time_since_epoch()).count());
+}
+
+struct RendererPerfWindow {
+    static constexpr size_t kSamples = 120;
+
+    std::array<uint64_t, kSamples> takeUs{};
+    std::array<uint64_t, kSamples> uploadUs{};
+    std::array<uint64_t, kSamples> swapUs{};
+    std::array<uint64_t, kSamples> totalUs{};
+    size_t count = 0;
+    uint64_t displayed = 0;
+    uint64_t failedSwaps = 0;
+    uint64_t uploadBytes = 0;
+    uint64_t startedUs = PerfNowUs();
+
+    static uint64_t Percentile(std::array<uint64_t, kSamples> values, size_t count,
+                               unsigned int percentile)
+    {
+        std::sort(values.begin(), values.begin() + count);
+        const size_t index = std::min(count - 1, (count * percentile + 99) / 100 - 1);
+        return values[index];
+    }
+
+    void Add(uint32_t toplevelId, uint64_t take, uint64_t upload, uint64_t swap,
+             uint64_t total, size_t bytes, bool swapOk)
+    {
+        takeUs[count] = take;
+        uploadUs[count] = upload;
+        swapUs[count] = swap;
+        totalUs[count] = total;
+        ++count;
+        ++displayed;
+        uploadBytes += bytes;
+        if (!swapOk) ++failedSwaps;
+
+        if (count != kSamples) return;
+
+        const uint64_t nowUs = PerfNowUs();
+        const double fps = static_cast<double>(count) * 1000000.0 /
+                           static_cast<double>(std::max<uint64_t>(1, nowUs - startedUs));
+        OH_LOG_INFO(LOG_APP,
+                    "[GL-PERF] tl=%{public}u displayed=%{public}llu fps=%{public}.2f "
+                    "upload_bytes=%{public}llu failed_swaps=%{public}llu "
+                    "take_us=%{public}llu/%{public}llu/%{public}llu/%{public}llu "
+                    "upload_us=%{public}llu/%{public}llu/%{public}llu/%{public}llu "
+                    "swap_us=%{public}llu/%{public}llu/%{public}llu/%{public}llu "
+                    "total_us=%{public}llu/%{public}llu/%{public}llu/%{public}llu",
+                    toplevelId, static_cast<unsigned long long>(displayed), fps,
+                    static_cast<unsigned long long>(uploadBytes),
+                    static_cast<unsigned long long>(failedSwaps),
+                    static_cast<unsigned long long>(Percentile(takeUs, count, 50)),
+                    static_cast<unsigned long long>(Percentile(takeUs, count, 95)),
+                    static_cast<unsigned long long>(Percentile(takeUs, count, 99)),
+                    static_cast<unsigned long long>(*std::max_element(takeUs.begin(), takeUs.end())),
+                    static_cast<unsigned long long>(Percentile(uploadUs, count, 50)),
+                    static_cast<unsigned long long>(Percentile(uploadUs, count, 95)),
+                    static_cast<unsigned long long>(Percentile(uploadUs, count, 99)),
+                    static_cast<unsigned long long>(*std::max_element(uploadUs.begin(), uploadUs.end())),
+                    static_cast<unsigned long long>(Percentile(swapUs, count, 50)),
+                    static_cast<unsigned long long>(Percentile(swapUs, count, 95)),
+                    static_cast<unsigned long long>(Percentile(swapUs, count, 99)),
+                    static_cast<unsigned long long>(*std::max_element(swapUs.begin(), swapUs.end())),
+                    static_cast<unsigned long long>(Percentile(totalUs, count, 50)),
+                    static_cast<unsigned long long>(Percentile(totalUs, count, 95)),
+                    static_cast<unsigned long long>(Percentile(totalUs, count, 99)),
+                    static_cast<unsigned long long>(*std::max_element(totalUs.begin(), totalUs.end())));
+
+        count = 0;
+        uploadBytes = 0;
+        failedSwaps = 0;
+        startedUs = nowUs;
+    }
+};
+
+} // namespace
 
 float EglRenderer::globalDisplayScale_ = 1.0f;
 
@@ -148,10 +235,14 @@ void EglRenderer::RenderLoop() {
     int loopCount = 0;
     bool firstFrameLogged = false;
     bool rendered = false;  // 首帧已渲染后, 无新帧时跳过 GPU 绘制
+    RendererPerfWindow perf;
 
     OH_LOG_INFO(LOG_APP, "[MW-RNDR] tl=%{public}u render loop started", toplevelId_);
 
     while (running_) {
+        const uint64_t frameStartedUs = PerfNowUs();
+        const uint64_t takeStartedUs = frameStartedUs;
+        uint64_t uploadUs = 0;
         bool haveFrame = false;
         uint32_t useToplevel = toplevelId_;
         WaylandServer* ws = WaylandServer::GetInstance();
@@ -162,8 +253,10 @@ void EglRenderer::RenderLoop() {
         } else {
             haveFrame = ws->TakeFrame(px, fw, fh);
         }
+        const uint64_t takeUs = PerfNowUs() - takeStartedUs;
 
         if (haveFrame && fw > 0 && fh > 0) {
+            const uint64_t uploadStartedUs = PerfNowUs();
             // 存储帧尺寸供输入坐标转换
             frameW_ = fw;
             frameH_ = fh;
@@ -192,6 +285,7 @@ void EglRenderer::RenderLoop() {
             if (rowLen != fw) {
                 glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
             }
+            uploadUs = PerfNowUs() - uploadStartedUs;
             rendered = true;
         }
 
@@ -269,7 +363,13 @@ void EglRenderer::RenderLoop() {
         glUniform1i(glGetUniformLocation(program_, "uTex"), 0);
         glDrawArrays(GL_TRIANGLES, 0, 6);
 
-        eglSwapBuffers(display_, surface_);
+        const uint64_t swapStartedUs = PerfNowUs();
+        const bool swapOk = eglSwapBuffers(display_, surface_) == EGL_TRUE;
+        const uint64_t frameEndedUs = PerfNowUs();
+        if (haveFrame) {
+            perf.Add(useToplevel, takeUs, uploadUs, frameEndedUs - swapStartedUs,
+                     frameEndedUs - frameStartedUs, px.size(), swapOk);
+        }
         fps.Tick();
         loopCount++;
         usleep(16667);
