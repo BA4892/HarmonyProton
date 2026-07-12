@@ -105,6 +105,131 @@ static bool is_sdl_audio_test_exe(int argc, char *argv[])
     return !strcasecmp(base, "mj_x86.exe") || !strcasecmp(base, "mj_x86d.exe");
 }
 
+static bool program_is(const char *program, const char *name)
+{
+    if (!program || !name) return false;
+    if (!strcasecmp(program, name)) return true;
+
+    char withExe[128];
+    int n = snprintf(withExe, sizeof(withExe), "%s.exe", name);
+    return n > 0 && n < (int)sizeof(withExe) && !strcasecmp(program, withExe);
+}
+
+static bool arg_equals(int argc, char *argv[], const char *value)
+{
+    for (int i = 1; i < argc; ++i)
+        if (argv[i] && !strcasecmp(argv[i], value))
+            return true;
+    return false;
+}
+
+static bool arg_starts_with(int argc, char *argv[], const char *prefix)
+{
+    size_t prefixLen = prefix ? strlen(prefix) : 0;
+    if (!prefixLen) return false;
+
+    for (int i = 1; i < argc; ++i)
+        if (argv[i] && !strncasecmp(argv[i], prefix, prefixLen))
+            return true;
+    return false;
+}
+
+static bool has_windows_dir(const char *path)
+{
+    return path && (strchr(path, '\\') || strchr(path, '/'));
+}
+
+static bool is_launchable_path(const char *path)
+{
+    const char *base;
+    const char *dot;
+
+    if (!has_windows_dir(path)) return false;
+    base = basename_of_path(path);
+    dot = strrchr(base, '.');
+    if (!dot) return false;
+    return !strcasecmp(dot, ".exe") || !strcasecmp(dot, ".bat") || !strcasecmp(dot, ".cmd");
+}
+
+static std::string trim_quotes(const char *value)
+{
+    std::string s = value ? value : "";
+    while (!s.empty() && (s.front() == '"' || s.front() == '\'')) s.erase(s.begin());
+    while (!s.empty() && (s.back() == '"' || s.back() == '\'')) s.pop_back();
+    return s;
+}
+
+static bool append_windows_path_tail(std::string *out, const std::string& tail)
+{
+    for (char ch : tail)
+    {
+        if (ch == '\\') out->push_back('/');
+        else out->push_back(ch);
+    }
+    return !out->empty();
+}
+
+static bool wine_file_parent_to_native(const char *path, const char *homeDir, std::string *out)
+{
+    std::string file = trim_quotes(path);
+    size_t slash = file.find_last_of("\\/");
+    std::string dir;
+
+    if (slash == std::string::npos) return false;
+    dir = file.substr(0, slash);
+    if (dir.size() >= 3 && dir[1] == ':' && (dir[2] == '\\' || dir[2] == '/'))
+    {
+        char drive = (char)tolower((unsigned char)dir[0]);
+        std::string tail = dir.substr(3);
+
+        if (drive == 'z')
+        {
+            if (!homeDir || !homeDir[0]) return false;
+            *out = homeDir;
+            if (!out->empty() && out->back() != '/') out->push_back('/');
+            return append_windows_path_tail(out, tail);
+        }
+        if (drive == 'c')
+        {
+            *out = WINE_PREFIX "/drive_c/";
+            return append_windows_path_tail(out, tail);
+        }
+        return false;
+    }
+    if (!dir.empty() && dir[0] == '/')
+    {
+        *out = dir;
+        return true;
+    }
+    return false;
+}
+
+static bool derive_launch_cwd(int argc, char *argv[], const char *homeDir, std::string *out)
+{
+    const char *program;
+
+    if (argc <= 0 || !argv[0]) return false;
+    program = basename_of_path(argv[0]);
+
+    if (!strcasecmp(program, "wineboot") ||
+        !strcasecmp(program, "explorer") ||
+        !strcasecmp(program, "services.exe") ||
+        !strcasecmp(program, "wineserver"))
+        return false;
+
+    if (!strcasecmp(program, "cmd.exe") || !strcasecmp(program, "cmd"))
+    {
+        for (int i = argc - 1; i >= 1; --i)
+            if (is_launchable_path(argv[i]) && wine_file_parent_to_native(argv[i], homeDir, out))
+                return true;
+    }
+
+    if (is_launchable_path(argv[0]) && wine_file_parent_to_native(argv[0], homeDir, out))
+        return true;
+
+    return false;
+}
+
 static const char *select_winedebug_profile(int argc, char *argv[])
 {
     const char *override = getenv("WINEHUA_WINEDEBUG");
@@ -328,6 +453,12 @@ extern "C" void Main(NativeChildProcess_Args args)
     chdir(binDir);
 
     // 启动 stderr reader：Wine 内部 write(2)/WINE_ERR → pipe → hilog + 文件
+    {
+        std::string launchCwd;
+        if (derive_launch_cwd(argc, argv, homeDir, &launchCwd) && chdir(launchCwd.c_str()) == 0)
+            OH_LOG_INFO(LOG_APP, "[WineChild] cwd=%{public}s", launchCwd.c_str());
+    }
+
     int errPipe[2];
     pipe(errPipe);
     dup2(errPipe[1], STDERR_FILENO);

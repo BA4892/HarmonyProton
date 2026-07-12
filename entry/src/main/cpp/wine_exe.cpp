@@ -65,6 +65,7 @@ napi_value RunWineExe(napi_env env, napi_callback_info info) {
 #else
         std::string entryParams = std::string(binDir) + "|wine|" + exePath;
 #endif
+        AppendMissingEntryParamsEnvOverrides(entryParams, envStrs);
         OH_LOG_INFO(LOG_APP, "[Wine] runWineExe via broker: %{public}s", entryParams.c_str());
 
         int broker_fd = socket(AF_UNIX, SOCK_STREAM, 0);

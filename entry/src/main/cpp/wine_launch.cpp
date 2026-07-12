@@ -208,6 +208,7 @@ static void PrepareDesktopSessionGraphicsEnv(const LaunchParams& params)
     OH_LOG_INFO(LOG_APP, "[Launch-Async] preparing GL env for desktop child processes");
     auto& gb = winehua::GraphicsBroker::GetInstance();
     gb.SetWineRuntimeBinaryDir(params.winehuaBin);
+    gb.SetRequestedBackend(winehua::GraphicsBackend::Virgl);
     gb.EnsureStarted(params.sockDir);
 
     winehua::GraphicsBackendState state = gb.GetState();
