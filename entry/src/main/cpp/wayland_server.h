@@ -208,6 +208,10 @@ private:
     std::vector<SubsurfaceLayer> subsurfaceLayers_;
     std::vector<uint32_t> toplevelZOrder_;  // 前景→背景
     std::unordered_set<uint32_t> backgroundLayers_; // 渲染层, 不接收输入 (被切换掉的旧 root)
+    uint64_t desktopRootFrameSerial_ = 0;
+    uint64_t desktopOutputRootFrameSerial_ = 0;
+    uint64_t desktopCompositionSignature_ = 0;
+    bool desktopOutputInitialized_ = false;
 };
 
 // wl_surface 的每个实例携带的数据

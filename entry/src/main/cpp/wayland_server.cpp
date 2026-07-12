@@ -528,6 +528,9 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
             copyTight(self->toplevelPixels_[sd->toplevelId]);
             self->toplevelW_[sd->toplevelId] = contentW;
             self->toplevelH_[sd->toplevelId] = contentH;
+            if (sd->toplevelId == self->desktopRootToplevelId_) {
+                ++self->desktopRootFrameSerial_;
+            }
             /*
              * 自动恢复最小化窗口:
              * Wine 没有 "unset_minimized" 协议。当用户点击任务栏还原窗口时,
@@ -890,9 +893,51 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
             return true;
         }
 
-        // 复用 renderer 持有的输出容量，避免每帧分配和释放 4 MB 合成缓冲。
-        // 仍从干净 root 帧复制，不能污染 toplevelPixels_[root]。
-        out = rit->second;
+        // Rebuild the clean desktop base only when its pixels or composition
+        // structure changed. Animated child windows overwrite their complete
+        // rectangles, so re-copying the unchanged 4 MB root every frame is
+        // unnecessary. Geometry, visibility, Z-order and layer changes are
+        // folded into the signature and force a clean rebuild.
+        uint64_t compositionSignature = 1469598103934665603ULL;
+        auto mixSignature = [&](uint64_t value) {
+            compositionSignature ^= value;
+            compositionSignature *= 1099511628211ULL;
+        };
+        mixSignature(id);
+        mixSignature(static_cast<uint32_t>(rootW));
+        mixSignature(static_cast<uint32_t>(rootH));
+        for (uint32_t childId : toplevelZOrder_) {
+            mixSignature(childId);
+            const bool visible = IsToplevelVisible(childId);
+            mixSignature(visible ? 1 : 0);
+            if (!visible) continue;
+            mixSignature(static_cast<uint32_t>(toplevelX_[childId]));
+            mixSignature(static_cast<uint32_t>(toplevelY_[childId]));
+            mixSignature(static_cast<uint32_t>(toplevelW_[childId]));
+            mixSignature(static_cast<uint32_t>(toplevelH_[childId]));
+        }
+        for (const auto& layer : subsurfaceLayers_) {
+            mixSignature(reinterpret_cast<uintptr_t>(layer.surface));
+            mixSignature(layer.parentToplevel);
+            mixSignature(static_cast<uint32_t>(layer.x));
+            mixSignature(static_cast<uint32_t>(layer.y));
+            mixSignature(static_cast<uint32_t>(layer.w));
+            mixSignature(static_cast<uint32_t>(layer.h));
+            mixSignature(static_cast<uint32_t>(layer.vpDstW));
+            mixSignature(static_cast<uint32_t>(layer.vpDstH));
+        }
+
+        const size_t rootBytes = static_cast<size_t>(rootW) * rootH * 4;
+        const bool rebuildBase = !desktopOutputInitialized_ ||
+            out.size() != rootBytes ||
+            desktopOutputRootFrameSerial_ != desktopRootFrameSerial_ ||
+            desktopCompositionSignature_ != compositionSignature;
+        if (rebuildBase) {
+            out = rit->second;
+            desktopOutputInitialized_ = true;
+            desktopOutputRootFrameSerial_ = desktopRootFrameSerial_;
+            desktopCompositionSignature_ = compositionSignature;
+        }
         auto& composited = out;
         const auto rootCopied = TakeClock::now();
 
