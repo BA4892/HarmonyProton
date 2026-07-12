@@ -53,35 +53,8 @@ napi_value RunWineExe(napi_env env, napi_callback_info info) {
 
     int audioBootstrapFd = -1;
 
-    bool isGraphicsSmoke = IsGraphicsSmokeExePath(exePath);
-    bool restoreGraphicsBackend = false;
-    winehua::GraphicsBackend previousBackend = winehua::GraphicsBackend::Shm;
-    if (isGraphicsSmoke) {
-        auto& gb = winehua::GraphicsBroker::GetInstance();
-        gb.SetWineRuntimeBinaryDir(binDir);
-        winehua::GraphicsBackendState st = gb.GetState();
-        previousBackend = st.requested;
-        if (st.requested != winehua::GraphicsBackend::Virgl) {
-            gb.SetRequestedBackend(winehua::GraphicsBackend::Virgl);
-            restoreGraphicsBackend = true;
-            OH_LOG_INFO(LOG_APP, "[Wine] temporarily switching to VirGL for graphics smoke");
-        }
-        gb.EnsureStarted(sockDir);
-        LogGraphicsBackendStateForLaunch("Wine");
-    }
-
     std::string homeDir = "/storage/Users/currentUser/Download";
     std::vector<std::string> envStrs = BuildWineEnv(sockDir, sockName, libPath, binDir, audioBootstrapFd, homeDir);
-    if (restoreGraphicsBackend) {
-        winehua::GraphicsBroker::GetInstance().SetRequestedBackend(previousBackend);
-        OH_LOG_INFO(LOG_APP, "[Wine] restored graphics backend after env setup");
-    }
-    if (isGraphicsSmoke) {
-        envStrs.push_back("WINEHUA_GRAPHICS_FORCE_GL=1");
-        envStrs.push_back("WINEHUA_OPENGL_DIAG=1");
-        envStrs.push_back("EGL_LOG_LEVEL=debug");
-        OH_LOG_INFO(LOG_APP, "[Wine] forcing graphics smoke to continue into OpenGL diagnostics");
-    }
     std::vector<char*> envp;
     for (auto& s : envStrs) envp.push_back((char*)s.c_str());
     envp.push_back(nullptr);

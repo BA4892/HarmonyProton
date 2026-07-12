@@ -13,7 +13,9 @@ ROOT := $(realpath $(dir $(lastword $(MAKEFILE_LIST))))
 
 # ── 配置 ──
 NATIVE_ARCH ?= x86_64
+BUILD_GUEST_GFX ?= 0
 export NATIVE_ARCH
+export BUILD_GUEST_GFX
 
 CONFIG    := $(NATIVE_ARCH)
 BUILD_DIR := $(ROOT)/build
@@ -30,6 +32,7 @@ endif
 # ── 关键产物 (用于验证构建是否完成) ──
 DEPS_SENTINEL   := $(BUILD_DIR)/sysroot-ext/usr/lib/x86_64-linux-ohos/libfreetype.so.6
 WINE_SENTINEL   := $(BUILD_DIR)/wine-native/tools/winegcc/winegcc
+GUEST_GFX_SENTINEL := $(BUILD_DIR)/guest_gfx/$(NATIVE_ARCH)/winehua-guest-gfx.env
 
 # ============================================================
 # 默认目标
@@ -57,7 +60,11 @@ $(STAMPS)/arm64-v8a $(STAMPS)/x86_64:
 deps: $(STAMPS)/deps
 
 $(STAMPS)/deps: $(SCRIPTS)/build_deps.sh $(SCRIPTS)/env.sh FORCE | $(STAMPS)
-	@if [ -f $@ ] && [ -f $(DEPS_SENTINEL) ] && \
+	@guest_gfx_ready=1; \
+	if [ "$(BUILD_GUEST_GFX)" = "1" ] && [ ! -f "$(GUEST_GFX_SENTINEL)" ]; then \
+	    guest_gfx_ready=0; \
+	fi; \
+	if [ -f $@ ] && [ -f $(DEPS_SENTINEL) ] && [ "$$guest_gfx_ready" = "1" ] && \
 	    ! find $(ROOT)/thirdparty/freetype \
 	           $(ROOT)/thirdparty/libffi \
 	           $(ROOT)/thirdparty/wayland \
@@ -195,7 +202,7 @@ assemble-$(1): $$(STAMPS)/$(1)/assemble
 $$(STAMPS)/$(1)/assemble: $(SCRIPTS)/assemble.sh $(SCRIPTS)/env.sh \
 	$$(STAMPS)/wine-$(1) $$(STAMPS)/$(1)/native | $$(STAMPS)/$(1)
 	@echo "=== assemble ($(1)) ==="
-	NATIVE_ARCH=$(1) bash $(SCRIPTS)/assemble.sh
+	NATIVE_ARCH=$(1) BUILD_GUEST_GFX=$(BUILD_GUEST_GFX) bash $(SCRIPTS)/assemble.sh
 	@touch $$@
 endef
 $(foreach a,arm64-v8a x86_64,$(eval $(call assemble_rule,$(a))))

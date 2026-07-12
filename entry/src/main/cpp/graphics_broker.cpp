@@ -598,6 +598,12 @@ void GraphicsBroker::RefreshGuestReceiverStateLocked()
         return;
     }
 
+    if (mode.find("virpipe") != std::string::npos && !FileExists(libDir + "/dri/virtio_gpu_dri.so"))
+    {
+        guestReceiverError_ = "guest receiver is missing lib/dri/virtio_gpu_dri.so in " + libDir;
+        return;
+    }
+
     guestReceiverPresent_ = true;
     guestReceiverEnv_ = std::move(envLines);
 
@@ -647,7 +653,7 @@ void GraphicsBroker::StartVirglSocketServerLocked()
                         syncMode.c_str());
             syncMode = "egl-thread";
         }
-        std::string virglLogPath = DirNameCopy(virglSocketPath_) + "/virgl_host.log";
+        std::string virglLogPath = "/data/storage/el2/base/cache/winehua_virgl_host.log";
         std::string entryParams = virglVtestLibraryPath_ + "|" + virglSocketPath_ +
                                   "|__env=LD_LIBRARY_PATH=" + ldLibraryPath +
                                   "|__env=VTEST_USE_GLES=1" +
@@ -682,6 +688,7 @@ void GraphicsBroker::StartVirglSocketServerLocked()
         }
         pid = static_cast<pid_t>(childPid);
         virglServerUsesNcp_ = true;
+        OH_LOG_INFO(LOG_APP, "[GraphicsBroker] virgl NCP child launched, waiting for socket...");
     }
 #else
     serverPath = virglServerProgramPath_.empty() ? (wineRuntimeBinDir_ + "/virgl_test_server") : virglServerProgramPath_;
@@ -817,6 +824,9 @@ void GraphicsBroker::StartVirglSocketServerLocked()
     virglServerRunning_.store(true, std::memory_order_release);
     virglSocketReady_ = false;
 
+    OH_LOG_INFO(LOG_APP, "[GraphicsBroker] waiting for virgl socket at %{public}s pid=%{public}d",
+                virglSocketPath_.c_str(), virglServerPid_);
+
     if (WaitFor("virgl_test_server socket",
                 [this]() { return FileExists(virglSocketPath_) || !IsVirglServerProcessAliveLocked(); },
                 4000, 100) &&
@@ -830,6 +840,11 @@ void GraphicsBroker::StartVirglSocketServerLocked()
                     virglServerPid_, virglSocketPath_.c_str());
         return;
     }
+
+    OH_LOG_ERROR(LOG_APP,
+                 "[GraphicsBroker] virgl socket wait FAILED: socket_exists=%{public}d process_alive=%{public}d",
+                 FileExists(virglSocketPath_) ? 1 : 0,
+                 IsVirglServerProcessAliveLocked() ? 1 : 0);
 
     if (virglServerPid_ > 0)
     {

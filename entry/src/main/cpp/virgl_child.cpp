@@ -22,6 +22,7 @@ bool IsAllowedHostEnv(const std::string& key)
     return key == "LD_LIBRARY_PATH" ||
            key == "VTEST_USE_GLES" ||
            key == "VTEST_USE_EGL_SURFACELESS" ||
+           key == "VTEST_SYNC_GL_FINISH" ||
            key == "VIRGL_DISABLE_NATIVE_FENCE_FD" ||
            key == "WINEHUA_VIRGL_SYNC_MODE" ||
            key == "WINEHUA_VIRGL_LOG_PATH" ||

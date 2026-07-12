@@ -267,6 +267,9 @@ HKLM,%FontSubStr%,"Courier New",,"Noto Sans Mono"' "$wine_data/share/wine/wine.i
         cp -a "$BUILD_DIR/guest_gfx/$NATIVE_ARCH/"* "$wine_data/bin/guest_gfx/"
         log "  guest_gfx ($NATIVE_ARCH): $(ls "$wine_data/bin/guest_gfx/lib"/*.so* 2>/dev/null | wc -l) .so files"
     else
+        if [ "${BUILD_GUEST_GFX:-0}" = "1" ]; then
+            err "BUILD_GUEST_GFX=1 but build/guest_gfx/$NATIVE_ARCH/lib is missing"
+        fi
         log "  guest_gfx: SKIP (build/guest_gfx/$NATIVE_ARCH/lib not found)"
     fi
 

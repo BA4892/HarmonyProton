@@ -50,8 +50,6 @@ size_t AppendMissingEntryParamsEnvOverrides(std::string& entryParams,
                                             const std::vector<std::string>& env);
 
 // -- Graphics 辅助 --
-std::string BasenameOfPath(const std::string& path);
-bool IsGraphicsSmokeExePath(const std::string& path);
 void LogGraphicsBackendStateForLaunch(const char* tag);
 
 #endif // WINE_ENV_H

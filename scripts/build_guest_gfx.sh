@@ -182,6 +182,25 @@ materialize_bundle_alias() {
     return 0
 }
 
+materialize_dri_driver_alias() {
+    local alias_name="$1"
+    local src=""
+
+    [ -f "$OUTPUT_ROOT/lib/dri/$alias_name" ] && return 0
+    mkdir -p "$OUTPUT_ROOT/lib/dri"
+
+    for src in \
+        "$OUTPUT_ROOT/lib/dri/gallium_dri.so" \
+        "$OUTPUT_ROOT/lib/libgallium_dri.so" \
+        "$OUTPUT_ROOT/lib"/libgallium-*.so; do
+        [ -f "$src" ] || continue
+        cp -L "$src" "$OUTPUT_ROOT/lib/dri/$alias_name"
+        return 0
+    done
+
+    return 0
+}
+
 emit_env_file() {
     local env_file="$1"
     local bundle_root="$2"
@@ -319,6 +338,9 @@ materialize_bundle_alias "libEGL.so.1" "libEGL.so" "libEGL_mesa.so"
 materialize_bundle_alias "libEGL.so" "libEGL.so" "libEGL_mesa.so"
 materialize_bundle_alias "libGLESv2.so.2" "libGLESv2.so" "libGLESv2_mesa.so"
 materialize_bundle_alias "libGLESv2.so" "libGLESv2.so" "libGLESv2_mesa.so"
+materialize_dri_driver_alias "virtio_gpu_dri.so"
+materialize_dri_driver_alias "swrast_dri.so"
+materialize_dri_driver_alias "kms_swrast_dri.so"
 
 emit_env_file "$OUTPUT_ROOT/winehua-guest-gfx.env" "$OUTPUT_ROOT"
 
@@ -336,5 +358,6 @@ append_git_source_info "libdrm" "$LIBDRM_SOURCE_ROOT"
 
 [ -f "$OUTPUT_ROOT/winehua-guest-gfx.env" ] || err "failed to generate guest_gfx env file"
 [ -d "$OUTPUT_ROOT/lib" ] || err "guest_gfx bundle is missing lib/"
+[ -f "$OUTPUT_ROOT/lib/dri/virtio_gpu_dri.so" ] || err "guest_gfx bundle is missing lib/dri/virtio_gpu_dri.so"
 
 log "guest_gfx bundle ready: $OUTPUT_ROOT"

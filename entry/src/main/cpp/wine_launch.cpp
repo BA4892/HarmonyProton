@@ -208,7 +208,6 @@ static void PrepareDesktopSessionGraphicsEnv(const LaunchParams& params)
     OH_LOG_INFO(LOG_APP, "[Launch-Async] preparing GL env for desktop child processes");
     auto& gb = winehua::GraphicsBroker::GetInstance();
     gb.SetWineRuntimeBinaryDir(params.winehuaBin);
-    gb.SetRequestedBackend(winehua::GraphicsBackend::Virgl);
     gb.EnsureStarted(params.sockDir);
 
     winehua::GraphicsBackendState state = gb.GetState();
@@ -370,7 +369,6 @@ void LaunchThreadFunc(LaunchParams* p) {
                 (p->winehuaBin + "/../share/X11/xkb").c_str());
 
     winehua::GraphicsBroker::GetInstance().SetWineRuntimeBinaryDir(p->winehuaBin);
-    winehua::GraphicsBroker::GetInstance().SetRequestedBackend(winehua::GraphicsBackend::Virgl);
     winehua::GraphicsBroker::GetInstance().EnsureStarted(p->sockDir);
 
     int audioBootstrapFd = CreateAudioBootstrapFd(p->sockDir);

@@ -148,19 +148,6 @@ size_t AppendMissingEntryParamsEnvOverrides(std::string& entryParams,
     return appended;
 }
 
-std::string BasenameOfPath(const std::string& path) {
-    size_t slash = path.find_last_of("/\\");
-    if (slash == std::string::npos) return path;
-    return path.substr(slash + 1);
-}
-
-bool IsGraphicsSmokeExePath(const std::string& path) {
-    std::string name = BasenameOfPath(path);
-    std::transform(name.begin(), name.end(), name.begin(),
-                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-    return name == "winehua_graphics_smoke.exe";
-}
-
 void LogGraphicsBackendStateForLaunch(const char* tag) {
     winehua::GraphicsBackendState state = winehua::GraphicsBroker::GetInstance().GetState();
     OH_LOG_INFO(LOG_APP,
