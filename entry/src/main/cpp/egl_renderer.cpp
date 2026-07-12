@@ -236,6 +236,12 @@ void EglRenderer::RenderLoop() {
     bool firstFrameLogged = false;
     bool rendered = false;  // 首帧已渲染后, 无新帧时跳过 GPU 绘制
     RendererPerfWindow perf;
+    auto paceFrame = [](uint64_t startedUs) {
+        constexpr uint64_t kFramePeriodUs = 16667;
+        const uint64_t elapsedUs = PerfNowUs() - startedUs;
+        if (elapsedUs < kFramePeriodUs)
+            usleep(static_cast<useconds_t>(kFramePeriodUs - elapsedUs));
+    };
 
     OH_LOG_INFO(LOG_APP, "[MW-RNDR] tl=%{public}u render loop started", toplevelId_);
 
@@ -291,7 +297,7 @@ void EglRenderer::RenderLoop() {
 
         // 无新帧且已渲染过首帧 → 跳过 GPU 绘制, 静态桌面节省 GPU 功耗
         if (!haveFrame && rendered) {
-            usleep(16667);
+            paceFrame(frameStartedUs);
             loopCount++;
             continue;
         }
@@ -372,7 +378,7 @@ void EglRenderer::RenderLoop() {
         }
         fps.Tick();
         loopCount++;
-        usleep(16667);
+        paceFrame(frameStartedUs);
     }
 }
 
