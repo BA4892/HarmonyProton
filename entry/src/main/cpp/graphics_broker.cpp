@@ -426,6 +426,7 @@ void GraphicsBroker::AppendWineEnv(std::vector<std::string>& env) const
         }
         env.push_back("WINEHUA_WAYLAND_READBACK=1");
         env.push_back("WINEHUA_GL_STALL_DIAG=1");
+        env.push_back("WINEHUA_DISPLAY_FPS_FILE=C:\\windows\\temp\\winehua_display_fps.txt");
         for (const std::string& extra : guestEnv) env.push_back(extra);
         if (!state.virglSocketPath.empty()) env.push_back("VTEST_SOCKET_NAME=" + state.virglSocketPath);
     }
