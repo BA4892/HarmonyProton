@@ -932,38 +932,51 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
             if (dstY + copyH > rootH) copyH = rootH - dstY;
             if (copyW <= 0 || copyH <= 0) continue;
             // wp_viewport: Wine 用 destination 指定实际显示尺寸 (buffer 可能更大)
-            int renderW = copyW, renderH = copyH, renderOffX = 0, renderOffY = 0;
+            int renderW = copyW, renderH = copyH;
+            int renderSrcX = srcX, renderSrcY = srcY;
+            int renderDstX = dstX, renderDstY = dstY;
             if (layer.vpDstW > 0 && layer.vpDstW < copyW) renderW = layer.vpDstW;
             if (layer.vpDstH > 0 && layer.vpDstH < copyH) renderH = layer.vpDstH;
-            // surface_damage 裁剪: 只渲染 damage 包围盒内的像素
-            if (layer.dmgW > 0 && layer.dmgH > 0 &&
-                layer.dmgW <= renderW && layer.dmgH <= renderH) {
-                renderOffX = layer.dmgX; renderOffY = layer.dmgY;
-                renderW = layer.dmgW; renderH = layer.dmgH;
+            // Intersect damage in source coordinates, then carry the offset
+            // into destination coordinates. The old loop sampled the damaged
+            // source rectangle but painted it at the layer's top-left corner.
+            if (layer.dmgW > 0 && layer.dmgH > 0) {
+                const int damageLeft = std::max(renderSrcX, layer.dmgX);
+                const int damageTop = std::max(renderSrcY, layer.dmgY);
+                const int damageRight = std::min(renderSrcX + renderW, layer.dmgX + layer.dmgW);
+                const int damageBottom = std::min(renderSrcY + renderH, layer.dmgY + layer.dmgH);
+                if (damageRight <= damageLeft || damageBottom <= damageTop) continue;
+                renderDstX += damageLeft - renderSrcX;
+                renderDstY += damageTop - renderSrcY;
+                renderSrcX = damageLeft;
+                renderSrcY = damageTop;
+                renderW = damageRight - damageLeft;
+                renderH = damageBottom - damageTop;
             }
             // WL_SHM_FORMAT_ARGB8888=0 (有alpha), WL_SHM_FORMAT_XRGB8888=1 (无alpha)
             bool isArgb = (layer.shmFormat == 0);
             for (int y = 0; y < renderH; y++) {
+                const uint8_t* srcRow = layer.pixels.data() +
+                    ((renderSrcY + y) * layer.w + renderSrcX) * 4;
+                uint8_t* dstRow = composited.data() +
+                    ((renderDstY + y) * rootW + renderDstX) * 4;
+                if (!isArgb) {
+                    std::memcpy(dstRow, srcRow, static_cast<size_t>(renderW) * 4);
+                    continue;
+                }
                 for (int x = 0; x < renderW; x++) {
-                    int srcIdx = ((renderOffY + srcY + y) * layer.w + (renderOffX + srcX + x)) * 4;
-                    int dstIdx = ((dstY + y) * rootW + (dstX + x)) * 4;
-                    if (srcIdx + 3 >= (int)layer.pixels.size()) continue;
-                    if (dstIdx + 3 >= (int)composited.size()) continue;
-                    if (isArgb) {
-                        // ARGB8888: alpha 混合 (Weston PIXMAN_OP_OVER)
-                        uint8_t a = layer.pixels[srcIdx + 3];
-                        if (a == 0) continue;
-                        if (a == 255) {
-                            memcpy(&composited[dstIdx], &layer.pixels[srcIdx], 4);
-                        } else {
-                            unsigned inv = 255 - a;
-                            composited[dstIdx + 0] = (layer.pixels[srcIdx + 0] * a + composited[dstIdx + 0] * inv) / 255;
-                            composited[dstIdx + 1] = (layer.pixels[srcIdx + 1] * a + composited[dstIdx + 1] * inv) / 255;
-                            composited[dstIdx + 2] = (layer.pixels[srcIdx + 2] * a + composited[dstIdx + 2] * inv) / 255;
-                        }
+                    const uint8_t* srcPixel = srcRow + x * 4;
+                    uint8_t* dstPixel = dstRow + x * 4;
+                    // ARGB8888: alpha 混合 (Weston PIXMAN_OP_OVER)
+                    uint8_t a = srcPixel[3];
+                    if (a == 0) continue;
+                    if (a == 255) {
+                        std::memcpy(dstPixel, srcPixel, 4);
                     } else {
-                        // XRGB8888: 无alpha, 直接覆盖
-                        memcpy(&composited[dstIdx], &layer.pixels[srcIdx], 4);
+                        unsigned inv = 255 - a;
+                        dstPixel[0] = (srcPixel[0] * a + dstPixel[0] * inv) / 255;
+                        dstPixel[1] = (srcPixel[1] * a + dstPixel[1] * inv) / 255;
+                        dstPixel[2] = (srcPixel[2] * a + dstPixel[2] * inv) / 255;
                     }
                 }
             }
