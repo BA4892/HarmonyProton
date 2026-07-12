@@ -699,7 +699,6 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                         layer.x = wineX + sx;
                         layer.y = wineY + sy;
                     }
-                    layer.pixels = std::move(sd->pixels);
                     layer.parentToplevel = parentId;
                     layer.shmFormat = wl_shm_buffer_get_format(shm);
                     layer.vpDstW = sd->vpDstW; layer.vpDstH = sd->vpDstH;
@@ -708,9 +707,23 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                     // 替换已有 layer
                     bool found = false;
                     for (auto& l : self->subsurfaceLayers_) {
-                        if (l.surface == surfRes) { l = std::move(layer); found = true; break; }
+                        if (l.surface == surfRes) {
+                            // Keep two pixel allocations rotating between the Wayland
+                            // commit side and compositor side. Moving sd->pixels away
+                            // without returning the previous layer buffer caused a
+                            // 2 MB allocation and free on every 960x540 GL frame.
+                            auto reusablePixels = std::move(l.pixels);
+                            l = std::move(layer);
+                            l.pixels = std::move(sd->pixels);
+                            sd->pixels = std::move(reusablePixels);
+                            found = true;
+                            break;
+                        }
                     }
-                    if (!found) self->subsurfaceLayers_.push_back(std::move(layer));
+                    if (!found) {
+                        layer.pixels = std::move(sd->pixels);
+                        self->subsurfaceLayers_.push_back(std::move(layer));
+                    }
                     self->toplevelDirty_[self->desktopRootToplevelId_] = true;
                     OH_LOG_INFO(LOG_APP, "[MW-SUBSURF] stored layer %{public}dx%{public}d at (%{public}d,%{public}d) parent=#%{public}u",
                                 layer.w, layer.h, layer.x, layer.y, parentId);
