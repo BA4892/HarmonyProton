@@ -919,6 +919,7 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
         for (const auto& layer : subsurfaceLayers_) {
             mixSignature(reinterpret_cast<uintptr_t>(layer.surface));
             mixSignature(layer.parentToplevel);
+            mixSignature(layer.parentToplevel == id || IsToplevelVisible(layer.parentToplevel));
             mixSignature(static_cast<uint32_t>(layer.x));
             mixSignature(static_cast<uint32_t>(layer.y));
             mixSignature(static_cast<uint32_t>(layer.w));
@@ -973,6 +974,7 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
 
         // 合成 subsurface 弹出层 (菜单/popup)
         for (auto& layer : subsurfaceLayers_) {
+            if (layer.parentToplevel != id && !IsToplevelVisible(layer.parentToplevel)) continue;
             if (layer.w <= 0 || layer.h <= 0) continue;
             size_t expectSz = (size_t)layer.w * layer.h * 4;
             if (layer.pixels.size() < expectSz) {
@@ -1253,6 +1255,7 @@ uint32_t WaylandServer::FindToplevelAt(int x, int y) {
      *   (直接发给父 toplevel 会导致 Wine 收到错误的窗口相对坐标)
      */
     for (auto it = subsurfaceLayers_.rbegin(); it != subsurfaceLayers_.rend(); ++it) {
+        if (it->parentToplevel != rootId && !IsToplevelVisible(it->parentToplevel)) continue;
         if (it->w <= 0 || it->h <= 0) continue;
         if (x >= it->x && x < it->x + it->w && y >= it->y && y < it->y + it->h) {
             return it->isExternal ? rootId : it->parentToplevel;
