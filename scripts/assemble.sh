@@ -251,9 +251,11 @@ assemble_pad() {
     cp "$BUILD_DIR/wine-ohos/loader/wine.inf" "$wine_data/share/wine/"
     sed -i '/^\[MCI\]$/i\
 ;; OHOS font substitutes\
-HKLM,%FontSubStr%,"System",,"HarmonyOS Sans"\
+HKLM,%FontSubStr%,"System",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"MS Sans Serif",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"MS Shell Dlg",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"MS Shell Dlg 2",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"Fixedsys",,"Noto Sans Mono"\
-HKLM,%FontSubStr%,"MS Sans Serif",,"HarmonyOS Sans"\
 HKLM,%FontSubStr%,"Courier",,"Noto Sans Mono"\
 HKLM,%FontSubStr%,"Courier New",,"Noto Sans Mono"' "$wine_data/share/wine/wine.inf"
     # XKB
