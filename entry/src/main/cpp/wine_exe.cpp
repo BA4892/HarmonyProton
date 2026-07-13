@@ -1,6 +1,7 @@
 #include <napi/native_api.h>
 #include "wine_env.h"
 #include "wine_process.h"
+#include "broker.h"
 #include "graphics_broker.h"
 #include "wayland_server.h"
 
@@ -23,16 +24,23 @@
 extern napi_threadsafe_function gStateTsfn;
 
 napi_value RunWineExe(napi_env env, napi_callback_info info) {
-    size_t argc = 4;
-    napi_value args[4];
+    size_t argc = 5;
+    napi_value args[5] = {};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
     if (argc < 4) return nullptr;
 
-    char binDir[512] = {}, sockPath[512] = {}, libPath[2048] = {}, wineExe[1024] = {};
+    char binDir[512] = {}, sockPath[512] = {}, libPath[2048] = {}, wineExe[1024] = {}, homePath[1024] = {};
     napi_get_value_string_utf8(env, args[0], binDir, sizeof(binDir), nullptr);
     napi_get_value_string_utf8(env, args[1], sockPath, sizeof(sockPath), nullptr);
     napi_get_value_string_utf8(env, args[2], libPath, sizeof(libPath), nullptr);
     napi_get_value_string_utf8(env, args[3], wineExe, sizeof(wineExe), nullptr);
+    if (argc >= 5) {
+        napi_get_value_string_utf8(env, args[4], homePath, sizeof(homePath), nullptr);
+    }
+
+    std::string homeDir(homePath);
+    if (homeDir.empty()) homeDir = gBrokerHomeDir;
+    if (homeDir.empty()) homeDir = "/storage/Users/currentUser/Download";
 
     std::string exePath(wineExe);
     {
@@ -44,7 +52,8 @@ napi_value RunWineExe(napi_env env, napi_callback_info info) {
         }
     }
 
-    OH_LOG_INFO(LOG_APP, "[Wine] runWineExe bin=%{public}s exe=%{public}s (final=%{public}s)", binDir, wineExe, exePath.c_str());
+    OH_LOG_INFO(LOG_APP, "[Wine] runWineExe bin=%{public}s exe=%{public}s (final=%{public}s) home=%{public}s",
+                binDir, wineExe, exePath.c_str(), homeDir.c_str());
 
     std::string sockStr(sockPath);
     auto pos = sockStr.find_last_of('/');
@@ -53,7 +62,6 @@ napi_value RunWineExe(napi_env env, napi_callback_info info) {
 
     int audioBootstrapFd = -1;
 
-    std::string homeDir = "/storage/Users/currentUser/Download";
     std::vector<std::string> envStrs = BuildWineEnv(sockDir, sockName, libPath, binDir, audioBootstrapFd, homeDir);
     std::vector<char*> envp;
     for (auto& s : envStrs) envp.push_back((char*)s.c_str());

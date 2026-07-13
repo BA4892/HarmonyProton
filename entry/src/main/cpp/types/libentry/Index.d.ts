@@ -1,5 +1,5 @@
 export const startServer: (sockPath: string) => boolean;
-export const launchClient: (exePath: string, argv: string[], sockPath: string, libPath: string) => number;
+export const launchClient: (exePath: string, argv: string[], sockPath: string, libPath: string, homeDir: string) => number;
 export const stopClient: () => void;
 export const stopAll: () => void;
 export const setStateCallback: (cb: (state: string) => void) => void;
@@ -8,7 +8,7 @@ export const setPendingToplevel: (id: number) => void;
 export const getCurrentToplevelId: () => number;
 export const destroyToplevel: (id: number) => void;
 export const sendToplevelClose: (id: number) => void;
-export const runWineExe: (binDir: string, sockPath: string, libPath: string, exePath: string) => void;
+export const runWineExe: (binDir: string, sockPath: string, libPath: string, exePath: string, homeDir: string) => void;
 export const checkWinePrefix: () => boolean;
 export const resetWinePrefix: () => void;
 export const setOutputSize: (w: number, h: number) => void;

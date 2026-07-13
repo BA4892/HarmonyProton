@@ -95,6 +95,7 @@ struct Index {
   @State initOverlayVisible: boolean = false;
   @State initOverlayText: string = '';
   private hasRawfileWineData: boolean = false;
+  private zHome: string = '/storage/Users/currentUser/Download';
 
   aboutToAppear(): void {
     this.hasRawfileWineData = this.detectRawfileWineData();
@@ -318,7 +319,9 @@ struct Index {
     // HOME 目录 (Z: 映射目标), 通过 DocumentViewPicker 获取 Download 路径
     const documentViewPicker = new picker.DocumentViewPicker();
     let documentSaveResult = await documentViewPicker.save({ pickerMode: picker.DocumentPickerMode.DOWNLOAD });
-    const zHome = new fileUri.FileUri(documentSaveResult[0]).path + '/';
+    const pickerHome = new fileUri.FileUri(documentSaveResult[0]).path;
+    this.zHome = pickerHome.endsWith('/') ? pickerHome : `${pickerHome}/`;
+    hilog.info(DOMAIN, 'wine', 'auto-init: Z home=%{public}s', this.zHome);
     // 检查是否需要解压 wine 数据文件
     hilog.info(DOMAIN, 'wine', 'auto-init: check marker=%{public}s', `${WINE_ROOT}/share/wine/wine.inf`);
     let needExtract = true;
@@ -335,7 +338,7 @@ struct Index {
       this.setInitStatus('启动服务失败', false);
       return;
     }
-    testNapi.launchClient(BOX64, [], SOCK, `${BIN_DIR}:${WINE_LIB}`, zHome);
+    testNapi.launchClient(BOX64, [], SOCK, `${BIN_DIR}:${WINE_LIB}`, this.zHome);
   }
 
   private doReset = (): void => {
@@ -357,7 +360,7 @@ struct Index {
   private doRun = (name: string): void => {
     this.statusText = '启动中...';
     let exePath = this.curDir + '/' + name;
-    testNapi.runWineExe(BIN_DIR, SOCK, `${WINE_BIN}:${WINE_LIB}`, exePath);
+    testNapi.runWineExe(BIN_DIR, SOCK, `${WINE_BIN}:${WINE_LIB}`, exePath, this.zHome);
   }
 
   private relPath = (): string => {
