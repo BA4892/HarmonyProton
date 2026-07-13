@@ -5,56 +5,47 @@
 项目根目录 `/data/share/wineohos/Makefile` 是**唯一**构建入口。
 
 **⚠️ 绝对禁止手动 `make -C build/wine-ohos` 或 `make -C build/wine-native`！** 必须通过顶层 `make`，因为它会：
-- 通过 `scripts/env.sh` 正确设置 `NATIVE_ARCH`、`DEVICE_TYPE`、交叉编译工具链、`PAD_CFLAGS=-DPAD_MODE`
+- 通过 `scripts/env.sh` 正确设置 `NATIVE_ARCH`、交叉编译工具链
 - 正确 configure Wine（`--host=x86_64-linux-ohos`、OHOS 头文件修复等）
 - 通过 stamp 机制做增量构建，跳过无需重编的模块
 - 正确运行 assemble → HAP → 签名 全流程
 
-### 两种设备模式
-
-| | PC (有 execve, HNP) | Pad (fork-only, 无 HNP) |
-|---|---|---|
-| **环境变量** | `DEVICE_TYPE=pc` (默认) | `DEVICE_TYPE=pad` |
-| **Wine .so 位置** | `build/wine-ohos/dlls/` | `build/wine-ohos/dlls/` → wine-data.zip |
-| **数据文件** | HNP 包 | rawfile zip → 运行时解压 |
-| **PAD_MODE 宏** | 不定义 | `-DPAD_MODE` |
-
 ### 构建命令
 
 ```bash
-# ==================== Pad (arm64, 当前主要调试目标) ====================
+# ==================== arm64 (当前调试目标) ====================
 
 # 完整构建 (改任何源码后)
-make NATIVE_ARCH=arm64-v8a DEVICE_TYPE=pad
+make NATIVE_ARCH=arm64-v8a
 
 # 仅 HAP (只改 ArkTS 或 entry/src/main/cpp/ 时, 跳过 Wine/deps 重编译)
-make NATIVE_ARCH=arm64-v8a DEVICE_TYPE=pad hap
+make NATIVE_ARCH=arm64-v8a hap
 
 # 单个模块: deps | wine | box64 | native | assemble | hap
 
-# ==================== PC (x86_64) ====================
-make NATIVE_ARCH=x86_64 DEVICE_TYPE=pc
+# ==================== x86_64 ====================
+make NATIVE_ARCH=x86_64
 ```
 
 **注意:**
-- 默认 `make` = `make NATIVE_ARCH=x86_64 DEVICE_TYPE=pc` (PC 全量构建)
-- 改 Wine C 源码 (`thirdparty/wine/`) 后 `make ... pad` 会自动检测并重编 Wine
-- 改 Wine C 源码后，**必须 `make ... pad`（完整构建）**，因为 assemble 需要重新打包 wine-data.zip
-- 只改 ArkTS → `make ... pad hap` 足够
-- 只改 C++ (entry/src/main/cpp/) → `make ... pad hap` 足够
+- 默认 `make` = `make NATIVE_ARCH=x86_64` (x86_64 全量构建)
+- 改 Wine C 源码 (`thirdparty/wine/`) 后 `make NATIVE_ARCH=arm64-v8a` 会自动检测并重编 Wine
+- 改 Wine C 源码后，**必须 `make NATIVE_ARCH=arm64-v8a`（完整构建）**，因为 assemble 需要重新打包 wine-data.zip
+- 只改 ArkTS → `make ... hap` 足够
+- 只改 C++ (entry/src/main/cpp/) → `make ... hap` 足够
 
 ### Wine stamp 机制
 
 Wine 构建使用 stamp 文件 + `find -newer` 检测源码变更：
-- stamp 路径: `build/.stamps/wine-arm64-v8a-pad`
+- stamp 路径: `build/.stamps/wine-arm64-v8a`
 - 任何 `thirdparty/wine/` 下的 .c/.h 文件比 stamp 新 → 触发 Wine 重编
 - sentinel 检查: `build/wine-native/tools/winegcc/winegcc` 必须存在
 
 ### Pad 部署
 
 ```bash
-# 当前调试设备
-H="hdc -t 192.168.1.6:38823"
+# 设置设备地址
+H="hdc -t <device_ip>"
 
 # 完整部署流程 (改 Wine 后需卸载重装)
 $H shell "bm uninstall -n app.hackeris.winehua"
@@ -90,37 +81,31 @@ $H shell "grep -i '关键词' /data/app/el2/100/base/app.hackeris.winehua/temp/w
 
 ### hdc 连接方式
 
-PC 直连（USB）：`hdc -t <device_ip>`  
-Pad WiFi（需要 server）：`hdc -s <server_ip> -t 127.0.0.1:5555`
+```
+# USB 直连
+hdc -t <device_ip>
 
-当前调试 Pad 设备：
-- hdc server: `192.168.1.5:8710`
-- target: `127.0.0.1:5555`
+# 通过 hdc server 远程连接 (server 在另一台机器)
+hdc -s <server_ip> -t <target_ip>
+```
 
 ### 直接抓取（推荐）
 
 ```bash
-# Pad 设备
-hdc -s 192.168.1.5:8710 -t 127.0.0.1:5555 hilog
-
-# PC 设备
-hdc -t 192.168.1.4:38879 hilog
+hdc -t <device_ip> hilog
 
 # 过滤 Wine 相关 tag
-hdc -t <ip> hilog | grep -E 'CLICK-PIPE|KBD-PIPE|WineWM|MW-|WL_Plugin|WL_NAPI|WL_EGL|WL_Server|WL_Xdg|WL_Seat|WL_Input|WL-ERR|WL-STAT|Input-DROP|honwine|CRASH'
+hdc -t <device_ip> hilog | grep -E 'CLICK-PIPE|KBD-PIPE|WineWM|MW-|WL_Plugin|WL_NAPI|WL_EGL|WL_Server|WL_Xdg|WL_Seat|WL_Input|WL-ERR|WL-STAT|Input-DROP|winehua|CRASH'
 ```
 
 ### 通过 shell 抓取
 
 ```bash
-# Pad: 只取最后 N 行 app 日志
-hdc -s 192.168.1.5:8710 -t 127.0.0.1:5555 shell "hilog -z 500 -t app"
-
-# PC: 只取最后 N 行
-hdc -t 192.168.1.4:38879 shell "hilog -z 500 -t app"
+# 只取最后 N 行 app 日志
+hdc -t <device_ip> shell "hilog -z 500 -t app"
 
 # 抓取 crash 日志
-hdc -s 192.168.1.5:8710 -t 127.0.0.1:5555 shell "hilog -z 200" | grep -iE 'crash|fault|SIGSEGV|SIGABRT|stack'
+hdc -t <device_ip> shell "hilog -z 200" | grep -iE 'crash|fault|SIGSEGV|SIGABRT|stack'
 ```
 
 ### 关键日志 tag 说明
@@ -176,7 +161,7 @@ hdc -s 192.168.1.5:8710 -t 127.0.0.1:5555 shell "hilog -z 200" | grep -iE 'crash
 
 ```bash
 # Pad 设备
-H="hdc -s 192.168.1.5:8710 -t 127.0.0.1:5555"
+H="hdc -t 192.168.1.6:33363"
 
 # 完整事件流水线
 $H hilog | grep -E 'CLICK-PIPE|KBD-PIPE|PIPE'
@@ -201,10 +186,10 @@ $H shell "hilog -z 500 -t app" | grep -E 'wineboot-stderr|PAD-WB|Launch-Async|dr
 
 ```bash
 # Pad: 实时采集并保存
-timeout 60 hdc -s 192.168.1.5:8710 -t 127.0.0.1:5555 hilog > /tmp/winehua.log 2>/dev/null
+timeout 60 hdc -t 192.168.1.6:33363 hilog > /tmp/winehua.log 2>/dev/null
 
 # Pad: 只取最近 N 行 app 日志
-hdc -s 192.168.1.5:8710 -t 127.0.0.1:5555 shell "hilog -z 5000 -t app" > /tmp/winehua_dump.log
+hdc -t 192.168.1.6:33363 shell "hilog -z 5000 -t app" > /tmp/winehua_dump.log
 
 # 过滤关键 tag 存入文件
 grep -E 'CLICK-PIPE|KBD-PIPE|PIPE|winehua|WineWM|WL_Plugin|WL_Seat|WL_Input|WWA|WL-ERR|WL-STAT|Input-DROP|CRASH|PAD-WB|wineboot-stderr' /tmp/winehua_dump.log > /tmp/winehua_filtered.log
@@ -218,7 +203,7 @@ grep -E 'CLICK-PIPE|KBD-PIPE|PIPE|winehua|WineWM|WL_Plugin|WL_Seat|WL_Input|WWA|
 
 ```bash
 cd /data/share/wineohos && bash build.sh hap && bash build.sh deploy <device_ip>
-hdc -t <device_ip> shell "aa start -a EntryAbility -b app.hackeris.honwine"
+hdc -t <device_ip> shell "aa start -a EntryAbility -b app.hackeris.winehua"
 ```
 
 ### 2. 启动持续日志采集（后台运行）

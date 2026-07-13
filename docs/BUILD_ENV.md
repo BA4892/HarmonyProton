@@ -24,7 +24,7 @@ docker build -t wineohos-build .
 docker run --rm \
   -v /path/to/wineohos:/data/src/winehua \
   -v /path/to/harmony-sdk:/apps/harmony \
-  wineohos-build make NATIVE_ARCH=arm64-v8a DEVICE_TYPE=pad
+  wineohos-build make NATIVE_ARCH=arm64-v8a
 ```
 
 或手动启动容器：
@@ -142,7 +142,7 @@ test -f /usr/local/bin/wayland-scanner && echo "✓ wayland-scanner" || echo "~ 
 cd /data/src/winehua
 
 # Makefile 方式（推荐）
-make NATIVE_ARCH=arm64-v8a DEVICE_TYPE=pad
+make NATIVE_ARCH=arm64-v8a
 
 # 或 build.sh 方式
 bash build.sh pad arm64
@@ -156,7 +156,7 @@ bash build.sh pad arm64
 | `wine` | thirdparty/wine | `build/wine-native/` (winegcc 等 host 工具), `build/wine-ohos/` (OHOS Unix .so + PE DLL) |
 | `box64` | thirdparty/box64 | `entry/libs/arm64-v8a/box64.so` (仅 arm64) |
 | `native` | thirdparty/{libffi,wayland,libepoxy,virglrenderer} | `entry/libs/arm64-v8a/` (ARM64 原生 compositor 依赖) |
-| `assemble` | 以上所有产物 | 组装 Pad/PC 布局 |
+| `assemble` | 以上所有产物 | 组装 rawfile zip 布局 |
 | `hap` | assemble 产物 + ArkTS 源码 | `entry/build/default/outputs/default/entry-default-signed.hap` |
 
 ### 增量构建
@@ -165,13 +165,13 @@ Makefile 使用 stamp 文件跟踪每个阶段的完成状态：
 
 ```bash
 # 只改了 ArkTS → 直接打包
-make hap NATIVE_ARCH=arm64-v8a DEVICE_TYPE=pad
+make NATIVE_ARCH=arm64-v8a hap
 
 # 改了 native compositor C++ 代码
-make native NATIVE_ARCH=arm64-v8a  # → make hap
+make NATIVE_ARCH=arm64-v8a native  # → make NATIVE_ARCH=arm64-v8a hap
 
 # 改了 Wine C 源码
-make wine NATIVE_ARCH=arm64-v8a DEVICE_TYPE=pad  # → make hap
+make NATIVE_ARCH=arm64-v8a wine    # → make NATIVE_ARCH=arm64-v8a hap
 
 # 完全清理
 make clean
@@ -181,7 +181,7 @@ make clean
 
 ## 补充说明
 
-- `scripts/env.sh` 自动检测 `DEVICE_TYPE` 并设置 `PAD_CFLAGS=-DPAD_MODE`、交叉编译工具链等
+- `scripts/env.sh` 自动设置 `NATIVE_ARCH`、交叉编译工具链等
 - Wine native 构建只编译 host 工具（winegcc 等），不编译 DLL，通过 autoconf cache variables 绕过所有库检测
-- `gcc-mingw-w64-i686 g++-mingw-w64-i686 gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64` 是 OHOS 交叉构建需要的 PE 编译器后端，不是 native 构建用的
+- `gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64` 是 OHOS 交叉构建需要的 PE 编译器后端，不是 native 构建用的
 - Ohos SDK 中的 BiSheng 工具链（`ld.lld`）是闭源预编译的，依赖旧版系统库

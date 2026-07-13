@@ -1,6 +1,6 @@
 # 不确定点和技术风险
 
-> 更新: 2026-06-22
+> 更新: 2026-07-13
 
 ---
 
@@ -47,5 +47,9 @@
 - **状态**: 不影响基础应用运行
 
 ### 音频
-- **问题**: 未实现
-- **状态**: 待开发
+- **问题**: 已实现 ✅ (Host Broker + IPC + ring buffer + OHAudio)
+- **状态**: WASAPI / DirectSound / waveOut / MCI / MIDI 全部可用
+
+### Explorer 子进程 conhost
+- **问题**: 从 explorer 启动 console 程序时 conhost.exe 崩溃 (Box64 Signal 3)
+- **状态**: 🟡 GUI 程序不受影响，console 程序可从文件选择器启动

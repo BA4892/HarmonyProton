@@ -73,17 +73,22 @@
 └──────────────────────────────────────────────────────────┘
 ```
 
-ARM64 Pad 下，Box64 编译为共享库 (box64.so)，由 NCP 子进程 `wine_child.so:Main()` dlopen 加载，
-`box64_hmos_main()` 在同一进程内模拟执行 x86_64 Wine ELF。编译宏 `LIBBOX64_SO` 控制。
-x86_64 Pad 下 Wine 原生 .so 直接由系统 linker 加载，无需 Box64。
+ARM64 下，Box64 编译为共享库 (box64.so)，由 NCP 子进程 `wine_child.so:Main()` dlopen 加载，
+`box64_hmos_main()` 在同一进程内模拟执行 x86_64 Wine ELF。
+x86_64 下 Wine 原生 .so 直接由系统 linker 加载，无需 Box64。
 
-### 关键适配
+wine、wineserver、virgl_test_server 全部通过 `OH_Ability_StartNativeChildProcess` (NCP) 创建子进程。
+Broker (`broker.cpp`) 中继 Wine 内部 `CreateProcess` → NCP 的转换，支持命名多 fd 和环境变量转发。
+
+### 关键组件
 
 | 组件 | 说明 |
 |------|------|
 | Box64 | x86_64 → ARM64 指令翻译，Dynarec 模式 |
+| Broker | 中继 Wine CreateProcess → NCP，转发 env + fd |
 | Wayland compositor | 嵌入式 compositor，在 HAP ARM64 进程中运行 |
-| XKB 键盘 | xkeyboard-config 打包到 HNP，XKB_CONFIG_ROOT 指向 |
+| VirGL | guest Mesa virpipe → vtest socket → virglrenderer → host EGL |
+| XKB 键盘 | xkeyboard-config 打包到 rawfile，XKB_CONFIG_ROOT 指向 |
 | noexec 文件系统 | 可执行段用匿名 mmap + pread 替代文件映射 |
 | dosdevices | symlink 不可用，四条代码路径硬编码 fallback |
 
