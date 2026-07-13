@@ -13,7 +13,7 @@ ROOT := $(realpath $(dir $(lastword $(MAKEFILE_LIST))))
 
 # ── 配置 ──
 NATIVE_ARCH ?= x86_64
-BUILD_GUEST_GFX ?= 0
+BUILD_GUEST_GFX ?= 1
 export NATIVE_ARCH
 export BUILD_GUEST_GFX
 
