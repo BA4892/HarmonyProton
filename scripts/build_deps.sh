@@ -15,7 +15,7 @@ bash "$SCRIPT_DIR/build_xkbcommon.sh"
 # XKB 键盘布局数据 (xkeyboard-config, Wine 键盘驱动依赖, 架构无关)
 bash "$SCRIPT_DIR/build_xkbconfig.sh"
 
-# Guest GPU Mesa/VirGL 库 (输出到 build/guest_gfx/) — 实验性, 默认跳过
+# Guest GPU Mesa/VirGL 库 (输出到 build/guest_gfx/$GUEST_ARCH/)
 # Wine 标准 OpenGL 路径 (opengl32 → winewayland.drv → compositor EGL) 不需要此 bundle
 # 设置 BUILD_GUEST_GFX=1 启用 (需要 thirdparty/mesa + libdrm + wayland-protocols >= 1.38)
 if [ "${BUILD_GUEST_GFX:-0}" = "1" ]; then
@@ -45,7 +45,7 @@ static inline int HiLogPrint(unsigned int d, unsigned int l, unsigned int t, con
 #endif
 #endif
 HILEOF
-    bash "$SCRIPT_DIR/build_ohos_guest_gfx.sh"
+    NATIVE_ARCH="${GUEST_ARCH:-x86_64}" bash "$SCRIPT_DIR/build_ohos_guest_gfx.sh"
 else
     log "guest_gfx: SKIP (设置 BUILD_GUEST_GFX=1 启用 Mesa/VirGL 图形测试 bundle)"
 fi

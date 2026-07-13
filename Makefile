@@ -13,8 +13,10 @@ ROOT := $(realpath $(dir $(lastword $(MAKEFILE_LIST))))
 
 # ── 配置 ──
 NATIVE_ARCH ?= x86_64
+GUEST_ARCH ?= x86_64
 BUILD_GUEST_GFX ?= 1
 export NATIVE_ARCH
+export GUEST_ARCH
 export BUILD_GUEST_GFX
 
 CONFIG    := $(NATIVE_ARCH)
@@ -32,7 +34,7 @@ endif
 # ── 关键产物 (用于验证构建是否完成) ──
 DEPS_SENTINEL   := $(BUILD_DIR)/sysroot-ext/usr/lib/x86_64-linux-ohos/libfreetype.so.6
 WINE_SENTINEL   := $(BUILD_DIR)/wine-native/tools/winegcc/winegcc
-GUEST_GFX_SENTINEL := $(BUILD_DIR)/guest_gfx/$(NATIVE_ARCH)/winehua-guest-gfx.env
+GUEST_GFX_SENTINEL := $(BUILD_DIR)/guest_gfx/$(GUEST_ARCH)/winehua-guest-gfx.env
 
 # ============================================================
 # 默认目标
@@ -202,7 +204,7 @@ assemble-$(1): $$(STAMPS)/$(1)/assemble
 $$(STAMPS)/$(1)/assemble: $(SCRIPTS)/assemble.sh $(SCRIPTS)/env.sh \
 	$$(STAMPS)/wine-$(1) $$(STAMPS)/$(1)/native | $$(STAMPS)/$(1)
 	@echo "=== assemble ($(1)) ==="
-	NATIVE_ARCH=$(1) BUILD_GUEST_GFX=$(BUILD_GUEST_GFX) bash $(SCRIPTS)/assemble.sh
+	NATIVE_ARCH=$(1) GUEST_ARCH=$(GUEST_ARCH) BUILD_GUEST_GFX=$(BUILD_GUEST_GFX) bash $(SCRIPTS)/assemble.sh
 	@touch $$@
 endef
 $(foreach a,arm64-v8a x86_64,$(eval $(call assemble_rule,$(a))))

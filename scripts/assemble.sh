@@ -11,6 +11,7 @@ assemble_pad() {
     log "=== 组装布局 ($NATIVE_ARCH) ==="
 
     local wine_data="$STAGING_DIR/wine-data"
+    local guest_arch="${GUEST_ARCH:-x86_64}"
     rm -rf "$STAGING_DIR"
     rm -rf "$wine_data"
     mkdir -p "$wine_data/bin/x86_64-windows"
@@ -264,15 +265,15 @@ HKLM,%FontSubStr%,"Courier New",,"Noto Sans Mono"' "$wine_data/share/wine/wine.i
     fi
 
     # guest GPU 库 (Mesa/VirGL, 供 GraphicsBroker 注入到 Wine LD_LIBRARY_PATH)
-    if [ -d "$BUILD_DIR/guest_gfx/$NATIVE_ARCH/lib" ]; then
+    if [ -d "$BUILD_DIR/guest_gfx/$guest_arch/lib" ]; then
         mkdir -p "$wine_data/bin/guest_gfx"
-        cp -a "$BUILD_DIR/guest_gfx/$NATIVE_ARCH/"* "$wine_data/bin/guest_gfx/"
-        log "  guest_gfx ($NATIVE_ARCH): $(ls "$wine_data/bin/guest_gfx/lib"/*.so* 2>/dev/null | wc -l) .so files"
+        cp -a "$BUILD_DIR/guest_gfx/$guest_arch/"* "$wine_data/bin/guest_gfx/"
+        log "  guest_gfx ($guest_arch): $(ls "$wine_data/bin/guest_gfx/lib"/*.so* 2>/dev/null | wc -l) .so files"
     else
         if [ "${BUILD_GUEST_GFX:-0}" = "1" ]; then
-            err "BUILD_GUEST_GFX=1 but build/guest_gfx/$NATIVE_ARCH/lib is missing"
+            err "BUILD_GUEST_GFX=1 but build/guest_gfx/$guest_arch/lib is missing"
         fi
-        log "  guest_gfx: SKIP (build/guest_gfx/$NATIVE_ARCH/lib not found)"
+        log "  guest_gfx: SKIP (build/guest_gfx/$guest_arch/lib not found)"
     fi
 
     # -- 3. 打包 zip → rawfile (不带 wine-data/ 前缀) --
@@ -296,4 +297,3 @@ log "=== 组装布局 ($NATIVE_ARCH) ==="
 
 # 统一使用 rawfile zip 布局
 assemble_pad
-
