@@ -30,10 +30,11 @@
 [submodule "thirdparty/virglrenderer"]
 	path = thirdparty/virglrenderer
 	url = https://github.com/winehua/virglrenderer.git
+	branch = master
 [submodule "thirdparty/libepoxy"]
 	path = thirdparty/libepoxy
 	url = https://github.com/winehua/libepoxy.git
-	branch = dev
+	branch = master
 [submodule "thirdparty/mesa"]
 	path = thirdparty/mesa
 	url = git@github.com:winehua/mesa-ohos.git
