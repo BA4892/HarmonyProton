@@ -322,6 +322,12 @@ struct Index {
     const pickerHome = new fileUri.FileUri(documentSaveResult[0]).path;
     this.zHome = pickerHome.endsWith('/') ? pickerHome : `${pickerHome}/`;
     hilog.info(DOMAIN, 'wine', 'auto-init: Z home=%{public}s', this.zHome);
+    const gamesDir = `${this.zHome}games`;
+    if (!ensureDirectory(gamesDir)) {
+      this.setInitStatus('创建 games 目录失败', false);
+      return;
+    }
+    hilog.info(DOMAIN, 'wine', 'auto-init: games directory=%{public}s', gamesDir);
     // 检查是否需要解压 wine 数据文件
     hilog.info(DOMAIN, 'wine', 'auto-init: check marker=%{public}s', `${WINE_ROOT}/share/wine/wine.inf`);
     let needExtract = true;
