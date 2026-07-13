@@ -36,7 +36,7 @@
 	branch = dev
 [submodule "thirdparty/mesa"]
 	path = thirdparty/mesa
-	url = https://gitee.com/openharmony/third_party_mesa3d.git
+	url = git@github.com:winehua/mesa-ohos.git
 	branch = OpenHarmony-6.0-Beta1
 [submodule "thirdparty/libdrm"]
 	path = thirdparty/libdrm
