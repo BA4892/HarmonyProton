@@ -599,7 +599,7 @@ extern "C" void WineserverMain(NativeChildProcess_Args args)
         argv2[2] = nullptr;
         argc2 = 2;
     }
-    OH_LOG_INFO(LOG_APP, "[WineChild] ws step4: argv argc=%d argv[0]=%s", argc2, argv2[0]);
+    OH_LOG_INFO(LOG_APP, "[WineChild] ws step4: argv argc=%{public}d argv[0]=%{public}s", argc2, argv2[0]);
 
 #ifdef __aarch64__
     // ARM64 Pad: dlopen box64.so → Box64 模拟 x86_64 wineserver ELF
@@ -633,10 +633,10 @@ extern "C" void WineserverMain(NativeChildProcess_Args args)
         box64_argv[i + 2] = argv2[i];
     box64_argv[box64_argc] = nullptr;
 
-    OH_LOG_INFO(LOG_APP, "[WineChild] ws step6: calling box64_hmos_main argc=%d ws=%s",
+    OH_LOG_INFO(LOG_APP, "[WineChild] ws step6: calling box64_hmos_main argc=%{public}d ws=%{public}s",
                 box64_argc, wsPath.c_str());
     int wsRc = box64_main(box64_argc, box64_argv, environ);
-    OH_LOG_INFO(LOG_APP, "[WineChild] ws step7: box64_hmos_main returned rc=%d", wsRc);
+    OH_LOG_INFO(LOG_APP, "[WineChild] ws step7: box64_hmos_main returned rc=%{public}d", wsRc);
 
     delete[] box64_argv;
     // 不 dlclose(box64_lib): 原因同上 (atexit handler 引用已卸载代码)
@@ -657,7 +657,7 @@ extern "C" void WineserverMain(NativeChildProcess_Args args)
         free(buf);
         return;
     }
-    OH_LOG_INFO(LOG_APP, "[WineChild] ws step7: calling ws_main(%d, [...]), WINEPREFIX=%{public}s",
+    OH_LOG_INFO(LOG_APP, "[WineChild] ws step7: calling ws_main(%{public}d, [...]), WINEPREFIX=%{public}s",
                 argc2, getenv("WINEPREFIX"));
     int wsRc = ws_main(argc2, argv2);
     // server_main() 是无限事件循环, 正常情况下永不返回

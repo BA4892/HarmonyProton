@@ -223,7 +223,7 @@ void WaylandServer::subcompositor_get_subsurface(wl_client* client, wl_resource*
     if (childSd) {
         childSd->parentSurface = parent;
         childSd->isSubsurface = true;
-        OH_LOG_INFO(LOG_APP, "[MW-SUBSURF] subsurface created: child=%p parent=%p",
+        OH_LOG_INFO(LOG_APP, "[MW-SUBSURF] subsurface created: child=%{public}p parent=%{public}p",
                     surface, parent);
     }
 

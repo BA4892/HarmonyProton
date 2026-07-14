@@ -386,7 +386,7 @@ static napi_value SetDisplayScale(napi_env env, napi_callback_info info) {
     double scale;
     napi_get_value_double(env, args[0], &scale);
     EglRenderer::SetGlobalDisplayScale((float)scale);
-    OH_LOG_INFO(LOG_APP, "[MW-NAPI] setDisplayScale = %.2f", scale);
+    OH_LOG_INFO(LOG_APP, "[MW-NAPI] setDisplayScale = %{public}.2f", scale);
     return nullptr;
 }
 

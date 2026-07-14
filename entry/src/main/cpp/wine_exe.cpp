@@ -108,7 +108,7 @@ napi_value RunWineExe(napi_env env, napi_callback_info info) {
         ssize_t n = recv(broker_fd, response, sizeof(response), MSG_WAITALL);
         close(broker_fd);
         if (n != sizeof(response) || response[1] != 0 || response[0] <= 0) {
-            OH_LOG_ERROR(LOG_APP, "[Wine] broker spawn failed pid=%d status=%d", response[0], response[1]);
+            OH_LOG_ERROR(LOG_APP, "[Wine] broker spawn failed pid=%{public}d status=%{public}d", response[0], response[1]);
             if (gStateTsfn) napi_call_threadsafe_function(gStateTsfn, strdup("-1:wine-failed"), napi_tsfn_blocking);
             return nullptr;
         }
