@@ -106,6 +106,7 @@ private:
     std::mutex vsyncMutex_;
     std::condition_variable vsyncCv_;
     uint64_t vsyncSequence_ = 0;
+    std::atomic<long long> vsyncPeriodNs_{16666667};
 
     uint32_t toplevelId_ = 0;
 

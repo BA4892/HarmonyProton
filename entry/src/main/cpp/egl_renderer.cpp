@@ -362,7 +362,9 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
             OH_NativeWindow_NativeWindowHandleOpt(
                 zeroCopyProducerWindow_, GET_BUFFERQUEUE_SIZE, &queueSize);
         if (!zeroCopyProducerWindow_ ||
-            !broker.AttachZeroCopyTarget(surface.surfaceKey, zeroCopyProducerWindow_))
+            !broker.AttachZeroCopyTarget(
+                surface.surfaceKey, zeroCopyProducerWindow_,
+                static_cast<uint64_t>(vsyncPeriodNs_.load(std::memory_order_relaxed))))
         {
             ReleaseZeroCopyBinding();
             continue;
@@ -673,7 +675,7 @@ void EglRenderer::RenderLoop() {
                     toplevelId_, expectedRate.min, expectedRate.max,
                     expectedRate.expected, rateResult);
     }
-    long long vsyncPeriodNs = kFallbackPeriodNs;
+    long long vsyncPeriodNs = vsyncPeriodNs_.load(std::memory_order_relaxed);
     long long loggedPeriodNs = 0;
     unsigned int vsyncFailures = 0;
     auto fallbackDeadline = PerfClock::now();
@@ -702,6 +704,16 @@ void EglRenderer::RenderLoop() {
                     long long period = 0;
                     if (OH_NativeVSync_GetPeriod(nativeVsync, &period) == 0 && period > 0) {
                         vsyncPeriodNs = period;
+                        const long long previousPeriod =
+                            vsyncPeriodNs_.load(std::memory_order_relaxed);
+                        const long long pacingDelta = period > previousPeriod
+                            ? period - previousPeriod : previousPeriod - period;
+                        if (pacingDelta >= 500000) {
+                            vsyncPeriodNs_.store(period, std::memory_order_relaxed);
+                            if (zeroCopySurfaceKey_)
+                                winehua::GraphicsBroker::GetInstance().SetZeroCopyFramePeriod(
+                                    zeroCopySurfaceKey_, static_cast<uint64_t>(period));
+                        }
                         const long long periodDelta = period > loggedPeriodNs
                             ? period - loggedPeriodNs : loggedPeriodNs - period;
                         if (loggedPeriodNs == 0 || periodDelta >= 500000) {

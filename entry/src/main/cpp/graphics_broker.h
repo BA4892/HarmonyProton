@@ -62,7 +62,9 @@ public:
     GraphicsBackendState GetState() const;
 
     void AppendWineEnv(std::vector<std::string>& env) const;
-    bool AttachZeroCopyTarget(uint64_t surfaceKey, OHNativeWindow* producerWindow);
+    bool AttachZeroCopyTarget(uint64_t surfaceKey, OHNativeWindow* producerWindow,
+                              uint64_t framePeriodNs);
+    void SetZeroCopyFramePeriod(uint64_t surfaceKey, uint64_t framePeriodNs);
     void DetachZeroCopyTarget(uint64_t surfaceKey);
     bool QueryZeroCopySurfaces(std::vector<ZeroCopySurfaceInfo>& surfaces) const;
     void SetZeroCopySurfaceReady(uint64_t surfaceKey, bool ready);
@@ -89,7 +91,9 @@ private:
     std::string ProbeVirglLibraryLocked(bool* outLoaded) const;
     static void OnVirglIpcProcessStarted(int errorCode, OHIPCRemoteProxy* remoteProxy);
     bool SendVirglConfigureLocked();
-    bool SendVirglTargetLocked(uint64_t surfaceKey, OHNativeWindow* producerWindow);
+    bool SendVirglTargetLocked(uint64_t surfaceKey, OHNativeWindow* producerWindow,
+                               uint64_t framePeriodNs);
+    bool SendVirglFramePeriodLocked(uint64_t surfaceKey, uint64_t framePeriodNs);
     bool SendVirglDetachLocked(uint64_t surfaceKey);
     void ShutdownVirglIpc();
 

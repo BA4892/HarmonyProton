@@ -318,7 +318,9 @@ bool GraphicsBroker::SendVirglConfigureLocked()
     return sendResult == OH_IPC_SUCCESS && childResult == 0;
 }
 
-bool GraphicsBroker::SendVirglTargetLocked(uint64_t surfaceKey, OHNativeWindow* producerWindow)
+bool GraphicsBroker::SendVirglTargetLocked(uint64_t surfaceKey,
+                                           OHNativeWindow* producerWindow,
+                                           uint64_t framePeriodNs)
 {
     if (!virglRemoteProxy_ || !virglIpcConfigured_ || !producerWindow || !surfaceKey)
         return false;
@@ -330,6 +332,8 @@ bool GraphicsBroker::SendVirglTargetLocked(uint64_t surfaceKey, OHNativeWindow* 
         : OH_IPC_MEM_ALLOCATOR_ERROR;
     if (writeResult == OH_IPC_SUCCESS)
         writeResult = OH_IPCParcel_WriteInt64(request, static_cast<int64_t>(surfaceKey));
+    if (writeResult == OH_IPC_SUCCESS)
+        writeResult = OH_IPCParcel_WriteInt64(request, static_cast<int64_t>(framePeriodNs));
     if (writeResult == OH_IPC_SUCCESS)
         writeResult = OH_NativeWindow_WriteToParcel(producerWindow, request);
 
@@ -348,8 +352,44 @@ bool GraphicsBroker::SendVirglTargetLocked(uint64_t surfaceKey, OHNativeWindow* 
     if (reply) OH_IPCParcel_Destroy(reply);
     if (request) OH_IPCParcel_Destroy(request);
     OH_LOG_INFO(LOG_APP,
-                "[VIRGL-ZC][MAIN] attach surface_key=%{public}llu write=%{public}d send=%{public}d child=%{public}d",
-                static_cast<unsigned long long>(surfaceKey), writeResult, sendResult, childResult);
+                "[VIRGL-ZC][MAIN] attach surface_key=%{public}llu period_ns=%{public}llu "
+                "write=%{public}d send=%{public}d child=%{public}d",
+                static_cast<unsigned long long>(surfaceKey),
+                static_cast<unsigned long long>(framePeriodNs),
+                writeResult, sendResult, childResult);
+    return sendResult == OH_IPC_SUCCESS && childResult == 0;
+}
+
+bool GraphicsBroker::SendVirglFramePeriodLocked(uint64_t surfaceKey,
+                                                uint64_t framePeriodNs)
+{
+    if (!virglRemoteProxy_ || !virglIpcConfigured_ || !surfaceKey || !framePeriodNs)
+        return false;
+
+    OHIPCParcel* request = OH_IPCParcel_Create();
+    OHIPCParcel* reply = OH_IPCParcel_Create();
+    int32_t writeResult = request
+        ? OH_IPCParcel_WriteInt32(request, virgl_ipc::kProtocolVersion)
+        : OH_IPC_MEM_ALLOCATOR_ERROR;
+    if (writeResult == OH_IPC_SUCCESS)
+        writeResult = OH_IPCParcel_WriteInt64(request, static_cast<int64_t>(surfaceKey));
+    if (writeResult == OH_IPC_SUCCESS)
+        writeResult = OH_IPCParcel_WriteInt64(request, static_cast<int64_t>(framePeriodNs));
+
+    int32_t childResult = -1;
+    int32_t sendResult = writeResult;
+    if (writeResult == OH_IPC_SUCCESS && reply)
+    {
+        OH_IPC_MessageOption option = {OH_IPC_REQUEST_MODE_SYNC, 0, nullptr};
+        sendResult = OH_IPCRemoteProxy_SendRequest(
+            virglRemoteProxy_, virgl_ipc::kSetFramePeriodRequest,
+            request, reply, &option);
+        if (sendResult == OH_IPC_SUCCESS)
+            sendResult = OH_IPCParcel_ReadInt32(reply, &childResult);
+    }
+
+    if (reply) OH_IPCParcel_Destroy(reply);
+    if (request) OH_IPCParcel_Destroy(request);
     return sendResult == OH_IPC_SUCCESS && childResult == 0;
 }
 
@@ -383,16 +423,30 @@ bool GraphicsBroker::SendVirglDetachLocked(uint64_t surfaceKey)
 }
 
 bool GraphicsBroker::AttachZeroCopyTarget(uint64_t surfaceKey,
-                                          OHNativeWindow* producerWindow)
+                                          OHNativeWindow* producerWindow,
+                                          uint64_t framePeriodNs)
 {
     if (!surfaceKey || !producerWindow || GetState().active != GraphicsBackend::Virgl)
         return false;
 
     std::lock_guard<std::mutex> lock(virglIpcMutex_);
     if (zeroCopyAttachedSurfaces_.count(surfaceKey)) return true;
-    if (!SendVirglTargetLocked(surfaceKey, producerWindow)) return false;
+    if (!SendVirglTargetLocked(surfaceKey, producerWindow, framePeriodNs)) return false;
     zeroCopyAttachedSurfaces_.insert(surfaceKey);
     return true;
+}
+
+void GraphicsBroker::SetZeroCopyFramePeriod(uint64_t surfaceKey, uint64_t framePeriodNs)
+{
+    std::lock_guard<std::mutex> lock(virglIpcMutex_);
+    if (!surfaceKey || !framePeriodNs || !zeroCopyAttachedSurfaces_.count(surfaceKey)) return;
+    if (!SendVirglFramePeriodLocked(surfaceKey, framePeriodNs))
+    {
+        OH_LOG_WARN(LOG_APP,
+                    "[VIRGL-ZC][MAIN] frame period update failed key=%{public}llu period_ns=%{public}llu",
+                    static_cast<unsigned long long>(surfaceKey),
+                    static_cast<unsigned long long>(framePeriodNs));
+    }
 }
 
 void GraphicsBroker::DetachZeroCopyTarget(uint64_t surfaceKey)

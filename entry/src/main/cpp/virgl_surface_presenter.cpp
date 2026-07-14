@@ -6,6 +6,7 @@
 #include <native_buffer/native_buffer.h>
 #include <native_window/external_window.h>
 
+#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -19,6 +20,23 @@
 namespace {
 
 using SteadyClock = std::chrono::steady_clock;
+
+constexpr uint64_t kDefaultFramePeriodNs = 16666667;
+constexpr uint64_t kMinFramePeriodNs = 4000000;
+constexpr uint64_t kMaxFramePeriodNs = 33333333;
+constexpr uint64_t kProducerDispatchLeadNs = 500000;
+
+uint64_t NormalizeFramePeriodNs(uint64_t framePeriodNs)
+{
+    if (!framePeriodNs) return kDefaultFramePeriodNs;
+    return std::clamp(framePeriodNs, kMinFramePeriodNs, kMaxFramePeriodNs);
+}
+
+uint64_t PacingPeriodNs(uint64_t displayPeriodNs)
+{
+    return displayPeriodNs > kMinFramePeriodNs + kProducerDispatchLeadNs
+        ? displayPeriodNs - kProducerDispatchLeadNs : kMinFramePeriodNs;
+}
 
 uint64_t NowUs()
 {
@@ -50,7 +68,7 @@ GLuint CompilePresentShader(GLenum type, const char* source)
 
 class SurfaceQueueTarget {
 public:
-    int Attach(uint64_t surfaceKey, OHNativeWindow* window)
+    int Attach(uint64_t surfaceKey, uint64_t framePeriodNs, OHNativeWindow* window)
     {
         if (!surfaceKey || !window) return -1;
         std::lock_guard<std::mutex> lock(mutex_);
@@ -64,9 +82,32 @@ public:
         failures_ = 0;
         timestampFailures_ = 0;
         throttled_ = 0;
-        lastAttemptUs_ = 0;
-        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][NCP] target attached surface_key=%{public}llu window=%{public}p",
-                    static_cast<unsigned long long>(surfaceKey_), window_);
+        lastPresentNs_ = 0;
+        displayPeriodNs_ = NormalizeFramePeriodNs(framePeriodNs);
+        framePeriodNs_ = PacingPeriodNs(displayPeriodNs_);
+        OH_LOG_INFO(LOG_APP,
+                    "[VIRGL-ZC][NCP] target attached surface_key=%{public}llu "
+                    "window=%{public}p display_period_us=%{public}llu "
+                    "pace_period_us=%{public}llu",
+                    static_cast<unsigned long long>(surfaceKey_), window_,
+                    static_cast<unsigned long long>(displayPeriodNs_ / 1000),
+                    static_cast<unsigned long long>(framePeriodNs_ / 1000));
+        return 0;
+    }
+
+    int SetFramePeriod(uint64_t framePeriodNs)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const uint64_t displayPeriodNs = NormalizeFramePeriodNs(framePeriodNs);
+        if (displayPeriodNs_ == displayPeriodNs) return 0;
+        displayPeriodNs_ = displayPeriodNs;
+        framePeriodNs_ = PacingPeriodNs(displayPeriodNs_);
+        OH_LOG_INFO(LOG_APP,
+                    "[VIRGL-ZC][NCP] frame period surface_key=%{public}llu "
+                    "display_period_us=%{public}llu pace_period_us=%{public}llu",
+                    static_cast<unsigned long long>(surfaceKey_),
+                    static_cast<unsigned long long>(displayPeriodNs_ / 1000),
+                    static_cast<unsigned long long>(framePeriodNs_ / 1000));
         return 0;
     }
 
@@ -81,9 +122,11 @@ public:
     }
 
     int Present(GLuint texture, uint32_t width, uint32_t height,
-                uint64_t drawable, uint32_t serial)
+                uint64_t drawable, uint32_t serial,
+                uint64_t* nextPresentDeadlineNs)
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (nextPresentDeadlineNs) *nextPresentDeadlineNs = 0;
         const EGLDisplay sourceDisplay = eglGetCurrentDisplay();
         const EGLContext sourceContext = eglGetCurrentContext();
         const EGLSurface sourceDraw = eglGetCurrentSurface(EGL_DRAW);
@@ -95,14 +138,16 @@ public:
 
         if (!window_) return -2;
         if (!sourceVisible) return -3;
-        const uint64_t nowUs = NowUs();
-        if (width_ == width && height_ == height && lastAttemptUs_ &&
-            nowUs - lastAttemptUs_ < 8000)
+        const uint64_t nowNs = NowNs();
+        if (width_ == width && height_ == height && lastPresentNs_ &&
+            nowNs - lastPresentNs_ < framePeriodNs_)
         {
+            if (nextPresentDeadlineNs)
+                *nextPresentDeadlineNs = lastPresentNs_ + framePeriodNs_;
             ++throttled_;
             return 1;
         }
-        lastAttemptUs_ = nowUs;
+        lastPresentNs_ = nowNs;
         sourceReady = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
         if (!sourceReady) return -7;
         glFlush();
@@ -167,15 +212,21 @@ public:
         }
 
         ++frames_;
+        if (nextPresentDeadlineNs)
+            *nextPresentDeadlineNs = lastPresentNs_ + framePeriodNs_;
         if (frames_ == 1 || frames_ % 120 == 0)
         {
             OH_LOG_INFO(LOG_APP,
                         "[VIRGL-ZC][NCP] blit frames=%{public}llu surface_key=%{public}llu "
                         "serial=%{public}u drawable=0x%{public}llx tex=%{public}u "
-                        "size=%{public}ux%{public}u drops=%{public}llu throttled=%{public}llu",
+                        "size=%{public}ux%{public}u display_period_us=%{public}llu "
+                        "pace_period_us=%{public}llu "
+                        "drops=%{public}llu throttled=%{public}llu",
                         static_cast<unsigned long long>(frames_),
                         static_cast<unsigned long long>(surfaceKey_), serial,
                         static_cast<unsigned long long>(drawable), texture, width, height,
+                        static_cast<unsigned long long>(displayPeriodNs_ / 1000),
+                        static_cast<unsigned long long>(framePeriodNs_ / 1000),
                         static_cast<unsigned long long>(failures_),
                         static_cast<unsigned long long>(throttled_));
         }
@@ -368,18 +419,20 @@ void main() { outColor = texture(uTexture, vTexCoord); }
     uint64_t failures_ = 0;
     uint64_t timestampFailures_ = 0;
     uint64_t throttled_ = 0;
-    uint64_t lastAttemptUs_ = 0;
+    uint64_t lastPresentNs_ = 0;
+    uint64_t displayPeriodNs_ = kDefaultFramePeriodNs;
+    uint64_t framePeriodNs_ = kDefaultFramePeriodNs;
 };
 
 class SurfaceQueuePresenterManager {
 public:
-    int Attach(uint64_t surfaceKey, OHNativeWindow* window)
+    int Attach(uint64_t surfaceKey, uint64_t framePeriodNs, OHNativeWindow* window)
     {
         if (!surfaceKey || !window) return -1;
         std::lock_guard<std::mutex> lock(mutex_);
         auto& entry = surfaces_[surfaceKey];
         if (!entry.target) entry.target = std::make_unique<SurfaceQueueTarget>();
-        const int result = entry.target->Attach(surfaceKey, window);
+        const int result = entry.target->Attach(surfaceKey, framePeriodNs, window);
         if (result == 0) entry.info.flags |= winehua::virgl_ipc::kSurfaceAttached;
         return result;
     }
@@ -394,9 +447,18 @@ public:
         return 0;
     }
 
+    int SetFramePeriod(uint64_t surfaceKey, uint64_t framePeriodNs)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = surfaces_.find(surfaceKey);
+        if (it == surfaces_.end() || !it->second.target) return -2;
+        return it->second.target->SetFramePeriod(framePeriodNs);
+    }
+
     int Present(uint32_t clientPid, uint32_t surfaceId, GLuint texture,
                 uint32_t width, uint32_t height,
-                uint64_t drawable, uint32_t serial)
+                uint64_t drawable, uint32_t serial,
+                uint64_t* nextPresentDeadlineNs)
     {
         if (!clientPid || !surfaceId) return -2;
         const uint64_t surfaceKey =
@@ -411,7 +473,8 @@ public:
         entry.info.serial = serial;
         entry.lastPresentUs = NowUs();
         if (!entry.target) return -2;
-        return entry.target->Present(texture, width, height, drawable, serial);
+        return entry.target->Present(
+            texture, width, height, drawable, serial, nextPresentDeadlineNs);
     }
 
     winehua::virgl_ipc::SurfaceQueryReply Query() const
@@ -459,9 +522,10 @@ SurfaceQueuePresenterManager g_presenters;
 
 namespace winehua {
 
-int AttachVirglSurfaceTarget(uint64_t surfaceKey, OHNativeWindow* window)
+int AttachVirglSurfaceTarget(uint64_t surfaceKey, uint64_t framePeriodNs,
+                             OHNativeWindow* window)
 {
-    return g_presenters.Attach(surfaceKey, window);
+    return g_presenters.Attach(surfaceKey, framePeriodNs, window);
 }
 
 int DetachVirglSurfaceTarget(uint64_t surfaceKey)
@@ -469,12 +533,19 @@ int DetachVirglSurfaceTarget(uint64_t surfaceKey)
     return g_presenters.Detach(surfaceKey);
 }
 
+int SetVirglSurfaceFramePeriod(uint64_t surfaceKey, uint64_t framePeriodNs)
+{
+    return g_presenters.SetFramePeriod(surfaceKey, framePeriodNs);
+}
+
 int PresentVirglSurface(uint32_t clientPid, uint32_t surfaceId,
                         uint32_t texture, uint32_t width, uint32_t height,
-                        uint64_t drawable, uint32_t serial)
+                        uint64_t drawable, uint32_t serial,
+                        uint64_t* nextPresentDeadlineNs)
 {
     return g_presenters.Present(
-        clientPid, surfaceId, texture, width, height, drawable, serial);
+        clientPid, surfaceId, texture, width, height, drawable, serial,
+        nextPresentDeadlineNs);
 }
 
 virgl_ipc::SurfaceQueryReply QueryVirglSurfaces()

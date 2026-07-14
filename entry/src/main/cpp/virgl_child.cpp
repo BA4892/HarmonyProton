@@ -32,7 +32,8 @@ using WinehuaVtestMain = int (*)(int argc, char** argv);
 using WinehuaVtestPresentCallback = int (*)(
     uint32_t texId, uint32_t width, uint32_t height, uint32_t format,
     uint32_t resourceFlags, uint64_t drawable, uint32_t serial,
-    uint32_t clientPid, uint32_t surfaceId, uint32_t presentFlags, void* userData);
+    uint32_t clientPid, uint32_t surfaceId, uint32_t presentFlags,
+    uint64_t* nextPresentDeadlineNs, void* userData);
 using WinehuaVtestSetPresentCallback = void (*)(
     WinehuaVtestPresentCallback callback, void* userData);
 enum class IpcChildMode {
@@ -114,8 +115,10 @@ int OnVirglIpcRequest(uint32_t code, const OHIPCParcel* data,
     else if (result == 0 && code == winehua::virgl_ipc::kAttachSurfaceRequest)
     {
         int64_t surfaceKey = 0;
+        int64_t framePeriodNs = 0;
         OHNativeWindow* window = nullptr;
         if (OH_IPCParcel_ReadInt64(data, &surfaceKey) != OH_IPC_SUCCESS || surfaceKey <= 0 ||
+            OH_IPCParcel_ReadInt64(data, &framePeriodNs) != OH_IPC_SUCCESS || framePeriodNs <= 0 ||
             OH_NativeWindow_ReadFromParcel(const_cast<OHIPCParcel*>(data), &window) != 0 || !window)
         {
             if (window) OH_NativeWindow_DestroyNativeWindow(window);
@@ -123,7 +126,9 @@ int OnVirglIpcRequest(uint32_t code, const OHIPCParcel* data,
         }
         else
         {
-            result = winehua::AttachVirglSurfaceTarget(static_cast<uint64_t>(surfaceKey), window);
+            result = winehua::AttachVirglSurfaceTarget(
+                static_cast<uint64_t>(surfaceKey),
+                static_cast<uint64_t>(framePeriodNs), window);
             if (result != 0) OH_NativeWindow_DestroyNativeWindow(window);
         }
     }
@@ -132,6 +137,18 @@ int OnVirglIpcRequest(uint32_t code, const OHIPCParcel* data,
         int64_t surfaceKey = 0;
         result = OH_IPCParcel_ReadInt64(data, &surfaceKey) == OH_IPC_SUCCESS && surfaceKey > 0
             ? winehua::DetachVirglSurfaceTarget(static_cast<uint64_t>(surfaceKey)) : -5;
+    }
+    else if (result == 0 && code == winehua::virgl_ipc::kSetFramePeriodRequest)
+    {
+        int64_t surfaceKey = 0;
+        int64_t framePeriodNs = 0;
+        result = OH_IPCParcel_ReadInt64(data, &surfaceKey) == OH_IPC_SUCCESS &&
+            OH_IPCParcel_ReadInt64(data, &framePeriodNs) == OH_IPC_SUCCESS &&
+            surfaceKey > 0 && framePeriodNs > 0
+            ? winehua::SetVirglSurfaceFramePeriod(
+                  static_cast<uint64_t>(surfaceKey),
+                  static_cast<uint64_t>(framePeriodNs))
+            : -7;
     }
     else if (result == 0 && code == winehua::virgl_ipc::kShutdownRequest)
     {
@@ -203,7 +220,7 @@ int OnVtestPresent(uint32_t texId, uint32_t width, uint32_t height,
                    uint32_t format, uint32_t resourceFlags,
                    uint64_t drawable, uint32_t serial,
                    uint32_t clientPid, uint32_t surfaceId,
-                   uint32_t presentFlags, void*)
+                   uint32_t presentFlags, uint64_t* nextPresentDeadlineNs, void*)
 {
     static std::atomic<uint64_t> callCount{0};
     const uint64_t call = callCount.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -211,8 +228,12 @@ int OnVtestPresent(uint32_t texId, uint32_t width, uint32_t height,
     const EGLContext context = eglGetCurrentContext();
     const bool textureVisible = display != EGL_NO_DISPLAY &&
         context != EGL_NO_CONTEXT && texId != 0 && glIsTexture(texId) == GL_TRUE;
+    if (nextPresentDeadlineNs) *nextPresentDeadlineNs = 0;
     const int presentResult = textureVisible
-        ? winehua::PresentVirglSurface(clientPid, surfaceId, texId, width, height, drawable, serial) : -1;
+        ? winehua::PresentVirglSurface(
+              clientPid, surfaceId, texId, width, height, drawable, serial,
+              nextPresentDeadlineNs)
+        : -1;
 
     if (call == 1 || !textureVisible ||
         (presentResult < -2 && presentResult != -6))
@@ -222,11 +243,14 @@ int OnVtestPresent(uint32_t texId, uint32_t width, uint32_t height,
                     "pid=%{public}u surface=%{public}u drawable=0x%{public}llx tex=%{public}u visible=%{public}s "
                     "size=%{public}ux%{public}u format=%{public}u "
                     "resource_flags=0x%{public}x present_flags=0x%{public}x "
-                    "display=%{public}p context=%{public}p blit=%{public}d",
+                    "display=%{public}p context=%{public}p blit=%{public}d "
+                    "deadline_ns=%{public}llu",
                     static_cast<unsigned long long>(call), serial, clientPid, surfaceId,
                     static_cast<unsigned long long>(drawable), texId,
                     textureVisible ? "PASS" : "FAIL", width, height, format,
-                    resourceFlags, presentFlags, display, context, presentResult);
+                    resourceFlags, presentFlags, display, context, presentResult,
+                    static_cast<unsigned long long>(
+                        nextPresentDeadlineNs ? *nextPresentDeadlineNs : 0));
     }
     return presentResult;
 }
