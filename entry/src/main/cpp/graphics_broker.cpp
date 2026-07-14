@@ -3,9 +3,7 @@
 #include "wait_utils.h"
 #include "wayland_server.h"
 
-#ifdef __OHOS__
 #include <AbilityKit/native_child_process.h>
-#endif
 
 #include <dirent.h>
 #include <sys/stat.h>
@@ -30,7 +28,6 @@ namespace winehua {
 
 namespace {
 
-using PFNWinehuaVtestMain = int (*)(int argc, char** argv);
 
 constexpr const char* VIRGL_SERVER_PROGRAM = "virgl_test_server";
 constexpr const char* VIRGL_VTEST_LIBRARY = "libwinehua_vtest_server.so";
@@ -178,48 +175,6 @@ std::string DescribeWaitStatus(int status)
         return "signaled signal=" + std::to_string(WTERMSIG(status));
     }
     return "status=" + std::to_string(status);
-}
-
-void StartChildLogReader(int fd, pid_t pid, const char* tag)
-{
-    std::thread([fd, pid, tag]() {
-        char buf[2048];
-        std::string pending;
-
-        while (true)
-        {
-            ssize_t n = read(fd, buf, sizeof(buf));
-            if (n > 0)
-            {
-                pending.append(buf, static_cast<size_t>(n));
-                while (true)
-                {
-                    size_t newline = pending.find('\n');
-                    if (newline == std::string::npos) break;
-
-                    std::string line = pending.substr(0, newline);
-                    if (!line.empty())
-                    {
-                        OH_LOG_INFO(LOG_APP, "[%{public}s:%{public}d] %{public}s", tag, pid, line.c_str());
-                    }
-                    pending.erase(0, newline + 1);
-                }
-                continue;
-            }
-
-            if (n == 0) break;
-            if (errno == EINTR) continue;
-
-            OH_LOG_WARN(LOG_APP, "[%{public}s:%{public}d] read failed: %{public}s", tag, pid, strerror(errno));
-            break;
-        }
-
-        if (!pending.empty())
-        {
-            OH_LOG_INFO(LOG_APP, "[%{public}s:%{public}d] %{public}s", tag, pid, pending.c_str());
-        }
-        close(fd);
-    }).detach();
 }
 
 bool IsProcessRunningBySignal(pid_t pid)
@@ -487,7 +442,6 @@ bool GraphicsBroker::EnsureRuntimeLocked(const std::string& runtimeDir)
 
 bool GraphicsBroker::IsVirglServerProcessAliveLocked()
 {
-#ifdef __OHOS__
     if (virglServerUsesNcp_)
     {
         if (IsProcessRunningBySignal(virglServerPid_)) return true;
@@ -499,7 +453,6 @@ bool GraphicsBroker::IsVirglServerProcessAliveLocked()
         virglSocketReady_ = false;
         return false;
     }
-#endif
     int status = 0;
     pid_t waited = 0;
 
@@ -616,15 +569,8 @@ void GraphicsBroker::RefreshGuestReceiverStateLocked()
 
 void GraphicsBroker::StartVirglSocketServerLocked()
 {
-    std::string serverPath;
     std::string serverDir;
     std::string ldLibraryPath;
-    int logPipe[2] = {-1, -1};
-    bool logPipeOk = false;
-    bool usingDedicatedHostRuntime = false;
-    bool usingCallableVtest = false;
-    void* vtestHandle = nullptr;
-    PFNWinehuaVtestMain vtestMain = nullptr;
     pid_t pid = -1;
 
     if (!runtimeReady_ || virglSocketPath_.empty()) return;
@@ -635,10 +581,9 @@ void GraphicsBroker::StartVirglSocketServerLocked()
         return;
     }
 
-#ifdef __OHOS__
     if (virglVtestLibraryPath_.empty() || !FileExists(virglVtestLibraryPath_))
     {
-        lastError_ = "ARM64 virgl vtest helper is missing from the bundle";
+        lastError_ = "virgl vtest helper is missing from the bundle";
         return;
     }
 
@@ -691,135 +636,6 @@ void GraphicsBroker::StartVirglSocketServerLocked()
         virglServerUsesNcp_ = true;
         OH_LOG_INFO(LOG_APP, "[GraphicsBroker] virgl NCP child launched, waiting for socket...");
     }
-#else
-    serverPath = virglServerProgramPath_.empty() ? (wineRuntimeBinDir_ + "/virgl_test_server") : virglServerProgramPath_;
-    if (!virglVtestLibraryPath_.empty())
-    {
-        vtestHandle = dlopen(virglVtestLibraryPath_.c_str(), RTLD_NOW | RTLD_LOCAL);
-        if (!vtestHandle)
-        {
-            OH_LOG_WARN(LOG_APP, "[GraphicsBroker] dlopen %{public}s failed: %{public}s",
-                        virglVtestLibraryPath_.c_str(), dlerror());
-        }
-        else
-        {
-            vtestMain = reinterpret_cast<PFNWinehuaVtestMain>(dlsym(vtestHandle, "winehua_vtest_main"));
-            if (!vtestMain)
-            {
-                OH_LOG_WARN(LOG_APP, "[GraphicsBroker] winehua_vtest_main missing in %{public}s: %{public}s",
-                            virglVtestLibraryPath_.c_str(), dlerror());
-            }
-            else
-            {
-                usingCallableVtest = true;
-            }
-        }
-    }
-    if (!usingCallableVtest && vtestHandle)
-    {
-        dlclose(vtestHandle);
-        vtestHandle = nullptr;
-    }
-
-    if (!usingCallableVtest && access(serverPath.c_str(), X_OK) != 0)
-    {
-        lastError_ = "virgl vtest helper is unavailable and virgl_test_server is missing from runtime: " + serverPath;
-        OH_LOG_WARN(LOG_APP, "[GraphicsBroker] %{public}s errno=%{public}d (%{public}s)",
-                    lastError_.c_str(), errno, strerror(errno));
-        return;
-    }
-
-    serverDir = usingCallableVtest ? DirNameCopy(virglVtestLibraryPath_) : DirNameCopy(serverPath);
-    usingDedicatedHostRuntime = (serverDir != wineRuntimeBinDir_);
-    if (usingDedicatedHostRuntime)
-    {
-        ldLibraryPath = serverDir;
-    }
-    else
-    {
-        ldLibraryPath = wineRuntimeBinDir_ + ":" + wineRuntimeBinDir_ + "/x86_64-unix:" + wineRuntimeBinDir_ + "/../lib/x86_64";
-    }
-    OH_LOG_INFO(LOG_APP,
-                "[GraphicsBroker] virgl_test_server runtime: callable=%{public}d dedicatedHostRuntime=%{public}d serverDir=%{public}s libPath=%{public}s",
-                usingCallableVtest ? 1 : 0,
-                usingDedicatedHostRuntime ? 1 : 0,
-                serverDir.c_str(),
-                ldLibraryPath.c_str());
-    logPipeOk = (pipe(logPipe) == 0);
-    if (!logPipeOk)
-    {
-        OH_LOG_WARN(LOG_APP, "[GraphicsBroker] failed to create virgl_test_server log pipe: %{public}s",
-                    strerror(errno));
-    }
-
-    unlink(virglSocketPath_.c_str());
-    pid = fork();
-    if (pid < 0)
-    {
-        if (logPipeOk)
-        {
-            close(logPipe[0]);
-            close(logPipe[1]);
-        }
-        if (vtestHandle) dlclose(vtestHandle);
-        lastError_ = std::string("failed to fork virgl_test_server: ") + strerror(errno);
-        virglServerPid_ = -1;
-        virglServerRunning_.store(false, std::memory_order_release);
-        virglSocketReady_ = false;
-        return;
-    }
-
-    if (pid == 0)
-    {
-        if (logPipeOk)
-        {
-            close(logPipe[0]);
-            dup2(logPipe[1], STDOUT_FILENO);
-            dup2(logPipe[1], STDERR_FILENO);
-            if (logPipe[1] > 2) close(logPipe[1]);
-        }
-        setenv("LD_LIBRARY_PATH", ldLibraryPath.c_str(), 1);
-        setenv("VTEST_USE_GLES", "1", 1);
-        setenv("VTEST_USE_EGL_SURFACELESS", "1", 1);
-        setenv("EGL_PLATFORM", "surfaceless", 1);
-        unsetenv("GALLIUM_DRIVER");
-        unsetenv("MESA_LOADER_DRIVER_OVERRIDE");
-        unsetenv("LIBGL_ALWAYS_SOFTWARE");
-        chdir(serverDir.c_str());
-        if (usingCallableVtest && vtestMain)
-        {
-            char* args[] = {
-                const_cast<char*>("virgl_test_server"),
-                const_cast<char*>("--no-fork"),
-                const_cast<char*>("--use-egl-surfaceless"),
-                const_cast<char*>("--use-gles"),
-                const_cast<char*>("--socket-path"),
-                const_cast<char*>(virglSocketPath_.c_str()),
-                nullptr,
-            };
-            int rc = vtestMain(6, args);
-            dprintf(STDERR_FILENO, "virgl_test_server callable exited: %d\n", rc);
-            _exit(rc == 0 ? 0 : 127);
-        }
-        execl(serverPath.c_str(),
-              "virgl_test_server",
-              "--no-fork",
-              "--use-egl-surfaceless",
-              "--use-gles",
-              "--socket-path",
-              virglSocketPath_.c_str(),
-              nullptr);
-        dprintf(STDERR_FILENO, "virgl_test_server exec failed: %s\n", strerror(errno));
-        _exit(127);
-    }
-
-    if (logPipeOk)
-    {
-        close(logPipe[1]);
-        StartChildLogReader(logPipe[0], pid, "virgl-test");
-    }
-    if (vtestHandle) dlclose(vtestHandle);
-#endif
 
     virglServerPid_ = pid;
     virglServerRunning_.store(true, std::memory_order_release);
