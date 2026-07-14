@@ -5,6 +5,46 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/env.sh"
 
 # ============================================================
+# 工具函数: 同步根 build-profile 的 SDK 版本
+set_sdk_versions() {
+    local profile="$WINEHUA/build-profile.json5"
+    local target_version="${TARGET_SDK_VERSION:-6.1.0(23)}"
+    local compatible_version="${COMPATIBLE_SDK_VERSION:-6.1.0(23)}"
+
+    if [ ! -f "$profile" ]; then
+        err "build-profile.json5 未找到: $profile"
+    fi
+
+    python3 - "$profile" "$target_version" "$compatible_version" <<'PY'
+import re
+import sys
+
+profile_path, target_version, compatible_version = sys.argv[1:]
+with open(profile_path, "r", encoding="utf-8") as profile_file:
+    content = profile_file.read()
+
+for key, value in (
+    ("targetSdkVersion", target_version),
+    ("compatibleSdkVersion", compatible_version),
+):
+    pattern = rf'("{key}"\s*:\s*)"[^"]*"'
+    content, count = re.subn(
+        pattern,
+        lambda match, version=value: f'{match.group(1)}"{version}"',
+        content,
+        count=1,
+    )
+    if count != 1:
+        raise SystemExit(f"unable to update {key} in {profile_path}")
+
+with open(profile_path, "w", encoding="utf-8") as profile_file:
+    profile_file.write(content)
+PY
+
+    log "SDK versions: target=$target_version, compatible=$compatible_version"
+}
+
+# ============================================================
 # 工具函数: 动态设置 abiFilters
 set_abi_filters() {
     # 根据 NATIVE_ARCH 写 build-profile.json5 的 abiFilters
@@ -38,6 +78,7 @@ package_hap() {
     local unsigned_hap="$WINEHUA/entry/build/default/outputs/default/entry-default-unsigned.hap"
     local signed_hap="$WINEHUA/entry/build/default/outputs/default/entry-default-signed.hap"
 
+    set_sdk_versions
     set_abi_filters
 
     # 移除 hnpPackages (所有平台统一用 rawfile zip)

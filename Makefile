@@ -15,9 +15,13 @@ ROOT := $(realpath $(dir $(lastword $(MAKEFILE_LIST))))
 NATIVE_ARCH ?= x86_64
 GUEST_ARCH ?= x86_64
 BUILD_GUEST_GFX ?= 1
+TARGET_SDK_VERSION ?= 6.1.0(23)
+COMPATIBLE_SDK_VERSION ?= 6.1.0(23)
 export NATIVE_ARCH
 export GUEST_ARCH
 export BUILD_GUEST_GFX
+export TARGET_SDK_VERSION
+export COMPATIBLE_SDK_VERSION
 
 CONFIG    := $(NATIVE_ARCH)
 BUILD_DIR := $(ROOT)/build
@@ -246,6 +250,7 @@ help:
 	@echo "用法: make [target] [NATIVE_ARCH=x86_64|arm64-v8a|all]"
 	@echo ""
 	@echo "默认: NATIVE_ARCH=x86_64"
+	@echo "SDK: target=$(TARGET_SDK_VERSION), compatible=$(COMPATIBLE_SDK_VERSION)"
 	@echo ""
 	@echo "全部构建:"
 	@echo "  make                                          # 默认配置全量 → HAP"
