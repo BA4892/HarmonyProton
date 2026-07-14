@@ -1,12 +1,25 @@
 #include <AbilityKit/native_child_process.h>
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <GLES3/gl3.h>
+#include <IPCKit/ipc_kit.h>
 #include <hilog/log.h>
+#include <native_window/external_window.h>
 
+#include "virgl_ipc_protocol.h"
+#include "virgl_surface_presenter.h"
+
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <dlfcn.h>
+#include <mutex>
 #include <unistd.h>
 
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 
 #undef LOG_DOMAIN
 #undef LOG_TAG
@@ -16,6 +29,125 @@
 namespace {
 
 using WinehuaVtestMain = int (*)(int argc, char** argv);
+using WinehuaVtestPresentCallback = int (*)(
+    uint32_t texId, uint32_t width, uint32_t height, uint32_t format,
+    uint32_t resourceFlags, uint64_t drawable, uint32_t serial,
+    uint32_t clientPid, uint32_t surfaceId, uint32_t presentFlags, void* userData);
+using WinehuaVtestSetPresentCallback = void (*)(
+    WinehuaVtestPresentCallback callback, void* userData);
+enum class IpcChildMode {
+    None,
+    VtestServer,
+};
+
+struct VtestIpcConfig {
+    std::string helperPath;
+    std::string socketPath;
+    std::string libraryPath;
+    std::string syncMode;
+    std::string logPath;
+};
+
+std::mutex g_ipcChildMutex;
+std::condition_variable g_ipcChildCondition;
+IpcChildMode g_ipcChildMode = IpcChildMode::None;
+VtestIpcConfig g_vtestIpcConfig;
+OHIPCRemoteStub* g_virglIpcStub = nullptr;
+
+int WriteIpcResult(OHIPCParcel* reply, int32_t result)
+{
+    return reply ? OH_IPCParcel_WriteInt32(reply, result) : OH_IPC_CHECK_PARAM_ERROR;
+}
+
+int OnVirglIpcRequest(uint32_t code, const OHIPCParcel* data,
+                      OHIPCParcel* reply, void*)
+{
+    int32_t version = 0;
+    int32_t result = !data || OH_IPCParcel_ReadInt32(data, &version) != OH_IPC_SUCCESS ||
+        version != winehua::virgl_ipc::kProtocolVersion ? -1 : 0;
+
+    if (result == 0 && code == winehua::virgl_ipc::kQuerySurfacesRequest)
+    {
+        const auto queryReply = winehua::QueryVirglSurfaces();
+        return reply
+            ? OH_IPCParcel_WriteBuffer(
+                  reply, reinterpret_cast<const uint8_t*>(&queryReply),
+                  static_cast<int32_t>(sizeof(queryReply)))
+            : OH_IPC_CHECK_PARAM_ERROR;
+    }
+
+    if (result == 0 && code == winehua::virgl_ipc::kConfigureRequest)
+    {
+        const char* helperPath = OH_IPCParcel_ReadString(data);
+        const char* socketPath = OH_IPCParcel_ReadString(data);
+        const char* libraryPath = OH_IPCParcel_ReadString(data);
+        const char* syncMode = OH_IPCParcel_ReadString(data);
+        const char* logPath = OH_IPCParcel_ReadString(data);
+        if (!helperPath || helperPath[0] != '/' || !socketPath || socketPath[0] != '/' ||
+            !libraryPath || libraryPath[0] != '/' || !syncMode || !logPath || logPath[0] != '/')
+        {
+            result = -2;
+        }
+        else
+        {
+            std::lock_guard<std::mutex> lock(g_ipcChildMutex);
+            if (g_ipcChildMode != IpcChildMode::None)
+            {
+                result = -3;
+            }
+            else
+            {
+                g_vtestIpcConfig.helperPath = helperPath;
+                g_vtestIpcConfig.socketPath = socketPath;
+                g_vtestIpcConfig.libraryPath = libraryPath;
+                g_vtestIpcConfig.syncMode = syncMode;
+                g_vtestIpcConfig.logPath = logPath;
+                g_ipcChildMode = IpcChildMode::VtestServer;
+            }
+        }
+        g_ipcChildCondition.notify_all();
+        OH_LOG_INFO(LOG_APP,
+                    "[VIRGL-ZC][NCP] configure result=%{public}d helper=%{public}s socket=%{public}s",
+                    result, helperPath ? helperPath : "(null)",
+                    socketPath ? socketPath : "(null)");
+    }
+    else if (result == 0 && code == winehua::virgl_ipc::kAttachSurfaceRequest)
+    {
+        int64_t surfaceKey = 0;
+        OHNativeWindow* window = nullptr;
+        if (OH_IPCParcel_ReadInt64(data, &surfaceKey) != OH_IPC_SUCCESS || surfaceKey <= 0 ||
+            OH_NativeWindow_ReadFromParcel(const_cast<OHIPCParcel*>(data), &window) != 0 || !window)
+        {
+            if (window) OH_NativeWindow_DestroyNativeWindow(window);
+            result = -4;
+        }
+        else
+        {
+            result = winehua::AttachVirglSurfaceTarget(static_cast<uint64_t>(surfaceKey), window);
+            if (result != 0) OH_NativeWindow_DestroyNativeWindow(window);
+        }
+    }
+    else if (result == 0 && code == winehua::virgl_ipc::kDetachSurfaceRequest)
+    {
+        int64_t surfaceKey = 0;
+        result = OH_IPCParcel_ReadInt64(data, &surfaceKey) == OH_IPC_SUCCESS && surfaceKey > 0
+            ? winehua::DetachVirglSurfaceTarget(static_cast<uint64_t>(surfaceKey)) : -5;
+    }
+    else if (result == 0 && code == winehua::virgl_ipc::kShutdownRequest)
+    {
+        winehua::ResetVirglSurfaces();
+        std::thread([]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            _exit(0);
+        }).detach();
+    }
+    else if (result == 0)
+    {
+        result = -6;
+    }
+
+    return WriteIpcResult(reply, result);
+}
 
 bool IsAllowedHostEnv(const std::string& key)
 {
@@ -67,7 +199,92 @@ void ApplyHostEnv(const char* token)
     setenv(key.c_str(), equals + 1, 1);
 }
 
+int OnVtestPresent(uint32_t texId, uint32_t width, uint32_t height,
+                   uint32_t format, uint32_t resourceFlags,
+                   uint64_t drawable, uint32_t serial,
+                   uint32_t clientPid, uint32_t surfaceId,
+                   uint32_t presentFlags, void*)
+{
+    static std::atomic<uint64_t> callCount{0};
+    const uint64_t call = callCount.fetch_add(1, std::memory_order_relaxed) + 1;
+    const EGLDisplay display = eglGetCurrentDisplay();
+    const EGLContext context = eglGetCurrentContext();
+    const bool textureVisible = display != EGL_NO_DISPLAY &&
+        context != EGL_NO_CONTEXT && texId != 0 && glIsTexture(texId) == GL_TRUE;
+    const int presentResult = textureVisible
+        ? winehua::PresentVirglSurface(clientPid, surfaceId, texId, width, height, drawable, serial) : -1;
+
+    if (call == 1 || !textureVisible ||
+        (presentResult < -2 && presentResult != -6))
+    {
+        OH_LOG_INFO(LOG_APP,
+                    "[VIRGL-PRESENT][NCP] call=%{public}llu serial=%{public}u "
+                    "pid=%{public}u surface=%{public}u drawable=0x%{public}llx tex=%{public}u visible=%{public}s "
+                    "size=%{public}ux%{public}u format=%{public}u "
+                    "resource_flags=0x%{public}x present_flags=0x%{public}x "
+                    "display=%{public}p context=%{public}p blit=%{public}d",
+                    static_cast<unsigned long long>(call), serial, clientPid, surfaceId,
+                    static_cast<unsigned long long>(drawable), texId,
+                    textureVisible ? "PASS" : "FAIL", width, height, format,
+                    resourceFlags, presentFlags, display, context, presentResult);
+    }
+    return presentResult;
+}
+
 } // namespace
+
+extern "C" __attribute__((visibility("default"))) void Main(NativeChildProcess_Args args);
+
+extern "C" __attribute__((visibility("default"))) OHIPCRemoteStub* NativeChildProcess_OnConnect()
+{
+    g_virglIpcStub = OH_IPCRemoteStub_Create(
+        "winehua.virgl.Runtime", OnVirglIpcRequest, nullptr, nullptr);
+    OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][NCP] ipc_connect stub=%{public}s pid=%{public}d",
+                g_virglIpcStub ? "PASS" : "FAIL", getpid());
+    return g_virglIpcStub;
+}
+
+extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainProc()
+{
+    ClearGuestGraphicsEnv();
+    setenv("EGL_PLATFORM", "surfaceless", 1);
+    std::unique_lock<std::mutex> lock(g_ipcChildMutex);
+    const bool completed = g_ipcChildCondition.wait_for(
+        lock, std::chrono::seconds(5), [] { return g_ipcChildMode != IpcChildMode::None; });
+    const IpcChildMode mode = g_ipcChildMode;
+    const VtestIpcConfig config = g_vtestIpcConfig;
+    lock.unlock();
+
+    if (completed && mode == IpcChildMode::VtestServer)
+    {
+        std::string entryParams = config.helperPath + "|" + config.socketPath +
+            "|__env=LD_LIBRARY_PATH=" + config.libraryPath +
+            "|__env=VTEST_USE_GLES=1" +
+            "|__env=VTEST_USE_EGL_SURFACELESS=1" +
+            "|__env=VTEST_SYNC_GL_FINISH=1" +
+            "|__env=WINEHUA_VIRGL_SYNC_MODE=" + config.syncMode +
+            "|__env=WINEHUA_VIRGL_LOG_PATH=" + config.logPath +
+            "|__env=EGL_PLATFORM=surfaceless";
+        if (config.syncMode == "egl-thread")
+            entryParams += "|__env=VIRGL_DISABLE_NATIVE_FENCE_FD=1";
+        NativeChildProcess_Args args = {};
+        args.entryParams = entryParams.data();
+        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][NCP] starting persistent vtest server");
+        Main(args);
+        winehua::ResetVirglSurfaces();
+    }
+    else
+    {
+        OH_LOG_ERROR(LOG_APP,
+                     "[VIRGL-ZC][NCP] IPC configuration %{public}s mode=%{public}d",
+                     completed ? "rejected" : "timed out", static_cast<int>(mode));
+    }
+    if (g_virglIpcStub)
+    {
+        OH_IPCRemoteStub_Destroy(g_virglIpcStub);
+        g_virglIpcStub = nullptr;
+    }
+}
 
 extern "C" __attribute__((visibility("default"))) void Main(NativeChildProcess_Args args)
 {
@@ -78,6 +295,7 @@ extern "C" __attribute__((visibility("default"))) void Main(NativeChildProcess_A
     char* socketPath;
     void* handle;
     WinehuaVtestMain vtestMain;
+    WinehuaVtestSetPresentCallback setPresentCallback;
 
     OH_LOG_INFO(LOG_APP, "[virgl-child] Main enter pid=%{public}d params=%{public}s",
                 getpid(), entryParams);
@@ -125,6 +343,14 @@ extern "C" __attribute__((visibility("default"))) void Main(NativeChildProcess_A
         return;
     }
 
+    setPresentCallback = reinterpret_cast<WinehuaVtestSetPresentCallback>(
+        dlsym(handle, "winehua_vtest_set_present_callback"));
+    if (setPresentCallback)
+        setPresentCallback(OnVtestPresent, nullptr);
+    else
+        OH_LOG_WARN(LOG_APP, "[virgl-child] present callback registration missing: %{public}s",
+                    dlerror());
+
     char arg0[] = "virgl_test_server";
     char arg1[] = "--no-fork";
     char arg2[] = "--multi-clients";
@@ -135,6 +361,7 @@ extern "C" __attribute__((visibility("default"))) void Main(NativeChildProcess_A
     int rc = vtestMain(7, argv);
 
     OH_LOG_WARN(LOG_APP, "[virgl-child] vtest exited rc=%{public}d", rc);
+    if (setPresentCallback) setPresentCallback(nullptr, nullptr);
     dlclose(handle);
     free(buffer);
 }

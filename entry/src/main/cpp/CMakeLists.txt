@@ -46,11 +46,13 @@ target_link_libraries(entry PUBLIC
     libace_napi.z.so
     libace_ndk.z.so
     libnative_window.so
+    libnative_image.so
     libnative_vsync.so
     libEGL.so
     libGLESv3.so
     libhilog_ndk.z.so
     libchild_process.so
+    libipc_capi.so
     libohaudio.so
     ${WAYLAND_LIBS_DIR}/libwayland-server.so.0
 )
@@ -58,5 +60,15 @@ target_link_libraries(entry PUBLIC
 add_library(wine_child SHARED wine_child.cpp)
 target_link_libraries(wine_child PUBLIC libhilog_ndk.z.so libchild_process.so)
 
-add_library(virgl_child SHARED virgl_child.cpp)
-target_link_libraries(virgl_child PUBLIC libhilog_ndk.z.so libchild_process.so)
+add_library(virgl_child SHARED
+    virgl_child.cpp
+    virgl_surface_presenter.cpp
+)
+target_link_libraries(virgl_child PUBLIC
+    libEGL.so
+    libGLESv3.so
+    libnative_window.so
+    libhilog_ndk.z.so
+    libchild_process.so
+    libipc_capi.so
+)

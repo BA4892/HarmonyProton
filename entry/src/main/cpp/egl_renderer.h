@@ -9,6 +9,8 @@
 #include <condition_variable>
 #include <mutex>
 
+struct OH_NativeImage;
+
 // 最小 EGL 渲染器: 从 WaylandServer 取帧 -> GL 纹理 -> XComponent 上屏
 // 所有实例共享同一个 EGLDisplay (避免反复 init/terminate 导致 GPU 驱动竞争)
 // 每个实例拥有独立的 EGLContext + EGLSurface
@@ -42,6 +44,12 @@ public:
 private:
     void RenderLoop();
     static void OnVSync(long long timestamp, void* data);
+    static void OnZeroCopyFrameAvailable(void* data);
+    bool InitZeroCopyConsumer();
+    bool TryAttachZeroCopySurface(uint32_t rendererToplevelId);
+    bool UpdateZeroCopyFrame(int& width, int& height);
+    void ReleaseZeroCopyBinding();
+    void ShutdownZeroCopyConsumer();
 
     OHNativeWindow* window_ = nullptr;
     EGLDisplay display_ = EGL_NO_DISPLAY;
@@ -51,6 +59,41 @@ private:
     GLuint texture_ = 0;
     GLuint program_ = 0;
     GLuint vbo_ = 0;
+    OH_NativeImage* zeroCopyImage_ = nullptr;
+    OHNativeWindow* zeroCopyProducerWindow_ = nullptr;
+    GLuint zeroCopyTexture_ = 0;
+    GLuint zeroCopyProgram_ = 0;
+    GLint zeroCopyTransformLocation_ = -1;
+    std::atomic<bool> zeroCopyFrameAvailable_{false};
+    std::atomic<uint64_t> zeroCopyFrameSignals_{0};
+    uint64_t zeroCopyFrames_ = 0;
+    uint64_t zeroCopyFailures_ = 0;
+    uint64_t zeroCopyFallbackShmSerial_ = 0;
+    uint64_t zeroCopyTimestampRegressions_ = 0;
+    int64_t zeroCopyLastTimestamp_ = 0;
+    uint64_t zeroCopySurfaceKey_ = 0;
+    uint64_t zeroCopyLastQueryUs_ = 0;
+    uint32_t zeroCopyClientPid_ = 0;
+    uint32_t zeroCopySurfaceId_ = 0;
+    int zeroCopySourceW_ = 0;
+    int zeroCopySourceH_ = 0;
+    int zeroCopyLayerX_ = 0;
+    int zeroCopyLayerY_ = 0;
+    int zeroCopyLayerW_ = 0;
+    int zeroCopyLayerH_ = 0;
+    bool zeroCopyRegistered_ = false;
+    bool zeroCopyListenerSet_ = false;
+    bool zeroCopyReadyPublished_ = false;
+    bool zeroCopyHasFrame_ = false;
+    bool zeroCopyFallbackPending_ = false;
+    bool zeroCopyGeometryDirty_ = false;
+    uint32_t zeroCopyConsecutiveFailures_ = 0;
+    float zeroCopyTransform_[16] = {
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1,
+    };
 
     int width_ = 0, height_ = 0;
     int frameW_ = 0, frameH_ = 0;  // Wine 帧内容尺寸 (坐标转换)

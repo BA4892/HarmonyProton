@@ -1,4 +1,5 @@
 #include "egl_renderer.h"
+#include "graphics_broker.h"
 #include "wayland_server.h"
 #include "fps_counter.h"
 #include <algorithm>
@@ -9,6 +10,9 @@
 #include <mutex>
 #include <fcntl.h>
 #include <native_vsync/native_vsync.h>
+#include <native_buffer/native_buffer.h>
+#include <native_image/native_image.h>
+#include <GLES2/gl2ext.h>
 #include <unistd.h>
 
 #undef LOG_TAG
@@ -162,6 +166,14 @@ void EglRenderer::OnVSync(long long timestamp, void* data)
     renderer->vsyncCv_.notify_one();
 }
 
+void EglRenderer::OnZeroCopyFrameAvailable(void* data)
+{
+    auto* renderer = static_cast<EglRenderer*>(data);
+    if (!renderer) return;
+    renderer->zeroCopyFrameSignals_.fetch_add(1, std::memory_order_relaxed);
+    renderer->zeroCopyFrameAvailable_.store(true, std::memory_order_release);
+}
+
 EGLDisplay EglRenderer::GetSharedDisplay() {
     std::call_once(gDisplayOnce, []() {
         gSharedDisplay = eglGetDisplay(EGL_DEFAULT_DISPLAY);
@@ -196,6 +208,19 @@ uniform sampler2D uTex;
 void main() { oColor = vec4(texture(uTex, vUV).bgr, 1.0); }
 )";
 
+static const char* kZeroCopyFS = R"(#version 300 es
+#extension GL_OES_EGL_image_external_essl3 : require
+precision mediump float;
+in vec2 vUV;
+out vec4 oColor;
+uniform samplerExternalOES uTex;
+uniform mat4 uTransform;
+void main() {
+    vec4 coord = uTransform * vec4(vUV, 0.0, 1.0);
+    oColor = texture(uTex, coord.xy);
+}
+)";
+
 static GLuint CompileShader(GLenum type, const char* src) {
     GLuint s = glCreateShader(type);
     glShaderSource(s, 1, &src, nullptr);
@@ -208,6 +233,334 @@ static GLuint CompileShader(GLenum type, const char* src) {
         OH_LOG_ERROR(LOG_APP, "[EGL] shader compile: %{public}s", log);
     }
     return s;
+}
+
+bool EglRenderer::InitZeroCopyConsumer()
+{
+    if (toplevelId_ == 0 ||
+        winehua::GraphicsBroker::GetInstance().GetState().active != winehua::GraphicsBackend::Virgl)
+        return false;
+
+    GLuint vertex = CompileShader(GL_VERTEX_SHADER, kVS);
+    GLuint fragment = CompileShader(GL_FRAGMENT_SHADER, kZeroCopyFS);
+    zeroCopyProgram_ = glCreateProgram();
+    glAttachShader(zeroCopyProgram_, vertex);
+    glAttachShader(zeroCopyProgram_, fragment);
+    glLinkProgram(zeroCopyProgram_);
+    glDeleteShader(vertex);
+    glDeleteShader(fragment);
+    GLint linked = GL_FALSE;
+    glGetProgramiv(zeroCopyProgram_, GL_LINK_STATUS, &linked);
+    if (linked != GL_TRUE)
+    {
+        char log[1024] = {};
+        glGetProgramInfoLog(zeroCopyProgram_, sizeof(log), nullptr, log);
+        OH_LOG_WARN(LOG_APP, "[VIRGL-ZC][MAIN] external program link failed: %{public}s", log);
+        ShutdownZeroCopyConsumer();
+        return false;
+    }
+    zeroCopyTransformLocation_ = glGetUniformLocation(zeroCopyProgram_, "uTransform");
+    OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] pipeline ready tl=%{public}u", toplevelId_);
+    return true;
+}
+
+bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
+{
+    if (!zeroCopyProgram_) return false;
+    const uint64_t nowUs = PerfNowUs();
+    auto& broker = winehua::GraphicsBroker::GetInstance();
+    WaylandServer* server = WaylandServer::GetInstance();
+
+    if (zeroCopyRegistered_)
+    {
+        WaylandServer::ZeroCopyLayerInfo layer;
+        if (!server->GetZeroCopyLayerInfo(zeroCopySurfaceKey_, rendererToplevelId, layer))
+        {
+            ReleaseZeroCopyBinding();
+        }
+        else
+        {
+            if (zeroCopyLayerX_ != layer.x || zeroCopyLayerY_ != layer.y ||
+                zeroCopyLayerW_ != layer.width || zeroCopyLayerH_ != layer.height)
+                zeroCopyGeometryDirty_ = true;
+            zeroCopyLayerX_ = layer.x;
+            zeroCopyLayerY_ = layer.y;
+            zeroCopyLayerW_ = layer.width;
+            zeroCopyLayerH_ = layer.height;
+            if (zeroCopyFallbackPending_ &&
+                layer.shmCommitSerial > zeroCopyFallbackShmSerial_)
+            {
+                server->SetSurfaceZeroCopy(zeroCopySurfaceKey_, false);
+                zeroCopyFallbackPending_ = false;
+                zeroCopyHasFrame_ = false;
+                OH_LOG_WARN(LOG_APP,
+                            "[VIRGL-ZC][MAIN] CPU_FALLBACK tl=%{public}u key=%{public}llu "
+                            "shm_serial=%{public}llu baseline=%{public}llu",
+                            rendererToplevelId,
+                            static_cast<unsigned long long>(zeroCopySurfaceKey_),
+                            static_cast<unsigned long long>(layer.shmCommitSerial),
+                            static_cast<unsigned long long>(zeroCopyFallbackShmSerial_));
+            }
+        }
+    }
+
+    if (nowUs - zeroCopyLastQueryUs_ < 100000) return zeroCopyRegistered_;
+    zeroCopyLastQueryUs_ = nowUs;
+
+    std::vector<winehua::ZeroCopySurfaceInfo> surfaces;
+    if (!broker.QueryZeroCopySurfaces(surfaces)) return zeroCopyRegistered_;
+    if (zeroCopyRegistered_)
+    {
+        for (const auto& surface : surfaces)
+        {
+            if (surface.surfaceKey != zeroCopySurfaceKey_) continue;
+            zeroCopySourceW_ = static_cast<int>(surface.width);
+            zeroCopySourceH_ = static_cast<int>(surface.height);
+            return true;
+        }
+        return true;
+    }
+
+    for (const auto& surface : surfaces)
+    {
+        if (!surface.surfaceKey || surface.attached) continue;
+        WaylandServer::ZeroCopyLayerInfo layer;
+        if (!server->GetZeroCopyLayerInfo(surface.surfaceKey, rendererToplevelId, layer)) continue;
+
+        glGenTextures(1, &zeroCopyTexture_);
+        glBindTexture(GL_TEXTURE_EXTERNAL_OES, zeroCopyTexture_);
+        glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        zeroCopyFrameSignals_.store(0, std::memory_order_relaxed);
+        zeroCopyFrameAvailable_.store(false, std::memory_order_release);
+        zeroCopyImage_ = OH_NativeImage_Create(zeroCopyTexture_, GL_TEXTURE_EXTERNAL_OES);
+        if (!zeroCopyImage_)
+        {
+            ReleaseZeroCopyBinding();
+            continue;
+        }
+        const int32_t sizeResult = OH_ConsumerSurface_SetDefaultSize(
+            zeroCopyImage_, static_cast<int32_t>(surface.width),
+            static_cast<int32_t>(surface.height));
+        const int32_t usageResult = OH_ConsumerSurface_SetDefaultUsage(
+            zeroCopyImage_, NATIVEBUFFER_USAGE_HW_RENDER | NATIVEBUFFER_USAGE_HW_TEXTURE);
+        const int32_t dropResult = OH_NativeImage_SetDropBufferMode(zeroCopyImage_, true);
+        OH_OnFrameAvailableListener listener = {};
+        listener.context = this;
+        listener.onFrameAvailable = &EglRenderer::OnZeroCopyFrameAvailable;
+        if (OH_NativeImage_SetOnFrameAvailableListener(zeroCopyImage_, listener) != 0)
+        {
+            ReleaseZeroCopyBinding();
+            continue;
+        }
+        zeroCopyListenerSet_ = true;
+        zeroCopyProducerWindow_ = OH_NativeImage_AcquireNativeWindow(zeroCopyImage_);
+        int32_t queueSize = 0;
+        if (zeroCopyProducerWindow_)
+            OH_NativeWindow_NativeWindowHandleOpt(
+                zeroCopyProducerWindow_, GET_BUFFERQUEUE_SIZE, &queueSize);
+        if (!zeroCopyProducerWindow_ ||
+            !broker.AttachZeroCopyTarget(surface.surfaceKey, zeroCopyProducerWindow_))
+        {
+            ReleaseZeroCopyBinding();
+            continue;
+        }
+
+        zeroCopySurfaceKey_ = surface.surfaceKey;
+        zeroCopyClientPid_ = surface.clientPid;
+        zeroCopySurfaceId_ = surface.surfaceId;
+        zeroCopySourceW_ = static_cast<int>(surface.width);
+        zeroCopySourceH_ = static_cast<int>(surface.height);
+        zeroCopyLayerX_ = layer.x;
+        zeroCopyLayerY_ = layer.y;
+        zeroCopyLayerW_ = layer.width;
+        zeroCopyLayerH_ = layer.height;
+        zeroCopyRegistered_ = true;
+        zeroCopyGeometryDirty_ = true;
+        zeroCopyFallbackPending_ = false;
+        zeroCopyFallbackShmSerial_ = layer.shmCommitSerial;
+        zeroCopyConsecutiveFailures_ = 0;
+        zeroCopyLastTimestamp_ = 0;
+        zeroCopyTimestampRegressions_ = 0;
+        zeroCopyFrames_ = 0;
+        zeroCopyFailures_ = 0;
+        OH_LOG_INFO(LOG_APP,
+                    "[VIRGL-ZC][MAIN] consumer attached tl=%{public}u key=%{public}llu "
+                    "pid=%{public}u surface=%{public}u source=%{public}dx%{public}d "
+                    "layer=%{public}dx%{public}d+%{public}d,%{public}d queue=%{public}d "
+                    "size_ret=%{public}d usage_ret=%{public}d drop_ret=%{public}d",
+                    rendererToplevelId,
+                    static_cast<unsigned long long>(zeroCopySurfaceKey_),
+                    zeroCopyClientPid_, zeroCopySurfaceId_,
+                    zeroCopySourceW_, zeroCopySourceH_, zeroCopyLayerW_, zeroCopyLayerH_,
+                    zeroCopyLayerX_, zeroCopyLayerY_, queueSize,
+                    sizeResult, usageResult, dropResult);
+        return true;
+    }
+    return false;
+}
+
+bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
+{
+    if (!zeroCopyRegistered_ || !zeroCopyImage_ ||
+        !zeroCopyFrameAvailable_.exchange(false, std::memory_order_acq_rel))
+        return false;
+
+    const int32_t updateResult = OH_NativeImage_UpdateSurfaceImage(zeroCopyImage_);
+    const int32_t transformResult = updateResult == 0
+        ? OH_NativeImage_GetTransformMatrixV2(zeroCopyImage_, zeroCopyTransform_) : -1;
+    if (updateResult != 0 || transformResult != 0)
+    {
+        ++zeroCopyFailures_;
+        ++zeroCopyConsecutiveFailures_;
+        if (zeroCopyFailures_ == 1 || zeroCopyFailures_ % 60 == 0)
+            OH_LOG_WARN(LOG_APP,
+                        "[VIRGL-ZC][MAIN] update failed tl=%{public}u update=%{public}d "
+                        "transform=%{public}d failures=%{public}llu",
+                        toplevelId_, updateResult, transformResult,
+                        static_cast<unsigned long long>(zeroCopyFailures_));
+        if (zeroCopyReadyPublished_ && !zeroCopyFallbackPending_ &&
+            zeroCopyConsecutiveFailures_ >= 8)
+        {
+            WaylandServer::ZeroCopyLayerInfo layer;
+            uint32_t rendererToplevelId = toplevelId_;
+            WaylandServer* server = WaylandServer::GetInstance();
+            if (server->IsDesktopMode())
+                rendererToplevelId = server->GetDesktopRootToplevelId();
+            if (server->GetZeroCopyLayerInfo(zeroCopySurfaceKey_, rendererToplevelId, layer))
+                zeroCopyFallbackShmSerial_ = layer.shmCommitSerial;
+            winehua::GraphicsBroker::GetInstance().SetZeroCopySurfaceReady(
+                zeroCopySurfaceKey_, false);
+            zeroCopyReadyPublished_ = false;
+            zeroCopyFallbackPending_ = true;
+            OH_LOG_WARN(LOG_APP,
+                        "[VIRGL-ZC][MAIN] fallback pending tl=%{public}u key=%{public}llu "
+                        "failures=%{public}u shm_baseline=%{public}llu",
+                        rendererToplevelId,
+                        static_cast<unsigned long long>(zeroCopySurfaceKey_),
+                        zeroCopyConsecutiveFailures_,
+                        static_cast<unsigned long long>(zeroCopyFallbackShmSerial_));
+        }
+        return false;
+    }
+
+    zeroCopyConsecutiveFailures_ = 0;
+    const int64_t imageTimestamp = OH_NativeImage_GetTimestamp(zeroCopyImage_);
+    if (imageTimestamp > 0)
+    {
+        if (zeroCopyLastTimestamp_ > 0 && imageTimestamp <= zeroCopyLastTimestamp_)
+        {
+            ++zeroCopyTimestampRegressions_;
+            if (zeroCopyTimestampRegressions_ == 1 || zeroCopyTimestampRegressions_ % 60 == 0)
+                OH_LOG_WARN(LOG_APP,
+                            "[VIRGL-ZC][MAIN] timestamp regression tl=%{public}u "
+                            "current=%{public}lld previous=%{public}lld count=%{public}llu",
+                            toplevelId_, static_cast<long long>(imageTimestamp),
+                            static_cast<long long>(zeroCopyLastTimestamp_),
+                            static_cast<unsigned long long>(zeroCopyTimestampRegressions_));
+        }
+        else
+        {
+            zeroCopyLastTimestamp_ = imageTimestamp;
+        }
+    }
+
+    WaylandServer::ZeroCopyLayerInfo layer;
+    uint32_t rendererToplevelId = toplevelId_;
+    WaylandServer* server = WaylandServer::GetInstance();
+    if (server->IsDesktopMode()) rendererToplevelId = server->GetDesktopRootToplevelId();
+    if (!server->GetZeroCopyLayerInfo(zeroCopySurfaceKey_, rendererToplevelId, layer))
+    {
+        ReleaseZeroCopyBinding();
+        return false;
+    }
+    zeroCopyLayerX_ = layer.x;
+    zeroCopyLayerY_ = layer.y;
+    zeroCopyLayerW_ = layer.width;
+    zeroCopyLayerH_ = layer.height;
+    width = zeroCopySourceW_;
+    height = zeroCopySourceH_;
+    zeroCopyHasFrame_ = true;
+    if (zeroCopyFallbackPending_)
+    {
+        zeroCopyFallbackPending_ = false;
+        OH_LOG_INFO(LOG_APP,
+                    "[VIRGL-ZC][MAIN] fallback cancelled by GPU recovery tl=%{public}u key=%{public}llu",
+                    rendererToplevelId,
+                    static_cast<unsigned long long>(zeroCopySurfaceKey_));
+    }
+    if (!zeroCopyReadyPublished_)
+    {
+        server->SetSurfaceZeroCopy(zeroCopySurfaceKey_, true);
+        winehua::GraphicsBroker::GetInstance().SetZeroCopySurfaceReady(
+            zeroCopySurfaceKey_, true);
+        zeroCopyReadyPublished_ = true;
+        OH_LOG_INFO(LOG_APP,
+                    "[VIRGL-ZC][MAIN] GPU_ACTIVE tl=%{public}u key=%{public}llu",
+                    rendererToplevelId,
+                    static_cast<unsigned long long>(zeroCopySurfaceKey_));
+    }
+    ++zeroCopyFrames_;
+    if (zeroCopyFrames_ == 1 || zeroCopyFrames_ % 120 == 0)
+        OH_LOG_INFO(LOG_APP,
+                    "[VIRGL-ZC][MAIN] frame=%{public}llu tl=%{public}u key=%{public}llu "
+                    "source=%{public}dx%{public}d layer=%{public}dx%{public}d+%{public}d,%{public}d "
+                    "signals=%{public}llu failures=%{public}llu",
+                    static_cast<unsigned long long>(zeroCopyFrames_), toplevelId_,
+                    static_cast<unsigned long long>(zeroCopySurfaceKey_), width, height,
+                    zeroCopyLayerW_, zeroCopyLayerH_, zeroCopyLayerX_, zeroCopyLayerY_,
+                    static_cast<unsigned long long>(zeroCopyFrameSignals_.load()),
+                    static_cast<unsigned long long>(zeroCopyFailures_));
+    return width > 0 && height > 0;
+}
+
+void EglRenderer::ReleaseZeroCopyBinding()
+{
+    if (zeroCopySurfaceKey_)
+    {
+        winehua::GraphicsBroker::GetInstance().SetZeroCopySurfaceReady(
+            zeroCopySurfaceKey_, false);
+        WaylandServer::GetInstance()->SetSurfaceZeroCopy(zeroCopySurfaceKey_, false);
+    }
+    zeroCopyReadyPublished_ = false;
+    zeroCopyFallbackPending_ = false;
+    if (zeroCopyRegistered_)
+        winehua::GraphicsBroker::GetInstance().DetachZeroCopyTarget(zeroCopySurfaceKey_);
+    zeroCopyRegistered_ = false;
+    if (zeroCopyImage_ && zeroCopyListenerSet_)
+        OH_NativeImage_UnsetOnFrameAvailableListener(zeroCopyImage_);
+    zeroCopyListenerSet_ = false;
+    zeroCopyProducerWindow_ = nullptr;
+    if (zeroCopyImage_) OH_NativeImage_Destroy(&zeroCopyImage_);
+    if (zeroCopyTexture_)
+    {
+        glDeleteTextures(1, &zeroCopyTexture_);
+        zeroCopyTexture_ = 0;
+    }
+    zeroCopyFrameAvailable_.store(false, std::memory_order_release);
+    zeroCopyHasFrame_ = false;
+    zeroCopyGeometryDirty_ = false;
+    zeroCopyConsecutiveFailures_ = 0;
+    zeroCopyFallbackShmSerial_ = 0;
+    zeroCopyLastTimestamp_ = 0;
+    zeroCopyTimestampRegressions_ = 0;
+    zeroCopySurfaceKey_ = 0;
+    zeroCopyClientPid_ = 0;
+    zeroCopySurfaceId_ = 0;
+    zeroCopySourceW_ = 0;
+    zeroCopySourceH_ = 0;
+}
+
+void EglRenderer::ShutdownZeroCopyConsumer()
+{
+    ReleaseZeroCopyBinding();
+    if (zeroCopyProgram_)
+    {
+        glDeleteProgram(zeroCopyProgram_);
+        zeroCopyProgram_ = 0;
+    }
 }
 
 bool EglRenderer::Init(OHNativeWindow* window, int w, int h) {
@@ -293,6 +646,9 @@ void EglRenderer::RenderLoop() {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    const bool zeroCopyReady = InitZeroCopyConsumer();
+    OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] tl=%{public}u path=%{public}s",
+                toplevelId_, zeroCopyReady ? "SURFACE_QUEUE" : "SHM_FALLBACK");
 
     // 5. 渲染循环: 跟随硬件 VSync, 每次只取最新的 toplevel 帧
     FpsCounter fps("render");
@@ -390,18 +746,27 @@ void EglRenderer::RenderLoop() {
         const uint64_t takeStartedUs = frameStartedUs;
         uint64_t uploadUs = 0;
         bool haveFrame = false;
+        bool cpuFrame = false;
+        bool zeroCopyFrame = false;
+        int zeroCopyWidth = 0;
+        int zeroCopyHeight = 0;
         uint32_t useToplevel = toplevelId_;
         WaylandServer* ws = WaylandServer::GetInstance();
         // Desktop mode: root toplevel may be recreated, always use current ID
         if (ws->IsDesktopMode()) useToplevel = ws->GetDesktopRootToplevelId();
+        TryAttachZeroCopySurface(useToplevel);
+        const bool zeroCopyGeometryFrame = zeroCopyGeometryDirty_;
+        zeroCopyGeometryDirty_ = false;
+        zeroCopyFrame = UpdateZeroCopyFrame(zeroCopyWidth, zeroCopyHeight);
         if (useToplevel != 0) {
-            haveFrame = ws->TakeToplevelFrame(useToplevel, px, fw, fh);
+            cpuFrame = ws->TakeToplevelFrame(useToplevel, px, fw, fh);
         } else {
-            haveFrame = ws->TakeFrame(px, fw, fh);
+            cpuFrame = ws->TakeFrame(px, fw, fh);
         }
+        haveFrame = cpuFrame || zeroCopyFrame || zeroCopyGeometryFrame;
         const uint64_t takeUs = PerfNowUs() - takeStartedUs;
 
-        if (haveFrame && fw > 0 && fh > 0) {
+        if (cpuFrame && fw > 0 && fh > 0) {
             const uint64_t uploadStartedUs = PerfNowUs();
             // 存储帧尺寸供输入坐标转换
             frameW_ = fw;
@@ -434,6 +799,12 @@ void EglRenderer::RenderLoop() {
             uploadUs = PerfNowUs() - uploadStartedUs;
             rendered = true;
         }
+        if (zeroCopyFrame && !firstFrameLogged) {
+            OH_LOG_INFO(LOG_APP,
+                        "[MW-RNDR] tl=%{public}u FIRST ZERO-COPY FRAME %{public}dx%{public}d",
+                        useToplevel, zeroCopyWidth, zeroCopyHeight);
+            firstFrameLogged = true;
+        }
 
         // 无新帧且已渲染过首帧 → 跳过 GPU 绘制, 静态桌面节省 GPU 功耗
         if (!haveFrame && rendered) {
@@ -452,8 +823,8 @@ void EglRenderer::RenderLoop() {
         }
 
         // Letterbox 视口: 保持 Wine 帧宽高比, 居中渲染, 左右或上下黑边
-        if (fw > 0 && fh > 0 && width_ > 0 && height_ > 0) {
-            float frameAspect = (float)fw / fh;
+        if (frameW_ > 0 && frameH_ > 0 && width_ > 0 && height_ > 0) {
+            float frameAspect = (float)frameW_ / frameH_;
             float surfAspect = (float)width_ / height_;
             if (surfAspect > frameAspect) {
                 // Surface 比帧更宽 -> 左右黑边
@@ -480,10 +851,10 @@ void EglRenderer::RenderLoop() {
             int barLeft = vpX_;
             int barRight = width_ - vpX_ - vpW_;
             float sA = (float)width_ / height_;
-            float fA = fw > 0 && fh > 0 ? (float)fw / fh : 0;
+            float fA = frameW_ > 0 && frameH_ > 0 ? (float)frameW_ / frameH_ : 0;
             OH_LOG_INFO(LOG_APP, "[MW-RNDR] diag#%{public}d tl=%{public}u surface=%{public}dx%{public}d(asp=%{public}.2f) frame=%{public}dx%{public}d(asp=%{public}.2f) vp=%{public}dx%{public}d+%{public}d,%{public}d bar=(L%{public}d R%{public}d T%{public}d B%{public}d)",
                         loopCount, useToplevel,
-                        width_, height_, sA, fw, fh, fA,
+                        width_, height_, sA, frameW_, frameH_, fA,
                         vpW_, vpH_, vpX_, vpY_,
                         barLeft, barRight, barTop, barBot);
         }
@@ -493,34 +864,58 @@ void EglRenderer::RenderLoop() {
             lastLoggedW_ = width_;
             lastLoggedH_ = height_;
             OH_LOG_INFO(LOG_APP, "[MW-RESIZE] tl=%{public}u surface=%{public}dx%{public}d frame=%{public}dx%{public}d",
-                        useToplevel, width_, height_, fw, fh);
+                        useToplevel, width_, height_, frameW_, frameH_);
         }
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
 
-        glUseProgram(program_);
         glBindBuffer(GL_ARRAY_BUFFER, vbo_);
         glEnableVertexAttribArray(0);
         glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 16, (void*)0);
         glEnableVertexAttribArray(1);
         glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 16, (void*)8);
         glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, texture_);
-        glUniform1i(glGetUniformLocation(program_, "uTex"), 0);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
+
+        if (rendered) {
+            glViewport(vpX_, vpY_, vpW_, vpH_);
+            glUseProgram(program_);
+            glBindTexture(GL_TEXTURE_2D, texture_);
+            glUniform1i(glGetUniformLocation(program_, "uTex"), 0);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+        }
+
+        if (zeroCopyHasFrame_ && zeroCopyRegistered_ && frameW_ > 0 && frameH_ > 0 &&
+            zeroCopyLayerW_ > 0 && zeroCopyLayerH_ > 0) {
+            const int layerViewportX = vpX_ +
+                static_cast<int>((static_cast<int64_t>(zeroCopyLayerX_) * vpW_) / frameW_);
+            const int layerViewportY = vpY_ +
+                static_cast<int>((static_cast<int64_t>(
+                    frameH_ - zeroCopyLayerY_ - zeroCopyLayerH_) * vpH_) / frameH_);
+            const int layerViewportW = std::max(1, static_cast<int>(
+                (static_cast<int64_t>(zeroCopyLayerW_) * vpW_) / frameW_));
+            const int layerViewportH = std::max(1, static_cast<int>(
+                (static_cast<int64_t>(zeroCopyLayerH_) * vpH_) / frameH_));
+            glViewport(layerViewportX, layerViewportY, layerViewportW, layerViewportH);
+            glUseProgram(zeroCopyProgram_);
+            glBindTexture(GL_TEXTURE_EXTERNAL_OES, zeroCopyTexture_);
+            glUniform1i(glGetUniformLocation(zeroCopyProgram_, "uTex"), 0);
+            glUniformMatrix4fv(zeroCopyTransformLocation_, 1, GL_FALSE, zeroCopyTransform_);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+        }
 
         const uint64_t swapStartedUs = PerfNowUs();
         const bool swapOk = eglSwapBuffers(display_, surface_) == EGL_TRUE;
         const uint64_t frameEndedUs = PerfNowUs();
         if (haveFrame) {
             perf.Add(useToplevel, takeUs, uploadUs, frameEndedUs - swapStartedUs,
-                     frameEndedUs - frameStartedUs, px.size(), swapOk);
+                     frameEndedUs - frameStartedUs, cpuFrame ? px.size() : 0, swapOk);
         }
         fps.Tick();
         loopCount++;
         if (!waitForFrameTick()) break;
     }
 
+    ShutdownZeroCopyConsumer();
     if (nativeVsync) OH_NativeVSync_Destroy(nativeVsync);
 }
 

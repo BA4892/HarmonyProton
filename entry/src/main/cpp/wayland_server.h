@@ -14,6 +14,19 @@
 // 最小 Wayland Compositor: wl_compositor + wl_surface + wl_shm
 class WaylandServer {
 public:
+    struct ZeroCopyLayerInfo {
+        uint64_t surfaceKey = 0;
+        uint32_t clientPid = 0;
+        uint32_t surfaceId = 0;
+        uint32_t parentToplevel = 0;
+        int x = 0;
+        int y = 0;
+        int width = 0;
+        int height = 0;
+        uint64_t shmCommitSerial = 0;
+        bool desktopCoordinates = false;
+    };
+
     using StateCb = std::function<void(const char*)>;
     // toplevel 回调: (toplevelId, eventName, jsonData)
     // events: "created", "destroyed", "title", "configure"
@@ -30,6 +43,9 @@ public:
     bool TakeFrame(std::vector<uint8_t>& outPixels, int& w, int& h);
     // 取指定 toplevel 的最新帧
     bool TakeToplevelFrame(uint32_t toplevelId, std::vector<uint8_t>& outPixels, int& w, int& h);
+    bool GetZeroCopyLayerInfo(uint64_t surfaceKey, uint32_t rendererToplevelId,
+                              ZeroCopyLayerInfo& info);
+    void SetSurfaceZeroCopy(uint64_t surfaceKey, bool enabled);
 
     // 状态回调 (首帧到达 -> 通知 ArkTS)
     void SetStateCallback(StateCb cb) { stateCb_ = std::move(cb); }
@@ -164,6 +180,8 @@ private:
     // toplevel 帧缓冲: toplevelId -> pixels
     std::mutex toplevelMutex_;
     std::unordered_map<uint32_t, std::vector<uint8_t>> toplevelPixels_;
+    std::unordered_map<uint64_t, wl_resource*> surfaceResources_;
+    std::unordered_set<uint64_t> zeroCopySurfaceKeys_;
     std::unordered_map<uint32_t, int> toplevelW_, toplevelH_;
     std::unordered_map<uint32_t, int> toplevelX_, toplevelY_;  // compositor 桌面位置 (含 move grab 偏移)
     std::unordered_map<uint32_t, int> toplevelWineX_, toplevelWineY_;  // Wine 坐标系位置 (首次 commit, 不变)
@@ -196,8 +214,11 @@ private:
     // subsurface 合成层 (不写入 toplevelPixels_, 避免污染)
     struct SubsurfaceLayer {
         wl_resource* surface = nullptr;
+        uint64_t surfaceKey = 0;
         std::vector<uint8_t> pixels;
         int x = 0, y = 0, w = 0, h = 0;
+        int localX = 0, localY = 0;
+        uint64_t shmCommitSerial = 0;
         uint32_t parentToplevel = 0;
         uint32_t shmFormat = 1;
         bool opaque = false;
@@ -205,6 +226,8 @@ private:
         int32_t vpDstW = -1, vpDstH = -1;                // viewport destination
         bool isExternal = false;  // 外部菜单 (任务栏等), 输入坐标需用 Wine 基底
     };
+    void ResolveSubsurfaceLayerPositionLocked(const SubsurfaceLayer& layer,
+                                              int& x, int& y) const;
     std::vector<SubsurfaceLayer> subsurfaceLayers_;
     std::vector<uint32_t> toplevelZOrder_;  // 前景→背景
     std::unordered_set<uint32_t> backgroundLayers_; // 渲染层, 不接收输入 (被切换掉的旧 root)
@@ -217,6 +240,9 @@ private:
 // wl_surface 的每个实例携带的数据
 struct SurfaceData {
     wl_resource* surface = nullptr;
+    uint64_t surfaceKey = 0;
+    uint32_t clientPid = 0;
+    uint32_t protocolId = 0;
     wl_resource* pendingBuffer = nullptr;
     std::vector<wl_resource*> frameCallbacks;
 
@@ -224,6 +250,7 @@ struct SurfaceData {
     std::vector<uint8_t> pixels;
     int w = 0, h = 0;
     bool dirty = false;
+    std::atomic<uint64_t> shmCommitSerial{0};
 
     // toplevel identity
     uint32_t toplevelId = 0;

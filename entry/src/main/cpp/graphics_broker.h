@@ -1,10 +1,15 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <unordered_set>
 #include <vector>
+#include <native_window/external_window.h>
+
+struct OHIPCRemoteProxy;
 
 namespace winehua {
 
@@ -33,6 +38,17 @@ struct GraphicsBackendState
     std::string lastError;
 };
 
+struct ZeroCopySurfaceInfo
+{
+    uint64_t surfaceKey = 0;
+    uint32_t clientPid = 0;
+    uint32_t surfaceId = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t serial = 0;
+    bool attached = false;
+};
+
 class GraphicsBroker
 {
 public:
@@ -46,6 +62,10 @@ public:
     GraphicsBackendState GetState() const;
 
     void AppendWineEnv(std::vector<std::string>& env) const;
+    bool AttachZeroCopyTarget(uint64_t surfaceKey, OHNativeWindow* producerWindow);
+    void DetachZeroCopyTarget(uint64_t surfaceKey);
+    bool QueryZeroCopySurfaces(std::vector<ZeroCopySurfaceInfo>& surfaces) const;
+    void SetZeroCopySurfaceReady(uint64_t surfaceKey, bool ready);
     bool TakeFrameForToplevel(uint32_t rendererToplevelId,
                               std::vector<uint8_t>& outPixels,
                               int& w,
@@ -67,6 +87,11 @@ private:
     void StartVirglSocketServerLocked();
     void UpdateActiveBackendLocked();
     std::string ProbeVirglLibraryLocked(bool* outLoaded) const;
+    static void OnVirglIpcProcessStarted(int errorCode, OHIPCRemoteProxy* remoteProxy);
+    bool SendVirglConfigureLocked();
+    bool SendVirglTargetLocked(uint64_t surfaceKey, OHNativeWindow* producerWindow);
+    bool SendVirglDetachLocked(uint64_t surfaceKey);
+    void ShutdownVirglIpc();
 
     mutable std::mutex mutex_;
     GraphicsBackend requestedBackend_ = GraphicsBackend::Shm;
@@ -90,7 +115,22 @@ private:
     std::string lastError_;
     int virglServerPid_ = -1;
     bool virglServerUsesNcp_ = false;
+    bool virglServerUsesIpc_ = false;
     std::atomic<bool> virglServerRunning_{false};
+
+    mutable std::mutex virglIpcMutex_;
+    std::condition_variable virglIpcCondition_;
+    OHIPCRemoteProxy* virglRemoteProxy_ = nullptr;
+    bool virglIpcAcceptCallback_ = false;
+    bool virglIpcCallbackComplete_ = false;
+    bool virglIpcConfigured_ = false;
+    int virglIpcError_ = 0;
+    std::string virglIpcHelperPath_;
+    std::string virglIpcSocketPath_;
+    std::string virglIpcLibraryPath_;
+    std::string virglIpcSyncMode_;
+    std::string virglIpcLogPath_;
+    std::unordered_set<uint64_t> zeroCopyAttachedSurfaces_;
 };
 
 } // namespace winehua

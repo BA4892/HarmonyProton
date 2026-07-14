@@ -13,6 +13,24 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 
+namespace {
+
+uint64_t MakeSurfaceKey(uint32_t clientPid, uint32_t surfaceId)
+{
+    return (static_cast<uint64_t>(clientPid) << 32) | surfaceId;
+}
+
+uint32_t GetWaylandClientPid(wl_client* client)
+{
+    pid_t pid = 0;
+    uid_t uid = 0;
+    gid_t gid = 0;
+    if (client) wl_client_get_credentials(client, &pid, &uid, &gid);
+    return pid > 0 ? static_cast<uint32_t>(pid) : 0;
+}
+
+} // namespace
+
 extern "C" void RegisterXdgShell(wl_display* display);
 
 #undef LOG_TAG
@@ -182,10 +200,25 @@ void WaylandServer::compositor_create_surface(wl_client* client, wl_resource* co
     wl_resource* surfRes = wl_resource_create(client, &wl_surface_interface,
                                               wl_resource_get_version(compRes), id);
     sd->surface = surfRes;
+    sd->clientPid = GetWaylandClientPid(client);
+    sd->protocolId = id;
+    sd->surfaceKey = MakeSurfaceKey(sd->clientPid, id);
     wl_resource_set_implementation(surfRes, &kSurfaceImpl, sd, [](wl_resource* r) {
         auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(r));
+        auto* self = GetInstance();
+        {
+            std::lock_guard<std::mutex> lk(self->toplevelMutex_);
+            const uint64_t surfaceKey = sd ? sd->surfaceKey : 0;
+            self->surfaceResources_.erase(surfaceKey);
+            self->zeroCopySurfaceKeys_.erase(surfaceKey);
+            for (auto it = self->subsurfaceLayers_.begin(); it != self->subsurfaceLayers_.end(); ) {
+                if (it->surface == r) it = self->subsurfaceLayers_.erase(it);
+                else ++it;
+            }
+            if (self->desktopRootToplevelId_ > 0)
+                self->toplevelDirty_[self->desktopRootToplevelId_] = true;
+        }
         if (sd && sd->hasToplevel) {
-            auto* self = GetInstance();
             {
                 std::lock_guard<std::mutex> lk(self->toplevelSurfaceMutex_);
                 self->toplevelSurfaceMap_.erase(sd->toplevelId);
@@ -195,6 +228,11 @@ void WaylandServer::compositor_create_surface(wl_client* client, wl_resource* co
         }
         delete sd;
     });
+    {
+        auto* self = static_cast<WaylandServer*>(wl_resource_get_user_data(compRes));
+        std::lock_guard<std::mutex> lk(self->toplevelMutex_);
+        self->surfaceResources_[sd->surfaceKey] = surfRes;
+    }
 }
 
 void WaylandServer::compositor_create_region(wl_client* client, wl_resource* compRes, uint32_t id) {
@@ -238,8 +276,21 @@ void WaylandServer::subsurface_set_position(wl_client*, wl_resource* ssRes,
     if (!childSurf) return;
     auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(childSurf));
     if (!sd) return;
+    if (sd->subsurfaceX == x && sd->subsurfaceY == y) return;
     sd->subsurfaceX = x;
     sd->subsurfaceY = y;
+    auto* self = GetInstance();
+    {
+        std::lock_guard<std::mutex> lk(self->toplevelMutex_);
+        for (auto& layer : self->subsurfaceLayers_) {
+            if (layer.surface != childSurf) continue;
+            layer.localX = x;
+            layer.localY = y;
+            break;
+        }
+        if (self->desktopRootToplevelId_ > 0)
+            self->toplevelDirty_[self->desktopRootToplevelId_] = true;
+    }
     OH_LOG_INFO(LOG_APP, "[MW-SUBSURF] set_position: child=%{public}p parent=%{public}p pos=(%{public}d,%{public}d)",
                 childSurf, sd->parentSurface, x, y);
 }
@@ -503,6 +554,8 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
         sd->w = contentW;
         sd->h = contentH;
         sd->dirty = true;
+        const uint64_t shmCommitSerial =
+            sd->shmCommitSerial.fetch_add(1, std::memory_order_release) + 1;
         OH_LOG_INFO(LOG_APP, "[MW-COMMIT] surface w=%{public}d h=%{public}d stride=%{public}d stored=%{public}zu content=%{public}dx%{public}d geo=%{public}s",
                     w, h, stride, sd->pixels.size(), contentW, contentH,
                     sd->hasWindowGeometry ? "yes" : "no");
@@ -671,6 +724,7 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                     std::lock_guard<std::mutex> lk(self->toplevelMutex_);
                     SubsurfaceLayer layer;
                     layer.surface = surfRes;  // 用 subsurface 自己的 surface 做 key
+                    layer.surfaceKey = sd->surfaceKey;
                     layer.w = sd->w;
                     layer.h = sd->h;
                     int32_t sx = sd->subsurfaceX, sy = sd->subsurfaceY;
@@ -707,6 +761,9 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                     int compH = self->toplevelH_[parentId];
                     bool insideWin = (sx >= 0 && sx < compW && sy >= 0 && sy < compH);
                     layer.isExternal = !insideWin;
+                    layer.localX = sx;
+                    layer.localY = sy;
+                    layer.shmCommitSerial = shmCommitSerial;
                     if (insideWin) {
                         layer.x = compX + sx;
                         layer.y = compY + sy;
@@ -807,6 +864,96 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
 }
 
 // -- 帧数据接口 --
+void WaylandServer::ResolveSubsurfaceLayerPositionLocked(
+    const SubsurfaceLayer& layer, int& x, int& y) const
+{
+    x = layer.x;
+    y = layer.y;
+    if (layer.isExternal) return;
+
+    const auto xIt = toplevelX_.find(layer.parentToplevel);
+    const auto yIt = toplevelY_.find(layer.parentToplevel);
+    if (xIt != toplevelX_.end()) x = xIt->second + layer.localX;
+    if (yIt != toplevelY_.end()) y = yIt->second + layer.localY;
+}
+
+bool WaylandServer::GetZeroCopyLayerInfo(uint64_t surfaceKey, uint32_t rendererToplevelId,
+                                         ZeroCopyLayerInfo& info)
+{
+    std::lock_guard<std::mutex> lk(toplevelMutex_);
+    const auto resourceIt = surfaceResources_.find(surfaceKey);
+    if (resourceIt == surfaceResources_.end()) return false;
+    auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(resourceIt->second));
+    if (!sd) return false;
+
+    info = {};
+    info.surfaceKey = surfaceKey;
+    info.clientPid = sd->clientPid;
+    info.surfaceId = sd->protocolId;
+    if (sd->isSubsurface && sd->parentSurface)
+    {
+        auto* parent = static_cast<SurfaceData*>(wl_resource_get_user_data(sd->parentSurface));
+        if (!parent || !parent->hasToplevel) return false;
+        info.parentToplevel = parent->toplevelId;
+        info.width = sd->vpDstW > 0 ? sd->vpDstW : sd->w;
+        info.height = sd->vpDstH > 0 ? sd->vpDstH : sd->h;
+        if (desktopMode_)
+        {
+            if (rendererToplevelId != desktopRootToplevelId_ ||
+                (info.parentToplevel != desktopRootToplevelId_ &&
+                 !IsToplevelVisible(info.parentToplevel)))
+                return false;
+            for (const auto& layer : subsurfaceLayers_)
+            {
+                if (layer.surface != resourceIt->second) continue;
+                ResolveSubsurfaceLayerPositionLocked(layer, info.x, info.y);
+                info.width = layer.vpDstW > 0 ? layer.vpDstW : layer.w;
+                info.height = layer.vpDstH > 0 ? layer.vpDstH : layer.h;
+                info.shmCommitSerial = layer.shmCommitSerial;
+                info.desktopCoordinates = true;
+                return info.width > 0 && info.height > 0;
+            }
+            return false;
+        }
+
+        if (rendererToplevelId != info.parentToplevel) return false;
+        info.x = sd->subsurfaceX - parent->geoX;
+        info.y = sd->subsurfaceY - parent->geoY;
+        info.shmCommitSerial = sd->shmCommitSerial.load(std::memory_order_acquire);
+        return info.width > 0 && info.height > 0;
+    }
+
+    if (!sd->hasToplevel) return false;
+    info.parentToplevel = sd->toplevelId;
+    info.width = sd->w;
+    info.height = sd->h;
+    info.shmCommitSerial = sd->shmCommitSerial.load(std::memory_order_acquire);
+    if (desktopMode_)
+    {
+        if (rendererToplevelId != desktopRootToplevelId_ ||
+            (sd->toplevelId != desktopRootToplevelId_ && !IsToplevelVisible(sd->toplevelId)))
+            return false;
+        info.x = toplevelX_[sd->toplevelId];
+        info.y = toplevelY_[sd->toplevelId];
+        info.desktopCoordinates = true;
+        return info.width > 0 && info.height > 0;
+    }
+    return rendererToplevelId == sd->toplevelId && info.width > 0 && info.height > 0;
+}
+
+void WaylandServer::SetSurfaceZeroCopy(uint64_t surfaceKey, bool enabled)
+{
+    if (!surfaceKey) return;
+    std::lock_guard<std::mutex> lk(toplevelMutex_);
+    if (enabled)
+        zeroCopySurfaceKeys_.insert(surfaceKey);
+    else
+        zeroCopySurfaceKeys_.erase(surfaceKey);
+    if (desktopRootToplevelId_ > 0)
+        toplevelDirty_[desktopRootToplevelId_] = true;
+    desktopCompositionSignature_ = 0;
+}
+
 bool WaylandServer::TakeFrame(std::vector<uint8_t>& out, int& w, int& h) {
     std::lock_guard<std::mutex> lk(mutex_);
     if (!dirty_) return false;
@@ -917,11 +1064,14 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
             mixSignature(static_cast<uint32_t>(toplevelH_[childId]));
         }
         for (const auto& layer : subsurfaceLayers_) {
+            int layerX = 0, layerY = 0;
+            ResolveSubsurfaceLayerPositionLocked(layer, layerX, layerY);
             mixSignature(reinterpret_cast<uintptr_t>(layer.surface));
+            mixSignature(zeroCopySurfaceKeys_.count(layer.surfaceKey) ? 1 : 0);
             mixSignature(layer.parentToplevel);
             mixSignature(layer.parentToplevel == id || IsToplevelVisible(layer.parentToplevel));
-            mixSignature(static_cast<uint32_t>(layer.x));
-            mixSignature(static_cast<uint32_t>(layer.y));
+            mixSignature(static_cast<uint32_t>(layerX));
+            mixSignature(static_cast<uint32_t>(layerY));
             mixSignature(static_cast<uint32_t>(layer.w));
             mixSignature(static_cast<uint32_t>(layer.h));
             mixSignature(static_cast<uint32_t>(layer.vpDstW));
@@ -974,18 +1124,21 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
 
         // 合成 subsurface 弹出层 (菜单/popup)
         for (auto& layer : subsurfaceLayers_) {
+            if (zeroCopySurfaceKeys_.count(layer.surfaceKey)) continue;
             if (layer.parentToplevel != id && !IsToplevelVisible(layer.parentToplevel)) continue;
             if (layer.w <= 0 || layer.h <= 0) continue;
+            int layerX = 0, layerY = 0;
+            ResolveSubsurfaceLayerPositionLocked(layer, layerX, layerY);
             size_t expectSz = (size_t)layer.w * layer.h * 4;
             if (layer.pixels.size() < expectSz) {
                 OH_LOG_WARN(LOG_APP, "[MW-SUBSURF] layer size mismatch: w=%{public}d h=%{public}d px=%{public}zu expected=%{public}zu",
                             layer.w, layer.h, layer.pixels.size(), expectSz);
                 continue;
             }
-            int srcX = (layer.x < 0) ? -layer.x : 0;
-            int srcY = (layer.y < 0) ? -layer.y : 0;
-            int dstX = (layer.x > 0) ? layer.x : 0;
-            int dstY = (layer.y > 0) ? layer.y : 0;
+            int srcX = (layerX < 0) ? -layerX : 0;
+            int srcY = (layerY < 0) ? -layerY : 0;
+            int dstX = (layerX > 0) ? layerX : 0;
+            int dstY = (layerY > 0) ? layerY : 0;
             int copyW = layer.w - srcX;
             int copyH = layer.h - srcY;
             if (dstX + copyW > rootW) copyW = rootW - dstX;
@@ -1257,7 +1410,9 @@ uint32_t WaylandServer::FindToplevelAt(int x, int y) {
     for (auto it = subsurfaceLayers_.rbegin(); it != subsurfaceLayers_.rend(); ++it) {
         if (it->parentToplevel != rootId && !IsToplevelVisible(it->parentToplevel)) continue;
         if (it->w <= 0 || it->h <= 0) continue;
-        if (x >= it->x && x < it->x + it->w && y >= it->y && y < it->y + it->h) {
+        int layerX = 0, layerY = 0;
+        ResolveSubsurfaceLayerPositionLocked(*it, layerX, layerY);
+        if (x >= layerX && x < layerX + it->w && y >= layerY && y < layerY + it->h) {
             return it->isExternal ? rootId : it->parentToplevel;
         }
     }
