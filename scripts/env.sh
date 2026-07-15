@@ -4,6 +4,13 @@
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export HOST_OS="${HOST_OS:-$(uname -s)}"
 
+# 跨平台 sed -i (GNU: sed -i, BSD: sed -i '')
+if [ "$HOST_OS" = "Darwin" ]; then
+    sed_i() { sed -i '' "$@"; }
+else
+    sed_i() { sed -i "$@"; }
+fi
+
 # OHOS SDK
 # macOS 下直接从 PATH 查找命令行工具目录，并推导相关路径。
 if [ "$HOST_OS" = "Darwin" ] && [ -z "${TOOL_HOME:-}" ]; then
