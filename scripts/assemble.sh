@@ -257,17 +257,27 @@ HKLM,%FontSubStr%,"MS Sans Serif",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"MS Shell Dlg",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"MS Shell Dlg 2",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"Arial",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"Tahoma",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"Verdana",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"Arial Black",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"Calibri",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"Cambria",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"Candara",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"Comic Sans MS",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"Constantia",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"Corbel",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"Impact",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"Palatino Linotype",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"Segoe UI",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"Tahoma",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"Trebuchet MS",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"Times New Roman",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"Verdana",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"Georgia",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"Times New Roman",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"Microsoft JhengHei",,"HarmonyOS Sans TC"\
 HKLM,%FontSubStr%,"Microsoft YaHei",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"Fixedsys",,"Noto Sans Mono"\
+HKLM,%FontSubStr%,"Consolas",,"Noto Sans Mono"\
 HKLM,%FontSubStr%,"Courier",,"Noto Sans Mono"\
 HKLM,%FontSubStr%,"Courier New",,"Noto Sans Mono"\
-HKLM,%FontSubStr%,"Consolas",,"Noto Sans Mono"\
+HKLM,%FontSubStr%,"Fixedsys",,"Noto Sans Mono"\
 HKLM,%FontSubStr%,"Lucida Console",,"Noto Sans Mono"' "$wine_data/share/wine/wine.inf"
     # XKB
     if [ -d "$SYSROOT_EXT_SHARE/X11/xkb" ]; then
