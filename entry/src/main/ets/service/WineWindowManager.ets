@@ -52,6 +52,8 @@ export class WineWindowManager {
   private maximizeInFlight: Set<number> = new Set();
   // toplevelId -> 最近一次设置的标题 (loadContent 后会重置, 需要重新 apply)
   private lastTitles: Map<number, string> = new Map();
+  // Wine move_grab 等待 startMoving() — 标记哪些 toplevel 在等待拖拽
+  private moveGrabPending: Set<number> = new Set();
 
   static getInstance(): WineWindowManager {
     if (!WineWindowManager.instance) {
@@ -176,6 +178,16 @@ export class WineWindowManager {
       hilog.warn(DOMAIN, TAG, '[MW] isDestroyed #%{public}d = true', toplevelId);
     }
     return result;
+  }
+
+  // Wine xdg_toplevel.move 触发 → 标记等待 startMoving()
+  // WineWindow 的 onMouse 在下一帧 MOVE 时检查此标记并调用 startMoving()
+  shouldStartMoving(toplevelId: number): boolean {
+    return this.moveGrabPending.has(toplevelId);
+  }
+
+  getWindow(toplevelId: number): window.Window | undefined {
+    return this.windows.get(toplevelId);
   }
 
   // -- loadContent 回调: 窗口装饰就绪后校准标题栏高度 + 重设标题 --
@@ -322,6 +334,14 @@ export class WineWindowManager {
             }
           }
         } catch (_) { /* ignore parse error */ }
+        break;
+      case 'move_start':
+        this.moveGrabPending.add(id);
+        hilog.info(DOMAIN, TAG, '[MW] move_grab_start #%{public}d → pending startMoving()', id);
+        break;
+      case 'move_end':
+        this.moveGrabPending.delete(id);
+        hilog.info(DOMAIN, TAG, '[MW] move_grab_end #%{public}d', id);
         break;
       case 'title':
       case 'resize':

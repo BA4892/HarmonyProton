@@ -1256,15 +1256,26 @@ void WaylandServer::StartMoveGrab(uint32_t toplevelId, uint32_t serial) {
     moveGrabLastWineY_ = 0;
     OH_LOG_INFO(LOG_APP, "[MW-MOVE] start interactive move tl=%{public}u serial=%{public}u",
                 toplevelId, serial);
+    // PC 模式: 通知 ArkTS, 下一个 TouchMove 时调用 startMoving() 原生拖拽
+    if (!IsDesktopMode()) {
+        FireToplevelEvent(toplevelId, "move_start");
+    }
 }
 
 void WaylandServer::EndMoveGrab() {
     OH_LOG_INFO(LOG_APP, "[MW-MOVE] end interactive move tl=%{public}u", moveGrabToplevelId_);
-    std::lock_guard<std::mutex> lk(toplevelMutex_);
-    moveGrabToplevelId_ = 0;
-    moveGrabSerial_ = 0;
-    moveGrabLastWineX_ = 0;
-    moveGrabLastWineY_ = 0;
+    uint32_t tl = moveGrabToplevelId_;
+    {
+        std::lock_guard<std::mutex> lk(toplevelMutex_);
+        moveGrabToplevelId_ = 0;
+        moveGrabSerial_ = 0;
+        moveGrabLastWineX_ = 0;
+        moveGrabLastWineY_ = 0;
+    }
+    // PC 模式: 通知 ArkTS 拖拽结束
+    if (!IsDesktopMode() && tl != 0) {
+        FireToplevelEvent(tl, "move_end");
+    }
 }
 
 bool WaylandServer::ProcessMoveGrabMotion(wl_fixed_t wx, wl_fixed_t wy) {

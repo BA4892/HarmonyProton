@@ -2,6 +2,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import testNapi from 'libentry.so';
 import { OH2EVDEV } from '../common/KeyMap';
 import { mapMouseButton } from '../common/MouseMap';
+import { WineWindowManager } from '../service/WineWindowManager';
 
 const DOMAIN = 0x0000;
 
@@ -85,6 +86,16 @@ struct WineWindow {
     // -- 鼠标事件 --
     .onMouse((event: MouseEvent) => {
       if (this.toplevelId <= 0) return;
+      // Wine 发起 xdg_toplevel.move → 下一个 MOVE 时调用 OHOS 原生 startMoving()
+      if (event.action === MouseAction.Move && WineWindowManager.getInstance().shouldStartMoving(this.toplevelId)) {
+        try {
+          const win = WineWindowManager.getInstance().getWindow(this.toplevelId);
+          if (win) {
+            win.startMoving();
+            return; // OHOS 接管拖拽, 不再转发给 Wine
+          }
+        } catch (e) { /* fall through to normal path */ }
+      }
       const px = vp2px(event.x);
       const py = vp2px(event.y);
       const btn = mapMouseButton(event.button);
