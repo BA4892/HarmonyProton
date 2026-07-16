@@ -473,6 +473,8 @@ static napi_value NotifyToplevelResize(napi_env env, napi_callback_info info) {
     napi_get_value_uint32(env, args[0], &tl);
     napi_get_value_int32(env, args[1], &w);
     napi_get_value_int32(env, args[2], &h);
+    OH_LOG_INFO(LOG_APP, "[NAPI] notifyToplevelResize tl=%{public}u %{public}dx%{public}d",
+                tl, w, h);
     WaylandServer::GetInstance()->NotifyToplevelResize(tl, w, h);
     return nullptr;
 }

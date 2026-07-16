@@ -48,6 +48,8 @@ export class WineWindowManager {
   private lastResizeWineDim: Map<number, [number, number]> = new Map();
   // toplevelId -> 最大化前的尺寸 (recover 后手动恢复)
   private lastPreMaximizeDim: Map<number, [number, number]> = new Map();
+  // toplevelId -> maximize 操作进行中 (诊断 OHOS 状态机冲突)
+  private maximizeInFlight: Set<number> = new Set();
   // toplevelId -> 最近一次设置的标题 (loadContent 后会重置, 需要重新 apply)
   private lastTitles: Map<number, string> = new Map();
 
@@ -150,6 +152,7 @@ export class WineWindowManager {
     const hadResizeTarget = this.lastResizeTargetH.has(toplevelId);
     const hadWineDim = this.lastResizeWineDim.has(toplevelId);
     const hadTitle = this.lastTitles.has(toplevelId);
+    const hadMaxFlight = this.maximizeInFlight.has(toplevelId);
     this.abilityContexts.delete(toplevelId);
     this.windows.delete(toplevelId);
     this.pendingEvents.delete(toplevelId);
@@ -159,9 +162,12 @@ export class WineWindowManager {
     this.lastResizeWineDim.delete(toplevelId);
     this.lastPreMaximizeDim.delete(toplevelId);
     this.lastTitles.delete(toplevelId);
-    hilog.info(DOMAIN, TAG, '[MW]  unregisterAbility #%{public}d (hadCtx=%{public}s hadWin=%{public}s hadPend=%{public}s hadStart=%{public}s hadSurf=%{public}s hadResizeTarget=%{public}s hadWineDim=%{public}s hadTitle=%{public}s)',
+    this.maximizeInFlight.delete(toplevelId);
+    hilog.info(DOMAIN, TAG, '[MW]  unregisterAbility #%{public}d (hadCtx=%{public}s hadWin=%{public}s hadPend=%{public}s hadStart=%{public}s hadSurf=%{public}s hadResizeTarget=%{public}s hadWineDim=%{public}s hadTitle=%{public}s hadMaxFlight=%{public}s)',
       toplevelId, hadCtx ? 'yes' : 'no', hadWin ? 'yes' : 'no',
-      hadPend ? 'yes' : 'no', hadStart ? 'yes' : 'no', hadSurf ? 'yes' : 'no', hadResizeTarget ? 'yes' : 'no');
+      hadPend ? 'yes' : 'no', hadStart ? 'yes' : 'no', hadSurf ? 'yes' : 'no',
+      hadResizeTarget ? 'yes' : 'no', hadWineDim ? 'yes' : 'no',
+      hadTitle ? 'yes' : 'no', hadMaxFlight ? 'yes' : 'no');
   }
 
   isDestroyed(toplevelId: number): boolean {
@@ -407,10 +413,15 @@ export class WineWindowManager {
           if (minH > 0) limits.minHeight = Math.round(minH * s);
           if (maxW > 0) limits.maxWidth = Math.round(maxW * s);
           if (maxH > 0) limits.maxHeight = Math.round(maxH * s);
-          hilog.info(DOMAIN, TAG, '[MW-LIMITS] tl=%{public}d min=%{public}dx%{public}d max=%{public}dx%{public}d',
-            toplevelId, limits.minWidth ?? 0, limits.minHeight ?? 0,
-            limits.maxWidth ?? 0, limits.maxHeight ?? 0);
-          win.setWindowLimits(limits).catch((e: Error) => {
+          const maxInFlight = this.maximizeInFlight.has(toplevelId);
+          hilog.info(DOMAIN, TAG, '[MW-LIMITS] tl=%{public}d wine=[%{public}d,%{public}d-%{public}d,%{public}d] → ohos=[%{public}d,%{public}d-%{public}d,%{public}d] maxInFlight=%{public}s',
+            toplevelId, minW, minH, maxW, maxH,
+            limits.minWidth ?? 0, limits.minHeight ?? 0,
+            limits.maxWidth ?? 0, limits.maxHeight ?? 0,
+            maxInFlight ? 'yes' : 'no');
+          win.setWindowLimits(limits).then(() => {
+            hilog.info(DOMAIN, TAG, '[MW-LIMITS] setWindowLimits OK tl=%{public}d', toplevelId);
+          }).catch((e: Error) => {
             hilog.warn(DOMAIN, TAG, '[MW] setWindowLimits #%{public}d failed: %{public}s',
               toplevelId, JSON.stringify(e));
           });
@@ -431,27 +442,26 @@ export class WineWindowManager {
         });
         break;
       case 'maximized':
-        hilog.info(DOMAIN, TAG, '[MW] maximize #%{public}d', toplevelId);
-        const preDim = this.lastResizeWineDim.get(toplevelId);
-        if (preDim) {
-          this.lastPreMaximizeDim.set(toplevelId, [preDim[0], preDim[1]]);
+        {
+          const alreadyInFlight = this.maximizeInFlight.has(toplevelId);
+          const preDim = this.lastResizeWineDim.get(toplevelId);
+          hilog.info(DOMAIN, TAG, '[MW] maximize #%{public}d alreadyInFlight=%{public}s preMax=%{public}s',
+            toplevelId, alreadyInFlight ? 'yes' : 'no', JSON.stringify(preDim));
+          this.maximizeInFlight.add(toplevelId);
+          if (preDim) {
+            this.lastPreMaximizeDim.set(toplevelId, [preDim[0], preDim[1]]);
+          }
+          hilog.info(DOMAIN, TAG, '[MW] → win.maximize() START #%{public}d', toplevelId);
+          win.maximize().then(() => {
+            hilog.info(DOMAIN, TAG, '[MW] win.maximize() OK #%{public}d', toplevelId);
+          }).catch((e: Error) => {
+            hilog.warn(DOMAIN, TAG, '[MW] maximize #%{public}d failed: %{public}s', toplevelId, JSON.stringify(e));
+          });
         }
-        win.maximize().catch((e: Error) => {
-          hilog.warn(DOMAIN, TAG, '[MW] maximize #%{public}d failed: %{public}s', toplevelId, JSON.stringify(e));
-        });
         break;
       case 'unmaximized':
         hilog.info(DOMAIN, TAG, '[MW] recover #%{public}d (unmaximize)', toplevelId);
-        win.recover().then(() => {
-          const wd = this.lastPreMaximizeDim.get(toplevelId);
-          if (wd) {
-            const s = this.displayScale * this.scaleBoost;
-            hilog.info(DOMAIN, TAG, '[MW] unmaximize resize to wine=%{public}dx%{public}d window=%{public}dx%{public}d',
-              wd[0], wd[1], Math.round(wd[0] * s), Math.round(wd[1] * s));
-            return win.resize(Math.round(wd[0] * s), Math.round(wd[1] * s));
-          }
-          return Promise.resolve();
-        }).catch((e: Error) => {
+        win.recover().catch((e: Error) => {
           hilog.warn(DOMAIN, TAG, '[MW] unmaximize #%{public}d failed: %{public}s', toplevelId, JSON.stringify(e));
         });
         break;

@@ -61,6 +61,8 @@ static void fire_limits_event(SurfaceData* sd) {
     snprintf(json, sizeof(json),
              "{\"minW\":%d,\"minH\":%d,\"maxW\":%d,\"maxH\":%d}",
              sd->minWidth, sd->minHeight, sd->maxWidth, sd->maxHeight);
+    OH_LOG_INFO(LOG_APP, "[XDG] fire_limits tl=%{public}u %{public}s maxState=%{public}s",
+                sd->toplevelId, json, sd->maximized ? "yes" : "no");
     WaylandServer::GetInstance()->FireToplevelEvent(sd->toplevelId, "limits", json);
 }
 

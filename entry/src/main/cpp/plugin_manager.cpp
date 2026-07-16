@@ -63,6 +63,10 @@ void PluginManager::ResizeRenderer(uint32_t toplevelId, int w, int h) {
         rit->second->SetSize(w, h);
         OH_LOG_INFO(LOG_APP, "[MW-Resize] toplevel #%{public}u renderer resized OK", toplevelId);
 
+        // surface 尺寸变化后强制重绘: 即使没有新帧, 也需用当前帧在
+        // 新 surface 上重新 letterbox, 避免旧 viewport 残留导致黑边
+        WaylandServer::GetInstance()->ForceToplevelRedraw(toplevelId);
+
         // 通知 ArkTS surface 的物理像素尺寸, 用于动态计算标题栏高度
         char json[64];
         snprintf(json, sizeof(json), "{\"w\":%d,\"h\":%d}", w, h);

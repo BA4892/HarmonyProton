@@ -72,6 +72,13 @@ export default class WineWindowAbility extends UIAbility {
       // 应用 pending 事件
       WineWindowManager.getInstance().flushPendingEvents(this.toplevelId);
 
+      // 禁止 OHOS 标题栏双击最大化 (与 Wine 内置最大化冲突),
+      // 仍可通过 win.maximize() 程序调用最大化 (Wine 按钮)
+      mainWindow.on('windowStatusChange', (statusType: number) => {
+        hilog.info(DOMAIN, TAG, '[WWA] #%{public}d windowStatusChange status=%{public}d',
+          this.toplevelId, statusType);
+      });
+
       // 监听窗口事件 (关闭 / 最小化 / 恢复等)
       mainWindow.on('windowEvent', (eventType: number) => {
         hilog.info(DOMAIN, TAG, '[WWA] #%{public}d windowEvent type=%{public}d', this.toplevelId, eventType);
@@ -102,6 +109,9 @@ export default class WineWindowAbility extends UIAbility {
             mw.setWindowTitleButtonVisible(false, false, false);
             mw.setWindowDecorVisible(false);
             mw.setWindowDecorHeight(40);
+            // 禁止 OHOS 标题栏双击最大化 (与 Wine 内置最大化冲突),
+            // maximize() 程序调用不受影响
+            try { mw.setWindowTitleMoveEnabled(false); } catch (_) {}
             hilog.info(DOMAIN, TAG, '[WWA] window decor config OK');
           }
         } catch (e) {

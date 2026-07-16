@@ -628,8 +628,9 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                 self->toplevelLastReportedH_[sd->toplevelId] = contentH;
                 char json[64];
                 snprintf(json, sizeof(json), "{\"w\":%d,\"h\":%d}", contentW, contentH);
-                OH_LOG_INFO(LOG_APP, "[MW] toplevel #%{public}u size changed: %{public}dx%{public}d -> ArkTS",
-                            sd->toplevelId, contentW, contentH);
+                OH_LOG_INFO(LOG_APP, "[MW] toplevel #%{public}u size changed: %{public}dx%{public}d max=%{public}s -> ArkTS",
+                            sd->toplevelId, contentW, contentH,
+                            sd->maximized ? "yes" : "no");
                 self->FireToplevelEvent(sd->toplevelId, "resize", json);
             }
         }
@@ -1509,6 +1510,8 @@ void WaylandServer::SetToplevelRestored(uint32_t id) {
 }
 
 void WaylandServer::SetToplevelMaximized(uint32_t id) {
+    OH_LOG_INFO(LOG_APP, "[MW] SetToplevelMaximized id=%{public}u desktop=%{public}s",
+                id, IsDesktopMode() ? "yes" : "no");
     std::lock_guard<std::mutex> lk(toplevelMutex_);
     if (toplevelX_.count(id)) {
         toplevelX_[id] = 0;
@@ -1519,9 +1522,16 @@ void WaylandServer::SetToplevelMaximized(uint32_t id) {
 }
 
 void WaylandServer::SetToplevelUnmaximized(uint32_t id) {
+    OH_LOG_INFO(LOG_APP, "[MW] SetToplevelUnmaximized id=%{public}u desktop=%{public}s",
+                id, IsDesktopMode() ? "yes" : "no");
     // 仅清除标记, 位置/尺寸由 surface_commit 恢复
     if (desktopRootToplevelId_ > 0)
         toplevelDirty_[desktopRootToplevelId_] = true;
+}
+
+void WaylandServer::ForceToplevelRedraw(uint32_t id) {
+    std::lock_guard<std::mutex> lk(toplevelMutex_);
+    toplevelDirty_[id] = true;
 }
 
 void WaylandServer::NotifyToplevelResize(uint32_t toplevelId, int32_t w, int32_t h) {
@@ -1539,6 +1549,11 @@ void WaylandServer::NotifyToplevelResize(uint32_t toplevelId, int32_t w, int32_t
     if (!xdg) return;
 
     auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(xdg->wlSurface));
+
+    OH_LOG_INFO(LOG_APP, "[MW] NotifyToplevelResize IN id=%{public}u %{public}dx%{public}d pc=%{public}s max=%{public}s",
+                toplevelId, w, h,
+                IsDesktopMode() ? "no" : "yes",
+                (sd && sd->maximized) ? "yes" : "no");
 
     wl_array states;
     wl_array_init(&states);

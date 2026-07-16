@@ -70,6 +70,8 @@ public:
     void SetToplevelRestored(uint32_t id);
     void SetToplevelMaximized(uint32_t id);
     void SetToplevelUnmaximized(uint32_t id);
+    // surface 尺寸变化后强制下次渲染循环取帧重绘 (避免旧 viewport 贴新 surface 导致黑边)
+    void ForceToplevelRedraw(uint32_t id);
     // 旧接口 → 转发到新方法
     void NotifyWindowRestored(uint32_t id) { SetToplevelRestored(id); }
     void NotifyToplevelMaximized(uint32_t id) { SetToplevelMaximized(id); }

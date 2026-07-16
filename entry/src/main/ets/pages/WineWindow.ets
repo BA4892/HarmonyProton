@@ -28,6 +28,8 @@ class WineXComponentController extends XComponentController {
       // surface 是物理像素, Wine 需要逻辑坐标 (effectiveScale=2.0)
       const w = Math.round(rect.surfaceWidth / 2.0);
       const h = Math.round(rect.surfaceHeight / 2.0);
+      hilog.info(DOMAIN, 'WineWindow', '[Ctrl] onSurfaceChanged tl=%{public}d → notifyToplevelResize(%{public}d, %{public}d)',
+        this.toplevelId, w, h);
       testNapi.notifyToplevelResize(this.toplevelId, w, h);
     } catch (e) {
       hilog.error(DOMAIN, 'WineWindow', 'ERR onSurfaceChanged resizeRenderer: %{public}s', JSON.stringify(e));
@@ -133,6 +135,8 @@ struct WineWindow {
     .onAreaChange((_o: Area, n: Area) => {
       this.surfacePxW = vp2px(n.width as number);
       this.surfacePxH = vp2px(n.height as number);
+      hilog.info(DOMAIN, 'WineWindow', '[Ctrl] onAreaChange tl=%{public}d w=%{public}d h=%{public}d',
+        this.toplevelId, Math.round(this.surfacePxW), Math.round(this.surfacePxH));
     })
   }
 }
