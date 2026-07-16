@@ -117,3 +117,7 @@ Wine 输出（stdout + stderr）重定向到 hilog + 文件：
 ```bash
 hdc -t <device_ip> hilog | grep -E 'WL_NAPI|WL_EGL|WL_Server|WL_Input|GraphicsBroker|WineChild'
 ```
+
+## 交流
+
+<img src="docs/images/wechat_qrcode.jpg" width="320">
