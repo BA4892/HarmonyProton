@@ -12,8 +12,6 @@ struct LaunchParams {
     std::string sockDir;
     std::string sockName;
     std::string winehuaBin;
-    std::vector<std::string> envStrs;
-    std::vector<char*> envp;
 };
 
 void LaunchThreadFunc(LaunchParams* p);

@@ -368,70 +368,25 @@ extern "C" void Main(NativeChildProcess_Args args)
     setup_wine_env(binDir, homeDir, winedebug);
 
     // 3. 从父进程 fdList 读取 fds (按 fdName 区分)
-    //    环境变量转发 fd (wine_env) 先读到缓冲区, 最后一步 apply
-    char* envBuf = nullptr;
-    size_t envBufLen = 0;
-    int wsSockFd = -1;   // wineserver fd (per-process, 等 apply 后覆盖)
-    int audioFd = -1;    // audio bootstrap fd (同上)
+    int wsSockFd = -1;   // wineserver fd (per-process)
+    int audioFd = -1;    // audio bootstrap fd
     for (auto* node = args.fdList.head; node; node = node->next) {
         if (node->fdName && strcmp(node->fdName, "wine_audio_bootstrap") == 0) {
             audioFd = node->fd;
-            OH_LOG_INFO(LOG_APP, "[WineChild] audio bootstrap fd=%{public}d (assert after env apply)", audioFd);
-            // 不在此处 setenv —— 等 Step B 应用转发 env 后统一覆盖
+            OH_LOG_INFO(LOG_APP, "[WineChild] audio bootstrap fd=%{public}d", audioFd);
         } else if (node->fdName && strcmp(node->fdName, "wineserver_sock") == 0) {
             wsSockFd = node->fd;
-            OH_LOG_INFO(LOG_APP, "[WineChild] wineserver fd=%{public}d (via Broker, assert after env apply)", wsSockFd);
-            // 不在此处 setenv —— 转发 env 可能包含父进程的旧 WINESERVERSOCKET,
-            // 等 apply 完成后再用本进程自己的 fd 覆盖
-        } else if (node->fdName && strcmp(node->fdName, "wine_env") == 0) {
-            // 从 memfd 读取完整 env blob, 稍后 apply
-            off_t end = lseek(node->fd, 0, SEEK_END);
-            if (end > 0 && end <= 65536) {
-                envBuf = (char*)malloc(end + 1);
-                if (envBuf) {
-                    lseek(node->fd, 0, SEEK_SET);
-                    ssize_t r = read(node->fd, envBuf, end);
-                    if (r == end) {
-                        envBufLen = (size_t)end;
-                        OH_LOG_INFO(LOG_APP, "[WineChild] env blob fd=%{public}d len=%{public}zu",
-                                    node->fd, envBufLen);
-                    } else {
-                        free(envBuf); envBuf = nullptr; envBufLen = 0;
-                        OH_LOG_WARN(LOG_APP, "[WineChild] env blob read partial: %{public}zd != %{public}lld", r, (long long)end);
-                    }
-                }
-            } else {
-                OH_LOG_WARN(LOG_APP, "[WineChild] env blob fd=%{public}d invalid size", node->fd);
-            }
-            close(node->fd);  // memfd 读完即关, 所有权转移
+            OH_LOG_INFO(LOG_APP, "[WineChild] wineserver fd=%{public}d (via Broker)", wsSockFd);
         } else {
             OH_LOG_INFO(LOG_APP, "[WineChild] fdList fd=%{public}d name=%{public}s (unrecognized, ignoring)",
                         node->fd, node->fdName ? node->fdName : "(null)");
         }
     }
 
-    // Step B: 应用转发来的 guest 环境变量 (覆盖 baseline, 复刻 fork+exec 继承)
-    if (envBuf && envBufLen > 0) {
-        char *p = envBuf, *end = envBuf + envBufLen;
-        int applied = 0;
-        while (p < end) {
-            char* eq = strchr(p, '=');
-            if (eq) {
-                *eq = '\0';
-                setenv(p, eq + 1, 1);  // overwrite=1, guest env 优先
-                *eq = '=';
-            }
-            p += strlen(p) + 1;
-            applied++;
-        }
-        OH_LOG_INFO(LOG_APP, "[WineChild] applied %{public}d env vars from forwarded environ", applied);
-        free(envBuf);
-    }
-
+    // 应用 entryParams 中的 |__env=K=V| 覆盖 (覆盖 baseline)
     apply_entry_param_env_overrides(envOverrides);
 
-    // 覆盖 per-process fd 变量 (转发 env 中的是父进程 fd 号, 本进程无效)
-    // 等价于 fork+exec 路径中 exec_wineloader 的 putenv("WINESERVERSOCKET")
+    // 覆盖 per-process fd 变量 (__env__ 中的是父进程 fd 号, 本进程无效)
     if (wsSockFd >= 0) {
         char wsEnv[64];
         snprintf(wsEnv, sizeof(wsEnv), "%d", wsSockFd);

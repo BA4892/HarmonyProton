@@ -9,7 +9,6 @@
 #include <algorithm>
 #include <cstring>
 #include <string>
-#include <unordered_set>
 #include <vector>
 
 #undef LOG_TAG
@@ -96,57 +95,23 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
     return env;
 }
 
-static bool ShouldSerializeEntryParamEnv(const std::string& envLine) {
-    return envLine.rfind("WINE_OHOS_AUDIO_ENABLE=", 0) != 0 &&
-           envLine.rfind("WINE_OHOS_AUDIO_BOOTSTRAP_FD=", 0) != 0 &&
-           envLine.rfind("WINE_OHOS_AUDIO_PROTOCOL_VERSION=", 0) != 0 &&
-           envLine.rfind("WINESERVERSOCKET=", 0) != 0;
-}
-
-static std::string EnvKey(const std::string& envLine) {
-    size_t sep = envLine.find('=');
-    return sep == std::string::npos ? envLine : envLine.substr(0, sep);
-}
-
-static bool IsBrokerSessionAuthoritativeKey(const std::string& key) {
-    // Explorer may start before VirGL is ready. Replace its early Box64 path
-    // with the finalized path, where guest graphics libraries are a fallback.
-    return key == "BOX64_LD_LIBRARY_PATH";
-}
-
-size_t AppendMissingEntryParamsEnvOverrides(std::string& entryParams,
-                                            const std::vector<std::string>& env) {
-    std::unordered_set<std::string> existingKeys;
-    size_t pos = 0;
-
-    while ((pos = entryParams.find("|__env=", pos)) != std::string::npos) {
-        pos += strlen("|__env=");
-        size_t end = entryParams.find('|', pos);
-        std::string key = EnvKey(entryParams.substr(pos, end == std::string::npos
-                                                          ? std::string::npos
-                                                          : end - pos));
-        if (!key.empty()) existingKeys.insert(std::move(key));
-        if (end == std::string::npos) break;
-        pos = end;
-    }
-
-    size_t appended = 0;
-    for (const std::string& envLine : env) {
-        if (!ShouldSerializeEntryParamEnv(envLine) ||
-            envLine.find('|') != std::string::npos ||
-            envLine.find('\n') != std::string::npos)
+std::string SerializeEnvToEntryParams(const std::vector<std::string>& env) {
+    std::string result;
+    for (const std::string& e : env) {
+        // 安全过滤: | 和 \n 会破坏 entryParams 格式
+        if (e.find('|') != std::string::npos ||
+            e.find('\n') != std::string::npos)
             continue;
-
-        std::string key = EnvKey(envLine);
-        if (key.empty() ||
-            (existingKeys.count(key) && !IsBrokerSessionAuthoritativeKey(key)))
+        // 过滤 per-process fd 变量: 子进程会从 fdList 拿到自己的值
+        if (e.rfind("WINESERVERSOCKET=", 0) == 0 ||
+            e.rfind("WINE_OHOS_AUDIO_ENABLE=", 0) == 0 ||
+            e.rfind("WINE_OHOS_AUDIO_BOOTSTRAP_FD=", 0) == 0 ||
+            e.rfind("WINE_OHOS_AUDIO_PROTOCOL_VERSION=", 0) == 0)
             continue;
-        entryParams += "|__env=";
-        entryParams += envLine;
-        existingKeys.insert(std::move(key));
-        ++appended;
+        result += "|__env=";
+        result += e;
     }
-    return appended;
+    return result;
 }
 
 void LogGraphicsBackendStateForLaunch(const char* tag) {

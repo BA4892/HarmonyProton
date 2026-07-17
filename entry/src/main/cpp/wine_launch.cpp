@@ -31,12 +31,6 @@
 
 #include <AbilityKit/native_child_process.h>
 
-// NCP 子进程中 environ 为空, 从 envp 重建供 wine 使用
-static void rebuild_environ(char* const* envp) {
-    extern char** environ;
-    environ = (char**)envp;
-}
-
 // -- prefix 初始化检测辅助函数 --
 static bool FileHasData(const char* path) {
     struct stat st;
@@ -203,9 +197,9 @@ static bool IsWineserverSocketReady() {
     return found;
 }
 
-static void PrepareDesktopSessionGraphicsEnv(const LaunchParams& params)
+static void PrepareGraphicsEnv(const LaunchParams& params)
 {
-    OH_LOG_INFO(LOG_APP, "[Launch-Async] preparing GL env for desktop child processes");
+    OH_LOG_INFO(LOG_APP, "[Launch-Async] preparing graphics env for child processes");
     auto& gb = winehua::GraphicsBroker::GetInstance();
     gb.SetWineRuntimeBinaryDir(params.winehuaBin);
     gb.SetRequestedBackend(winehua::GraphicsBackend::Virgl);
@@ -214,20 +208,17 @@ static void PrepareDesktopSessionGraphicsEnv(const LaunchParams& params)
     winehua::GraphicsBackendState state = gb.GetState();
     if (state.active != winehua::GraphicsBackend::Virgl) {
         OH_LOG_ERROR(LOG_APP,
-                     "[Launch-Async] desktop GL env unavailable: requested=%{public}s active=%{public}s error=%{public}s",
+                     "[Launch-Async] GL env unavailable: requested=%{public}s active=%{public}s error=%{public}s",
                      winehua::GraphicsBroker::BackendName(state.requested),
                      winehua::GraphicsBroker::BackendName(state.active),
                      state.lastError.c_str());
         return;
     }
 
-    std::vector<std::string> env;
-    gb.AppendWineEnv(env);
-    SetBrokerSessionEnv(std::move(env));
-    LogGraphicsBackendStateForLaunch("DesktopSession");
+    LogGraphicsBackendStateForLaunch("GraphicsSession");
 }
 
-static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
+static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd, const std::string& serializedEnv) {
     // 通过 fdList 传递 audio bootstrap fd (仅 explorer 需要音频)
     NativeChildProcess_Fd audioFdNode;
     audioFdNode.fdName = const_cast<char*>("wine_audio_bootstrap");
@@ -235,6 +226,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
     audioFdNode.next = nullptr;
 
     // -- wineserver via NCP --
+    // wineserver 走 WineserverMain 入口, 不解析 __env__, 不需要环境变量
     {
         std::string wsEntryParams = p->homeDir + "|" + p->winehuaBin + "|wineserver|-f|-p|--no-auto-close";
         OH_LOG_INFO(LOG_APP, "[Launch-Async] wineserver args=%{public}s", wsEntryParams.c_str());
@@ -262,7 +254,6 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
         napi_call_threadsafe_function(gStateTsfn, strdup("wineboot-starting"), napi_tsfn_blocking);
 
     gBrokerHomeDir = p->homeDir;
-    ClearBrokerSessionEnv();
     StartBrokerServer();
     setenv("PROCESSBROKER", WINE_BROKER_SOCKET, 1);
 
@@ -280,6 +271,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
 #else
         std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|" + desktopTag + "wine|wineboot|--init";
 #endif
+        // 注意: wineboot --init 只需要初始化 prefix, 不传完整环境变量以节省 entryParams 长度
         NativeChildProcess_Args childArgs = {};
         childArgs.entryParams = const_cast<char*>(entryParams.c_str());
         NativeChildProcess_Options options = {};
@@ -313,9 +305,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
         OH_LOG_INFO(LOG_APP, "[Launch-Async] prefix already initialized, skipping wineboot");
     }
 
-    // -- explorer desktop shell (仅 desktop 模式) --
-    PrepareDesktopSessionGraphicsEnv(*p);
-
+    // -- explorer (Desktop 或 Pad 模式均启动) --
     if (WaylandServer::GetInstance()->IsDesktopMode())
     {
         auto* ws = WaylandServer::GetInstance();
@@ -327,9 +317,9 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
         char desktopArg[128];
         snprintf(desktopArg, sizeof(desktopArg), "/desktop=shell,%dx%d", dw, dh);
 #ifdef __aarch64__
-        std::string exEntry = p->homeDir + "|" + p->winehuaBin + "|__winehua_desktop__|explorer|" + desktopArg;
+        std::string exEntry = p->homeDir + "|" + p->winehuaBin + serializedEnv + "|__winehua_desktop__|explorer|" + desktopArg;
 #else
-        std::string exEntry = p->homeDir + "|" + p->winehuaBin + "|__winehua_desktop__|wine|explorer|" + desktopArg;
+        std::string exEntry = p->homeDir + "|" + p->winehuaBin + serializedEnv + "|__winehua_desktop__|wine|explorer|" + desktopArg;
 #endif
         NativeChildProcess_Args exArgs = {};
         exArgs.entryParams = const_cast<char*>(exEntry.c_str());
@@ -347,9 +337,9 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
     {
         // 非桌面模式: 启动 explorer 文件管理器窗口
 #ifdef __aarch64__
-        std::string exEntry = p->homeDir + "|" + p->winehuaBin + "|explorer";
+        std::string exEntry = p->homeDir + "|" + p->winehuaBin + serializedEnv + "|explorer";
 #else
-        std::string exEntry = p->homeDir + "|" + p->winehuaBin + "|wine|explorer";
+        std::string exEntry = p->homeDir + "|" + p->winehuaBin + serializedEnv + "|wine|explorer";
 #endif
         NativeChildProcess_Args exArgs = {};
         exArgs.entryParams = const_cast<char*>(exEntry.c_str());
@@ -373,10 +363,13 @@ void LaunchThreadFunc(LaunchParams* p) {
     winehua::GraphicsBroker::GetInstance().EnsureStarted(p->sockDir);
 
     int audioBootstrapFd = CreateAudioBootstrapFd(p->sockDir);
-    p->envStrs = BuildWineEnv(p->sockDir, p->sockName, p->libPath, p->winehuaBin,
-                               audioBootstrapFd, p->homeDir);
-    for (auto& s : p->envStrs) p->envp.push_back((char*)s.c_str());
-    p->envp.push_back(nullptr);
+
+    // 在 BuildWineEnv 前确定 VirGL backend, 确保产出的环境变量是最终版本
+    PrepareGraphicsEnv(*p);
+
+    std::vector<std::string> wineEnv = BuildWineEnv(p->sockDir, p->sockName, p->libPath,
+                                                     p->winehuaBin, audioBootstrapFd, p->homeDir);
+    std::string serializedEnv = SerializeEnvToEntryParams(wineEnv);
 
     mkdir(WINE_PREFIX, 0755);
 
@@ -384,7 +377,7 @@ void LaunchThreadFunc(LaunchParams* p) {
         napi_call_threadsafe_function(gStateTsfn, strdup("wineserver-starting"), napi_tsfn_blocking);
 
     bool ok = false;
-    ok = LaunchPadMode(p, audioBootstrapFd);
+    ok = LaunchPadMode(p, audioBootstrapFd, serializedEnv);
 
     if (ok && gStateTsfn)
         napi_call_threadsafe_function(gStateTsfn, strdup("wine-ready"), napi_tsfn_blocking);

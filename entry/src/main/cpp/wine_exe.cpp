@@ -60,12 +60,9 @@ napi_value RunWineExe(napi_env env, napi_callback_info info) {
     std::string sockDir = (pos == std::string::npos) ? "/tmp" : sockStr.substr(0, pos);
     std::string sockName = (pos == std::string::npos) ? sockStr : sockStr.substr(pos + 1);
 
-    int audioBootstrapFd = -1;
+    int audioBootstrapFd = -1;  // broker 会为每个子进程创建 audio fd, 此处无需传递
 
-    std::vector<std::string> envStrs = BuildWineEnv(sockDir, sockName, libPath, binDir, audioBootstrapFd, homeDir);
-    std::vector<char*> envp;
-    for (auto& s : envStrs) envp.push_back((char*)s.c_str());
-    envp.push_back(nullptr);
+    std::vector<std::string> wineEnv = BuildWineEnv(sockDir, sockName, libPath, binDir, audioBootstrapFd, homeDir);
 
     {
 #ifdef __aarch64__
@@ -73,7 +70,7 @@ napi_value RunWineExe(napi_env env, napi_callback_info info) {
 #else
         std::string entryParams = std::string(binDir) + "|wine|" + exePath;
 #endif
-        AppendMissingEntryParamsEnvOverrides(entryParams, envStrs);
+        entryParams += SerializeEnvToEntryParams(wineEnv);
         OH_LOG_INFO(LOG_APP, "[Wine] runWineExe via broker: %{public}s", entryParams.c_str());
 
         int broker_fd = socket(AF_UNIX, SOCK_STREAM, 0);

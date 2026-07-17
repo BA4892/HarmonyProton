@@ -45,9 +45,8 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
 // -- Audio bootstrap --
 int CreateAudioBootstrapFd(const std::string& runtimeDir);
 
-// -- Broker --
-size_t AppendMissingEntryParamsEnvOverrides(std::string& entryParams,
-                                            const std::vector<std::string>& env);
+// -- entryParams 序列化 --
+std::string SerializeEnvToEntryParams(const std::vector<std::string>& env);
 
 // -- Graphics 辅助 --
 void LogGraphicsBackendStateForLaunch(const char* tag);
