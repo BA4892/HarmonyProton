@@ -280,7 +280,13 @@ static void setup_wine_env(const char* binDir, const char* homeDir, const char *
     setenv("WINEDLLDIR0", (std::string(binDir) + "/x86_64-windows").c_str(), 1);
     setenv("WINEDLLDIR1", (std::string(binDir) + "/i386-windows").c_str(), 1);
     setenv("WINEDLLDIR2", binDir, 1);
-    setenv("WINEDLLPATH", (std::string(binDir) + "/x86_64-windows:" + binDir + "/i386-windows:" + binDir).c_str(), 1);
+    {
+        std::string dllPath = std::string(binDir) + "/x86_64-windows:" + binDir + "/i386-windows:" + binDir;
+#ifndef __aarch64__
+        dllPath += ":/data/storage/el1/bundle/libs/x86_64";
+#endif
+        setenv("WINEDLLPATH", dllPath.c_str(), 1);
+    }
     // Box64 日志: 0=关闭 (3=DEBUG 会产生海量 I/O)
     SetBox64PerfEnv();
 #ifdef __aarch64__

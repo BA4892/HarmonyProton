@@ -50,6 +50,12 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
         }
     }
 
+    std::string dllPath = binDir + "/x86_64-windows:" + binDir + "/i386-windows:" + binDir;
+#ifndef __aarch64__
+    // x86_64: bundled libs 加入 WINEDLLPATH, load_unixlib_by_name() 从此搜索 .so
+    dllPath += ":/data/storage/el1/bundle/libs/x86_64";
+#endif
+
     std::vector<std::string> env = {
         "XDG_RUNTIME_DIR=" + sockDir,
         "WAYLAND_DISPLAY=" + sockName,
@@ -60,7 +66,7 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
         "WINEDLLDIR0=" + binDir + "/x86_64-windows",
         "WINEDLLDIR1=" + binDir + "/i386-windows",
         "WINEDLLDIR2=" + binDir,
-        "WINEDLLPATH=" + binDir + "/x86_64-windows:" + binDir + "/i386-windows:" + binDir,
+        "WINEDLLPATH=" + dllPath,
         "WINEDEBUG=-all",
         "LANG=zh_CN.UTF-8",
         "XKB_CONFIG_ROOT=" + xkbDir,
