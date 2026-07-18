@@ -82,6 +82,8 @@ public:
     void SetToplevelMinimized(uint32_t id);
     void SetToplevelRestored(uint32_t id);
     void SetToplevelMaximized(uint32_t id);
+    // 全屏状态登记 (desktop 合成按保比例缩放+黑边绘制, 输入按同一变换逆映射)
+    void SetToplevelFullscreen(uint32_t id, bool on);
     // surface 尺寸变化后强制下次渲染循环取帧重绘 (避免旧 viewport 贴新 surface 导致黑边)
     void ForceToplevelRedraw(uint32_t id);
     // 旧接口 → 转发到新方法
@@ -106,6 +108,13 @@ public:
         uint32_t toplevelId = 0;         // 事件归属 toplevel (raise/键盘焦点)
         wl_resource* surface = nullptr;  // pointer enter 目标
         int originX = 0, originY = 0;    // surface 的桌面原点 (输入坐标换算基)
+        // 桌面坐标 → surface 局部坐标的缩放除数。
+        // 全屏窗口保比例缩放显示, 局部坐标 = (桌面坐标 - origin) / scale; 普通窗口为 1
+        float scale = 1.0f;
+        // true = 该点落在全屏黑边内: 调用方只吞 PRESS (防幻影点击/焦点切换);
+        // MOVE/RELEASE 照常按 origin/scale 透传给全屏窗口 (越界坐标由
+        // winewayland clamp, 吞掉会导致按键状态卡死)
+        bool swallow = false;
     };
     bool FindInputTargetAt(int x, int y, InputTarget& out);
     // surface 指针是否仍存活 (输入注入前的防御校验, 遍历 surfaceResources_)
@@ -256,6 +265,10 @@ private:
         // -- 状态标记 --
         bool minimized = false;        // 桌面合成时跳过最小化窗口
         bool isBackground = false;     // 渲染层, 不接收输入 (被切换掉的旧 root)
+        // 全屏: 桌面合成时保比例缩放铺满 (黑边填充), 输入经同一变换逆映射。
+        // Wine 全屏窗口可坚持自己的分辨率 (xdg "fullscreen 对任意尺寸兼容"),
+        // 放大铺满输出是 compositor 的职责
+        bool fullscreen = false;
         // -- ARGB 窗口剪影掩码 --
         WindowMask mask;               // mask.w==0 = 从未生成
     };
@@ -392,6 +405,8 @@ struct SurfaceData {
     bool minimized = false;
     bool maximized = false;
     int32_t preMaxW = 0, preMaxH = 0;  // 最大化前尺寸, restore 用
+    bool fullscreen = false;
+    int32_t preFsW = 0, preFsH = 0;    // 全屏前尺寸, unset_fullscreen restore 用
 
     // xdg_toplevel resize 约束 (0 = 无限制)
     bool hasSizeLimits = false;

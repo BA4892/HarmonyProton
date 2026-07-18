@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstring>
 #include <ctime>
+#include <cmath>
 #include <cerrno>
 #include <unistd.h>
 #include <sys/mman.h>
@@ -27,6 +28,114 @@ uint32_t GetWaylandClientPid(wl_client* client)
     gid_t gid = 0;
     if (client) wl_client_get_credentials(client, &pid, &uid, &gid);
     return pid > 0 ? static_cast<uint32_t>(pid) : 0;
+}
+
+// 全屏变换: 保比例缩放 + 居中黑边 (letterbox)。
+// Wine 全屏窗口可坚持自己的分辨率 (小于输出尺寸, 见 winewayland
+// wayland_surface_config_is_compatible 对 fullscreen "任意尺寸兼容" 的注释),
+// xdg-shell 约定由 compositor 负责把 surface 放大铺满输出。
+// 该变换同时用于桌面合成 (正变换) 和输入坐标映射 (逆变换), 两处必须是同一份几何
+struct FsTransform {
+    double scale = 1.0;
+    int offX = 0, offY = 0;  // 内容区在 root 帧中的原点 (黑边之后)
+    int dstW = 0, dstH = 0;  // 内容区缩放后尺寸
+};
+
+bool ComputeFsTransform(int rootW, int rootH, int winW, int winH, FsTransform& t)
+{
+    if (rootW <= 0 || rootH <= 0 || winW <= 0 || winH <= 0) return false;
+    t.scale = std::min(rootW / static_cast<double>(winW), rootH / static_cast<double>(winH));
+    t.dstW = std::max(1, static_cast<int>(lround(winW * t.scale)));
+    t.dstH = std::max(1, static_cast<int>(lround(winH * t.scale)));
+    t.offX = (rootW - t.dstW) / 2;
+    t.offY = (rootH - t.dstH) / 2;
+    return true;
+}
+
+// 双线性缩放 blit (16.16 固定点)。src/dst 均为 4 字节像素。
+// srcStride = 源行跨度(像素), srcW/srcH = 参与采样的源区域
+// (viewport destination 可小于 buffer 实际尺寸, 见 TakeToplevelFrame 的 vpDst clamp)。
+// alphaBlend=false (XRGB): 直接覆盖并置不透明 (X 字节是垃圾, 不采样);
+// alphaBlend=true (预乘 ARGB): 对预乘源直接采样后 over 混合 (wl_shm alpha 均为预乘)
+void BlitScaled(uint8_t* dst, int rootW, int rootH,
+                const uint8_t* src, int srcStride, int srcW, int srcH,
+                int dstX, int dstY, int dstW, int dstH, bool alphaBlend)
+{
+    if (!dst || !src || srcStride <= 0 || srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0) return;
+    if (srcW > srcStride) srcW = srcStride;
+    // dst 矩形裁剪到 root 帧范围 (采样起点经 (x - dstX) 回算, 裁剪不偏移内容)
+    const int x0 = std::max(0, dstX), y0 = std::max(0, dstY);
+    const int x1 = std::min(rootW, dstX + dstW), y1 = std::min(rootH, dstY + dstH);
+    if (x1 <= x0 || y1 <= y0) return;
+
+    // 像素中心映射 (16.16): src = (dx + 0.5) * srcW/dstW - 0.5
+    const int64_t stepX = (static_cast<int64_t>(srcW) << 16) / dstW;
+    const int64_t stepY = (static_cast<int64_t>(srcH) << 16) / dstH;
+    const int64_t maxFx = static_cast<int64_t>(srcW - 1) << 16;
+    const int64_t maxFy = static_cast<int64_t>(srcH - 1) << 16;
+
+    // 每列采样位置/权重预计算 (行内复用)
+    std::vector<int> sx0(x1 - x0), sx1(x1 - x0), wx0(x1 - x0), wx1(x1 - x0);
+    for (int i = 0; i < x1 - x0; ++i) {
+        int64_t fx = static_cast<int64_t>(x0 + i - dstX) * stepX + (stepX >> 1) - (1 << 15);
+        fx = std::max<int64_t>(0, std::min(maxFx, fx));
+        sx0[i] = static_cast<int>(fx >> 16);
+        sx1[i] = std::min(sx0[i] + 1, srcW - 1);
+        wx1[i] = static_cast<int>((fx >> 8) & 0xFF);
+        wx0[i] = 256 - wx1[i];
+    }
+
+    for (int y = y0; y < y1; ++y) {
+        int64_t fy = static_cast<int64_t>(y - dstY) * stepY + (stepY >> 1) - (1 << 15);
+        fy = std::max<int64_t>(0, std::min(maxFy, fy));
+        const int sy = static_cast<int>(fy >> 16);
+        const int sy1 = std::min(sy + 1, srcH - 1);
+        const unsigned wy1 = static_cast<unsigned>((fy >> 8) & 0xFF);
+        const unsigned wy0 = 256 - wy1;
+        const uint8_t* row0 = src + static_cast<size_t>(sy) * srcStride * 4;
+        const uint8_t* row1 = src + static_cast<size_t>(sy1) * srcStride * 4;
+        uint8_t* drow = dst + (static_cast<size_t>(y) * rootW + x0) * 4;
+        for (int i = 0; i < x1 - x0; ++i) {
+            const uint8_t* p00 = row0 + sx0[i] * 4;
+            const uint8_t* p01 = row0 + sx1[i] * 4;
+            const uint8_t* p10 = row1 + sx0[i] * 4;
+            const uint8_t* p11 = row1 + sx1[i] * 4;
+            const unsigned w00 = static_cast<unsigned>(wx0[i]) * wy0;
+            const unsigned w01 = static_cast<unsigned>(wx1[i]) * wy0;
+            const unsigned w10 = static_cast<unsigned>(wx0[i]) * wy1;
+            const unsigned w11 = static_cast<unsigned>(wx1[i]) * wy1;
+            uint8_t* dpx = drow + i * 4;
+            // 权重和恒为 65536, >>16 后必在 [0,255]
+            const unsigned b = (p00[0] * w00 + p01[0] * w01 + p10[0] * w10 + p11[0] * w11) >> 16;
+            const unsigned g = (p00[1] * w00 + p01[1] * w01 + p10[1] * w10 + p11[1] * w11) >> 16;
+            const unsigned r = (p00[2] * w00 + p01[2] * w01 + p10[2] * w10 + p11[2] * w11) >> 16;
+            if (!alphaBlend) {
+                dpx[0] = static_cast<uint8_t>(b);
+                dpx[1] = static_cast<uint8_t>(g);
+                dpx[2] = static_cast<uint8_t>(r);
+                dpx[3] = 255;
+                continue;
+            }
+            const unsigned a = (p00[3] * w00 + p01[3] * w01 + p10[3] * w10 + p11[3] * w11) >> 16;
+            if (a == 0) continue;
+            if (a >= 255) {
+                dpx[0] = static_cast<uint8_t>(b);
+                dpx[1] = static_cast<uint8_t>(g);
+                dpx[2] = static_cast<uint8_t>(r);
+                dpx[3] = 255;
+            } else {
+                // 预乘 over: dst = src + dst * (1-a); 采样误差可能使 b > a, 需钳制
+                const unsigned inv = 255 - a;
+                const unsigned nb = b + (dpx[0] * inv) / 255;
+                const unsigned ng = g + (dpx[1] * inv) / 255;
+                const unsigned nr = r + (dpx[2] * inv) / 255;
+                dpx[0] = static_cast<uint8_t>(std::min(nb, 255u));
+                dpx[1] = static_cast<uint8_t>(std::min(ng, 255u));
+                dpx[2] = static_cast<uint8_t>(std::min(nr, 255u));
+                dpx[3] = 255;
+            }
+        }
+    }
 }
 
 } // namespace
@@ -1328,7 +1437,9 @@ int WaylandServer::GetZeroCopyOccluders(uint64_t surfaceKey, uint32_t rendererTo
         if (!IsToplevelVisibleLocked(cid)) continue;
         const auto* cst = FindToplevelLocked(cid);
         if (!cst) continue;
-        pushRect(cst->x, cst->y, cst->w, cst->h);
+        // 全屏窗口显示整幅桌面 (保比例缩放+黑边), 遮挡按整幅算
+        if (cst->fullscreen) pushRect(0, 0, rootW, rootH);
+        else pushRect(cst->x, cst->y, cst->w, cst->h);
     }
 
     // popup subsurface 层 (菜单等) 在 CPU 合成中画在所有 toplevel 之后,
@@ -1435,6 +1546,23 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
             return true;
         }
 
+        // 全屏 toplevel: z-order 中最顶层的可见全屏窗口 (同一时刻只有一个生效)。
+        // 其绘制 = 整幅填黑 + 内容保比例缩放居中; 几何与 FindInputTargetAt
+        // 的输入逆映射共用 ComputeFsTransform, 两边必须是同一套参数
+        uint32_t fsId = 0;
+        FsTransform fsT;
+        bool fsOk = false;
+        int fsPosX = 0, fsPosY = 0;
+        for (auto zit = toplevelZOrder_.rbegin(); zit != toplevelZOrder_.rend(); ++zit) {
+            const auto* zst = FindToplevelLocked(*zit);
+            if (!zst || !zst->fullscreen || !IsToplevelVisibleLocked(*zit)) continue;
+            fsId = *zit;
+            fsPosX = zst->x;
+            fsPosY = zst->y;
+            fsOk = ComputeFsTransform(rootW, rootH, zst->w, zst->h, fsT);
+            break;
+        }
+
         // Rebuild the clean desktop base only when its pixels or composition
         // structure changed. Animated child windows overwrite their complete
         // rectangles, so re-copying the unchanged 4 MB root every frame is
@@ -1459,6 +1587,7 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
             mixSignature(static_cast<uint32_t>(cst->y));
             mixSignature(static_cast<uint32_t>(cst->w));
             mixSignature(static_cast<uint32_t>(cst->h));
+            mixSignature(cst->fullscreen ? 1 : 0);  // 全屏进出改变布局, 强制重建基底
         }
         for (const auto& layer : subsurfaceLayers_) {
             int layerX = 0, layerY = 0;
@@ -1501,6 +1630,20 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
             int childH = cst->h;
             int posX = cst->x;
             int posY = cst->y;
+            // 全屏窗口: 整幅填黑 (盖住壁纸与下层窗口, 黑边也算在内),
+            // 内容保比例缩放居中。z 序在它之后的窗口 (如被 pin 的任务栏) 仍画在其上
+            if (childId == fsId && fsOk) {
+                // 必须填不透明黑 (0xFF000000), 不能图省事 memset 0:
+                // 渲染 context 目前不开 GL_BLEND, alpha=0 恰好无害,
+                // 但这是一处隐式依赖 — 一旦以后给桌面纹理开混合, 黑边就会变透明
+                std::fill_n(reinterpret_cast<uint32_t*>(composited.data()),
+                            composited.size() / 4, 0xFF000000u);
+                BlitScaled(composited.data(), rootW, rootH,
+                           childPx.data(), childW, childW, childH,
+                           fsT.offX, fsT.offY, fsT.dstW, fsT.dstH,
+                           cst->shmFormat == 0);
+                continue;
+            }
             // 计算子窗口在 root framebuffer 中的可见区域
             int dstX = (posX > 0) ? posX : 0;
             int dstY = (posY > 0) ? posY : 0;
@@ -1549,12 +1692,30 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
             if (zeroCopySurfaceKeys_.count(layer.surfaceKey)) continue;
             if (layer.parentToplevel != id && !IsToplevelVisibleLocked(layer.parentToplevel)) continue;
             if (layer.w <= 0 || layer.h <= 0) continue;
+            // 全屏期间其它窗口的弹出层不绘制 (全屏窗口独占显示,
+            // 与 FindInputTargetAt 的输入独占保持一致)
+            if (fsOk && layer.parentToplevel != fsId) continue;
             int layerX = 0, layerY = 0;
             ResolveSubsurfaceLayerPositionLocked(layer, layerX, layerY);
             size_t expectSz = (size_t)layer.w * layer.h * 4;
             if (layer.pixels.size() < expectSz) {
                 OH_LOG_WARN(LOG_APP, "[MW-SUBSURF] layer size mismatch: w=%{public}d h=%{public}d px=%{public}zu expected=%{public}zu",
                             layer.w, layer.h, layer.pixels.size(), expectSz);
+                continue;
+            }
+            // 全屏窗口的层随窗口一起缩放: 相对窗口原点 → 缩放 → 加黑边偏移。
+            // 不做 damage 增量 (缩放后 damage 需重算, 全屏场景通常整帧变化)
+            if (fsOk && layer.parentToplevel == fsId) {
+                const int dispW = layer.vpDstW > 0 ? std::min(layer.vpDstW, layer.w) : layer.w;
+                const int dispH = layer.vpDstH > 0 ? std::min(layer.vpDstH, layer.h) : layer.h;
+                const int dx = fsT.offX + static_cast<int>(lround((layerX - fsPosX) * fsT.scale));
+                const int dy = fsT.offY + static_cast<int>(lround((layerY - fsPosY) * fsT.scale));
+                const int dw = std::max(1, static_cast<int>(lround(dispW * fsT.scale)));
+                const int dh = std::max(1, static_cast<int>(lround(dispH * fsT.scale)));
+                BlitScaled(composited.data(), rootW, rootH,
+                           layer.pixels.data(), layer.w, dispW, dispH,
+                           dx, dy, dw, dh,
+                           layer.shmFormat == 0 && !layer.opaque);
                 continue;
             }
             int srcX = (layerX < 0) ? -layerX : 0;
@@ -1653,7 +1814,8 @@ void WaylandServer::RaiseToplevel(uint32_t id) {
     auto it = std::find(toplevelZOrder_.begin(), toplevelZOrder_.end(), id);
     if (it != toplevelZOrder_.end()) toplevelZOrder_.erase(it);
     toplevelZOrder_.push_back(id);
-    // 任务栏始终在顶层: 底部对齐 + 高度 <100 的 toplevel
+    // 任务栏始终在顶层: 底部对齐 + 高度 <100 的 toplevel;
+    // 全屏窗口例外 — 游戏全屏必须压过任务栏
     uint32_t taskbarId = 0;
     for (auto& [tid, st] : toplevels_) {
         if (st.h > 0 && st.h < 100 && st.y + st.h >= outputH_) {
@@ -1661,7 +1823,9 @@ void WaylandServer::RaiseToplevel(uint32_t id) {
             break;
         }
     }
-    if (taskbarId > 0 && taskbarId != id) {
+    bool raisedFullscreen = false;
+    if (const auto* rst = FindToplevelLocked(id)) raisedFullscreen = rst->fullscreen;
+    if (taskbarId > 0 && taskbarId != id && !raisedFullscreen) {
         auto tit = std::find(toplevelZOrder_.begin(), toplevelZOrder_.end(), taskbarId);
         if (tit != toplevelZOrder_.end()) toplevelZOrder_.erase(tit);
         toplevelZOrder_.push_back(taskbarId);
@@ -1907,6 +2071,67 @@ bool WaylandServer::FindInputTargetAt(int x, int y, InputTarget& out) {
     uint32_t rootId = desktopRootToplevelId_;
 
     /*
+     * 全屏窗口独占输入: 命中判定走与渲染相同的保比例缩放几何
+     * (ComputeFsTransform, 见 TakeToplevelFrame), 只有该窗口及其
+     * subsurface 层可交互; 黑边事件归属全屏窗口并标 swallow
+     * (调用方只吞 PRESS, MOVE/RELEASE 照常透传)
+     */
+    {
+        const auto* rootSt = FindToplevelLocked(rootId);
+        const int rootW = (rootSt && rootSt->w > 0) ? rootSt->w : outputW_;
+        const int rootH = (rootSt && rootSt->h > 0) ? rootSt->h : outputH_;
+        for (auto zit = toplevelZOrder_.rbegin(); zit != toplevelZOrder_.rend(); ++zit) {
+            const auto* zst = FindToplevelLocked(*zit);
+            if (!zst || !zst->fullscreen || !IsToplevelVisibleLocked(*zit)) continue;
+            FsTransform fsT;
+            if (!ComputeFsTransform(rootW, rootH, zst->w, zst->h, fsT)) break;
+            const uint32_t fsId = *zit;
+            // 该窗口的 subsurface 层绘制在窗口内容之上, 先命中 (同一变换)
+            for (auto it = subsurfaceLayers_.rbegin(); it != subsurfaceLayers_.rend(); ++it) {
+                if (zeroCopySurfaceKeys_.count(it->surfaceKey)) continue;
+                if (it->parentToplevel != fsId || it->w <= 0 || it->h <= 0) continue;
+                int layerX = 0, layerY = 0;
+                ResolveSubsurfaceLayerPositionLocked(*it, layerX, layerY);
+                const int dispW = it->vpDstW > 0 ? std::min(it->vpDstW, it->w) : it->w;
+                const int dispH = it->vpDstH > 0 ? std::min(it->vpDstH, it->h) : it->h;
+                const int lx = fsT.offX + static_cast<int>(lround((layerX - zst->x) * fsT.scale));
+                const int ly = fsT.offY + static_cast<int>(lround((layerY - zst->y) * fsT.scale));
+                const int lw = std::max(1, static_cast<int>(lround(dispW * fsT.scale)));
+                const int lh = std::max(1, static_cast<int>(lround(dispH * fsT.scale)));
+                if (x >= lx && x < lx + lw && y >= ly && y < ly + lh) {
+                    out.toplevelId = fsId;
+                    out.surface = it->surface;
+                    out.originX = lx;
+                    out.originY = ly;
+                    out.scale = static_cast<float>(fsT.scale);
+                    return out.surface != nullptr;
+                }
+            }
+            if (x >= fsT.offX && x < fsT.offX + fsT.dstW &&
+                y >= fsT.offY && y < fsT.offY + fsT.dstH) {
+                out.toplevelId = fsId;
+                out.surface = GetSurfaceForToplevel(fsId);
+                out.originX = fsT.offX;
+                out.originY = fsT.offY;
+                out.scale = static_cast<float>(fsT.scale);
+                return out.surface != nullptr;
+            }
+            // 黑边: 事件归属仍是全屏窗口 (返回其 surface/原点/缩放),
+            // 但标记 swallow — 调用方吞掉 PRESS (防幻影点击/焦点切换),
+            // MOVE/RELEASE 必须照常透传: 坐标越界由 winewayland 的 motion
+            // clamp 夹回窗口边缘; 若连 RELEASE 一起吞, 内容区按下拖到黑边
+            // 松手会丢失 release, pressedButtons_ 按键状态永久卡死
+            out.toplevelId = fsId;
+            out.surface = GetSurfaceForToplevel(fsId);
+            out.originX = fsT.offX;
+            out.originY = fsT.offY;
+            out.scale = static_cast<float>(fsT.scale);
+            out.swallow = true;
+            return out.surface != nullptr;
+        }
+    }
+
+    /*
      * subsurface 命中优先于 toplevel (渲染在上层):
      * - 内部菜单: enter 层自己的 wl_surface, 坐标以层原点为基。
      *   层可伸出父窗口边界 — 若改走父窗口 surface, 伸出部分产生越界的
@@ -2031,6 +2256,11 @@ void WaylandServer::SetToplevelRestored(uint32_t id) {
     wl_array_init(&states);
     uint32_t* st = static_cast<uint32_t*>(wl_array_add(&states, sizeof(uint32_t)));
     *st = XDG_TOPLEVEL_STATE_ACTIVATED;
+    // 全屏窗口从最小化还原: 维持 FULLSCREEN 状态 (尺寸 0,0 = Wine 保持当前尺寸)
+    if (sd && sd->fullscreen) {
+        st = static_cast<uint32_t*>(wl_array_add(&states, sizeof(uint32_t)));
+        *st = XDG_TOPLEVEL_STATE_FULLSCREEN;
+    }
     xdg_toplevel_send_configure(tl, 0, 0, &states);
     wl_array_release(&states);
     wl_client* client = wl_resource_get_client(tl);
@@ -2045,6 +2275,21 @@ void WaylandServer::SetToplevelMaximized(uint32_t id) {
     if (auto* st = FindToplevelLocked(id); st && st->hasPosition) {
         st->x = 0;
         st->y = 0;
+    }
+    MarkDesktopRootDirtyLocked();
+}
+
+void WaylandServer::SetToplevelFullscreen(uint32_t id, bool on) {
+    OH_LOG_INFO(LOG_APP, "[MW] SetToplevelFullscreen id=%{public}u on=%{public}s",
+                id, on ? "yes" : "no");
+    std::lock_guard<std::mutex> lk(toplevelMutex_);
+    // Ensure 建档语义同 SetToplevelMinimized: pre-commit 全屏同样记录状态
+    auto& st = EnsureToplevelLocked(id);
+    st.fullscreen = on;
+    // 全屏窗口锚定桌面原点: 合成按保比例缩放铺满, 不再使用浮动位置
+    if (on && st.hasPosition) {
+        st.x = 0;
+        st.y = 0;
     }
     MarkDesktopRootDirtyLocked();
 }
@@ -2082,6 +2327,11 @@ void WaylandServer::NotifyToplevelResize(uint32_t toplevelId, int32_t w, int32_t
     if (sd && sd->maximized) {
         st = static_cast<uint32_t*>(wl_array_add(&states, sizeof(uint32_t)));
         *st = XDG_TOPLEVEL_STATE_MAXIMIZED;
+    }
+    // 全屏窗口在 OHOS 侧尺寸变化时保持 FULLSCREEN 状态, 否则 Wine 会退出全屏
+    if (sd && sd->fullscreen) {
+        st = static_cast<uint32_t*>(wl_array_add(&states, sizeof(uint32_t)));
+        *st = XDG_TOPLEVEL_STATE_FULLSCREEN;
     }
     xdg_toplevel_send_configure(tl, w, h, &states);
     wl_array_release(&states);

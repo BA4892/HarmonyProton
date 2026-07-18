@@ -300,10 +300,18 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
         CoordTransform(px, py, ws->GetDesktopRootToplevelId(), &wx, &wy);
         WaylandServer::InputTarget target;
         if (ws->FindInputTargetAt(wl_fixed_to_int(wx), wl_fixed_to_int(wy), target)) {
+            // 全屏黑边: 只吞 PRESS (防幻影点击/焦点切换)。MOVE/RELEASE 照常透传 —
+            // 越界坐标由 winewayland 的 motion clamp 夹回窗口边缘;
+            // 吞掉 RELEASE 会让 pressedButtons_ 永不清位 (按键卡死)
+            if (target.swallow && action == ACT_PRESS) return;
             tl = target.toplevelId;
             targetSurf = target.surface;
-            wx -= wl_fixed_from_int(target.originX);
-            wy -= wl_fixed_from_int(target.originY);
+            // 桌面坐标 → surface 局部坐标。target.scale > 1 表示全屏窗口
+            // 保比例放大显示, 局部坐标需按同一缩放除回来
+            const double localX = (wl_fixed_to_double(wx) - target.originX) / target.scale;
+            const double localY = (wl_fixed_to_double(wy) - target.originY) / target.scale;
+            wx = wl_fixed_from_double(localX);
+            wy = wl_fixed_from_double(localY);
         } else {
             // 目标 surface 不可用: 退回旧路径 (父窗口相对坐标)
             wx -= wl_fixed_from_int(ws->GetToplevelX(tl));

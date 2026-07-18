@@ -425,6 +425,11 @@ export class WineWindowManager {
           this.getWindow(id) ?? ArgbWindowManager.getInstance().getWindow(id),
           this.getEffectiveScale());
         break;
+      case 'fullscreen':
+      case 'unfullscreen':
+        // 全屏由 C++ 合成器直接处理 (桌面模式缩放绘制 + 输入映射),
+        // ArkTS 无需动作; 显式列出避免落进 unknown event 告警
+        break;
       default:
         hilog.warn(DOMAIN, TAG, '[MW] unknown event #%{public}d %{public}s', id, event);
         break;
