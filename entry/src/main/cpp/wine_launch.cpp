@@ -286,19 +286,38 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd, const std::stri
             return false;
         }
         OH_LOG_INFO(LOG_APP, "[Launch-Async] wineboot started, pid=%{public}d", childPid);
-        if (!WaitFor("wine prefix", IsWinePrefixInitialized, 30000, 200)) {
-            OH_LOG_ERROR(LOG_APP, "[Launch-Async] wineboot drive_c timeout, abort");
+
+        /* 首次初始化 (wine.inf 的 PreInstall/DefaultInstall/Wow64Install + 可选 Mono)
+         * 耗时与设备性能强相关, 模拟器上可超过 30s — 固定死线会把仍在正常初始化的
+         * wineboot 误判为失败。改为进程活性驱动: wineboot 活着就继续等,
+         * 大超时仅作挂死安全网; 真正的失败由进程退出后 prefix 不完整触发。 */
+        char procPath[64];
+        snprintf(procPath, sizeof(procPath), "/proc/%d", childPid);
+        constexpr int kWinebootHangMs = 3 * 60 * 1000;
+        int aliveMs = 0;
+        while (access(procPath, F_OK) == 0 && aliveMs < kWinebootHangMs) {
+            usleep(500000);
+            aliveMs += 500;
+            if (aliveMs % 10000 == 0)
+                OH_LOG_INFO(LOG_APP, "[Launch-Async] wineboot still initializing (%{public}d s)",
+                            aliveMs / 1000);
+        }
+        if (aliveMs >= kWinebootHangMs) {
+            OH_LOG_ERROR(LOG_APP, "[Launch-Async] wineboot hung for %{public}d s, abort",
+                         kWinebootHangMs / 1000);
             if (gStateTsfn)
                 napi_call_threadsafe_function(gStateTsfn, strdup("wineboot-failed"), napi_tsfn_blocking);
             return false;
         }
-        char procPath[64];
-        snprintf(procPath, sizeof(procPath), "/proc/%d", childPid);
-        for (int i = 0; i < 120; i++) {
-            if (access(procPath, F_OK) != 0) break;
-            usleep(500000);
+        /* wineboot 已退出: registry 仍在 wineserver flush 途中 (实测落盘延迟
+         * 稳定 ~13s), 宽限窗口等文件就绪 — 文件到位即通过, 不会满等 */
+        if (!WaitFor("wine prefix", IsWinePrefixInitialized, 60000, 200)) {
+            OH_LOG_ERROR(LOG_APP, "[Launch-Async] wineboot exited but prefix incomplete, abort");
+            if (gStateTsfn)
+                napi_call_threadsafe_function(gStateTsfn, strdup("wineboot-failed"), napi_tsfn_blocking);
+            return false;
         }
-        OH_LOG_INFO(LOG_APP, "[Launch-Async] wineboot completed");
+        OH_LOG_INFO(LOG_APP, "[Launch-Async] wineboot completed (%{public}d s)", aliveMs / 1000);
         ws->SetDesktopRootRecognitionEnabled(true);
         ws->PromotePendingDesktopRoot();
     } else {
