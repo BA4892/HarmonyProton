@@ -321,11 +321,22 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
         CoordTransform(px, py, tl, &wx, &wy);
     }
 
-    OH_LOG_INFO(LOG_APP, "[Input] PTR action=%{public}d tl=%{public}u btn=0x%{public}x px=(%{public}.0f,%{public}.0f)"
-                " wine=(%{public}.0f,%{public}.0f) ptrRes=%{public}d needsEnter=%{public}d pressedBits=0x%{public}x",
-                action, tl, button, px, py,
-                wl_fixed_to_double(wx), wl_fixed_to_double(wy),
-                seat->HasPointerResource(), NeedsPointerEnter(), pressedButtons_);
+    // MOVE 是高频路径 (hover 移动 ~125Hz), 全量日志会刷爆 hilog → 抽样 120:1;
+    // PRESS/RELEASE 低频且诊断价值高, 保持全量
+    if (action != ACT_MOVE) {
+        OH_LOG_INFO(LOG_APP, "[Input] PTR action=%{public}d tl=%{public}u btn=0x%{public}x px=(%{public}.0f,%{public}.0f)"
+                    " wine=(%{public}.0f,%{public}.0f) ptrRes=%{public}d needsEnter=%{public}d pressedBits=0x%{public}x",
+                    action, tl, button, px, py,
+                    wl_fixed_to_double(wx), wl_fixed_to_double(wy),
+                    seat->HasPointerResource(), NeedsPointerEnter(), pressedButtons_);
+    } else {
+        static uint32_t sMoveLogN = 0;
+        if (++sMoveLogN % 120 == 0)
+            OH_LOG_INFO(LOG_APP, "[Input] PTR MOVE tl=%{public}u px=(%{public}.0f,%{public}.0f)"
+                        " wine=(%{public}.0f,%{public}.0f) focusedTl=%{public}u n=%{public}u",
+                        tl, px, py, wl_fixed_to_double(wx), wl_fixed_to_double(wy),
+                        pointerFocusedToplevel_.load(), sMoveLogN);
+    }
 
     switch (action) {
         case ACT_PRESS: {
@@ -398,9 +409,8 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
             break;
         }
         case ACT_MOVE: {
-            OH_LOG_INFO(LOG_APP, "[Input] MOVE tl=%{public}u wine=(%{public}.0f,%{public}.0f) needsEnter=%{public}d focusedTl=%{public}u ptrRes=%{public}d",
-                        tl, wl_fixed_to_double(wx), wl_fixed_to_double(wy),
-                        NeedsPointerEnter(), pointerFocusedToplevel_.load(), seat->HasPointerResource());
+            // 高频路径不打全量日志 (入口已有 120:1 抽样); MOVE-ENTER 是低频
+            // 焦点切换事件, 保留全量日志
             // desktop: surface 级焦点判定 — 鼠标从窗口移入菜单层 (同 toplevelId,
             // 不同 surface) 时必须重新 enter, 否则 motion 继续发给窗口 surface
             const bool needEnter = targetSurf
@@ -688,8 +698,11 @@ void InputManager::InjectPointerMotion(wl_fixed_t sx, wl_fixed_t sy) {
             wl_pointer_send_frame(ptr);
         }
     }
-    OH_LOG_INFO(LOG_APP, "[Input] InjectMotion sx=%{public}.1f sy=%{public}.1f OK n=%{public}zu",
-                wl_fixed_to_double(sx), wl_fixed_to_double(sy), ptrs.size());
+    // 高频路径 (hover ~125Hz) 抽样 120:1, 防止刷爆 hilog
+    static uint32_t sInjMotionLogN = 0;
+    if (++sInjMotionLogN % 120 == 0)
+        OH_LOG_INFO(LOG_APP, "[Input] InjectMotion sx=%{public}.1f sy=%{public}.1f OK n=%{public}u ptrs=%{public}zu",
+                    wl_fixed_to_double(sx), wl_fixed_to_double(sy), sInjMotionLogN, ptrs.size());
 }
 
 void InputManager::InjectPointerButton(uint32_t button, uint32_t state) {
