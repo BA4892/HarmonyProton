@@ -444,6 +444,8 @@ void WaylandServer::viewport_set_source(wl_client*, wl_resource* vpRes,
     sd->vpSrcY = wl_fixed_to_int(fy);
     sd->vpSrcW = wl_fixed_to_int(fw);
     sd->vpSrcH = wl_fixed_to_int(fh);
+    OH_LOG_INFO(LOG_APP, "[MW-VP] set_source surf=%{public}p tl=%{public}u src=(%{public}d,%{public}d %{public}dx%{public}d)",
+                surf, sd->toplevelId, sd->vpSrcX, sd->vpSrcY, sd->vpSrcW, sd->vpSrcH);
 }
 
 void WaylandServer::viewport_set_destination(wl_client*, wl_resource* vpRes, int32_t w, int32_t h) {
@@ -633,8 +635,9 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                 contentOffX = sd->geoX;
                 contentOffY = sd->geoY;
             }
-            OH_LOG_INFO(LOG_APP, "[MW-GEO] using window_geometry: src=%{public}dx%{public}d geo=(%{public}d,%{public}d %{public}dx%{public}d) screen=(%{public}d,%{public}d)",
-                        w, h, contentOffX, contentOffY, contentW, contentH, screenX, screenY);
+            OH_LOG_INFO(LOG_APP, "[MW-GEO] using window_geometry: src=%{public}dx%{public}d geo=(%{public}d,%{public}d %{public}dx%{public}d) screen=(%{public}d,%{public}d) vpSrc=(%{public}d,%{public}d %{public}dx%{public}d) vpDst=%{public}dx%{public}d",
+                        w, h, contentOffX, contentOffY, contentW, contentH, screenX, screenY,
+                        sd->vpSrcX, sd->vpSrcY, sd->vpSrcW, sd->vpSrcH, sd->vpDstW, sd->vpDstH);
         }
 
         // 复制像素时 strip stride padding, 只提取 content 区域
