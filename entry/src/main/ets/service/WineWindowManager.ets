@@ -46,20 +46,14 @@ export class WineWindowManager {
   private pendingStarts: Set<number> = new Set();
   // 窗口就绪前到达的 pending 事件
   private pendingEvents: Map<number, Array<[string, string]>> = new Map();
-  // toplevelId -> surface 物理尺寸 (用于标题栏高度校准)
-  private surfaceSizes: Map<number, [number, number]> = new Map();
   // toplevelId -> 最近一次 resize 的目标 VP 高度 (用于校准 titleBarH)
   private lastResizeTargetH: Map<number, number> = new Map();
   // toplevelId -> 最近一次 resize 的 wine 原始尺寸 (用于校准后重新 resize)
   private lastResizeWineDim: Map<number, [number, number]> = new Map();
-  // toplevelId -> 最大化前的尺寸 (recover 后手动恢复)
-  private lastPreMaximizeDim: Map<number, [number, number]> = new Map();
   // toplevelId -> maximize 操作进行中 (诊断 OHOS 状态机冲突)
   private maximizeInFlight: Set<number> = new Set();
   // toplevelId -> 最近一次设置的标题 (loadContent 后会重置, 需要重新 apply)
   private lastTitles: Map<number, string> = new Map();
-  // toplevelId -> 是否 ARGB (layered/shaped 异型) 窗口, 仅记录 (后续子窗口方案使用)
-  private lastArgb: Map<number, boolean> = new Map();
   // Wine move_grab 等待 startMoving() — 标记哪些 toplevel 在等待拖拽
   private moveGrabPending: Set<number> = new Set();
 
@@ -175,7 +169,6 @@ export class WineWindowManager {
     const hadStage = this.windowStages.has(toplevelId);
     const hadPend = this.pendingEvents.has(toplevelId);
     const hadStart = this.pendingStarts.has(toplevelId);
-    const hadSurf = this.surfaceSizes.has(toplevelId);
     const hadResizeTarget = this.lastResizeTargetH.has(toplevelId);
     const hadWineDim = this.lastResizeWineDim.has(toplevelId);
     const hadTitle = this.lastTitles.has(toplevelId);
@@ -187,16 +180,14 @@ export class WineWindowManager {
     this.windowStages.delete(toplevelId);
     this.pendingEvents.delete(toplevelId);
     this.pendingStarts.delete(toplevelId);
-    this.surfaceSizes.delete(toplevelId);
     this.lastResizeTargetH.delete(toplevelId);
     this.lastResizeWineDim.delete(toplevelId);
-    this.lastPreMaximizeDim.delete(toplevelId);
     this.lastTitles.delete(toplevelId);
-    this.lastArgb.delete(toplevelId);
     this.maximizeInFlight.delete(toplevelId);
-    hilog.info(DOMAIN, TAG, '[MW]  unregisterAbility #%{public}d (hadCtx=%{public}s hadWin=%{public}s hadStage=%{public}s hadPend=%{public}s hadStart=%{public}s hadSurf=%{public}s hadResizeTarget=%{public}s hadWineDim=%{public}s hadTitle=%{public}s hadMaxFlight=%{public}s)',
+    this.moveGrabPending.delete(toplevelId);
+    hilog.info(DOMAIN, TAG, '[MW]  unregisterAbility #%{public}d (hadCtx=%{public}s hadWin=%{public}s hadStage=%{public}s hadPend=%{public}s hadStart=%{public}s hadResizeTarget=%{public}s hadWineDim=%{public}s hadTitle=%{public}s hadMaxFlight=%{public}s)',
       toplevelId, hadCtx ? 'yes' : 'no', hadWin ? 'yes' : 'no', hadStage ? 'yes' : 'no',
-      hadPend ? 'yes' : 'no', hadStart ? 'yes' : 'no', hadSurf ? 'yes' : 'no',
+      hadPend ? 'yes' : 'no', hadStart ? 'yes' : 'no',
       hadResizeTarget ? 'yes' : 'no', hadWineDim ? 'yes' : 'no',
       hadTitle ? 'yes' : 'no', hadMaxFlight ? 'yes' : 'no');
   }
@@ -327,8 +318,6 @@ export class WineWindowManager {
           const sw = obj.w as number;
           const sh = obj.h as number;
           if (sw && sh && this.displayScale > 0) {
-            // 总是保存最新的 surface 物理尺寸
-            this.surfaceSizes.set(id, [sw, sh]);
             hilog.info(DOMAIN, TAG, '[MW] surface #%{public}d: physical=%{public}dx%{public}d scale=%{public}s',
               id, sw, sh, this.displayScale.toFixed(2));
 
@@ -393,6 +382,9 @@ export class WineWindowManager {
         if (this.windows.has(id)) {
           hilog.info(DOMAIN, TAG, '[MW] -> applyEvent directly #%{public}d %{public}s', id, event);
           this.applyEvent(id, event, data);
+        } else if (this.destroyed.has(id)) {
+          // 墓碑拦截: unregister 之后迟到的事件不再为死 id 重建 pendingEvents
+          hilog.warn(DOMAIN, TAG, '[MW] drop %{public}s for destroyed #%{public}d', event, id);
         } else {
           hilog.info(DOMAIN, TAG, '[MW] -> queue pending #%{public}d %{public}s (window not ready)', id, event);
           let q = this.pendingEvents.get(id);
@@ -412,6 +404,9 @@ export class WineWindowManager {
         if (ArgbWindowManager.getInstance().has(id)) break;
         if (this.windows.has(id)) {
           this.applyEvent(id, event, data);
+        } else if (this.destroyed.has(id)) {
+          // 墓碑拦截: 同 title/resize 分支
+          hilog.warn(DOMAIN, TAG, '[MW] drop %{public}s for destroyed #%{public}d', event, id);
         } else {
           let q = this.pendingEvents.get(id);
           if (!q) { q = []; this.pendingEvents.set(id, q); }
@@ -546,9 +541,6 @@ export class WineWindowManager {
           hilog.info(DOMAIN, TAG, '[MW] maximize #%{public}d alreadyInFlight=%{public}s preMax=%{public}s',
             toplevelId, alreadyInFlight ? 'yes' : 'no', JSON.stringify(preDim));
           this.maximizeInFlight.add(toplevelId);
-          if (preDim) {
-            this.lastPreMaximizeDim.set(toplevelId, [preDim[0], preDim[1]]);
-          }
           hilog.info(DOMAIN, TAG, '[MW] → win.maximize() START #%{public}d', toplevelId);
           win.maximize().then(() => {
             hilog.info(DOMAIN, TAG, '[MW] win.maximize() OK #%{public}d', toplevelId);
@@ -575,7 +567,6 @@ export class WineWindowManager {
         try {
           const obj: Record<string, number> = JSON.parse(data) as Record<string, number>;
           const isArgb = obj.argb === 1;
-          this.lastArgb.set(toplevelId, isArgb);
           hilog.info(DOMAIN, TAG, '[MW] argb state #%{public}d = %{public}s (record only)',
             toplevelId, isArgb ? 'ARGB' : 'XRGB');
         } catch (e) {
