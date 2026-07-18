@@ -251,8 +251,12 @@ static void xs_get_toplevel(wl_client* client, wl_resource* xsRes, uint32_t id) 
             d->toplevelId = sd->toplevelId;
             td->toplevelId = sd->toplevelId;
             WaylandServer::GetInstance()->RegisterToplevelResource(sd->toplevelId, tl);
-            WaylandServer::GetInstance()->FireToplevelEvent(sd->toplevelId, "created",
-                "{\"w\":640,\"h\":480}");
+            // PC 模式: created 延迟到首帧 commit (此时才知 wl_shm 格式,
+            // ARGB 异型窗口需走子窗口路线而非 ability, 见 surface_commit)
+            if (WaylandServer::GetInstance()->IsDesktopMode()) {
+                WaylandServer::GetInstance()->FireToplevelEvent(sd->toplevelId, "created",
+                    "{\"w\":640,\"h\":480}");
+            }
         }
     }
 

@@ -734,6 +734,39 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                 OH_LOG_INFO(LOG_APP, "[MW-MOVE] initial pos tl=%{public}u (%{public}d,%{public}d)",
                     sd->toplevelId, screenX, screenY);
             }
+            /*
+             * PC 模式: created 延迟到首帧 (此时 wl_shm 格式已确定):
+             * - XRGB → "created": 走 WineWindowAbility (multiton 主窗口)
+             * - ARGB → "argb_created": 走子窗口 + setWindowMask 异型窗口路线
+             *   (2in1 主窗口无 alpha 通道/背景透明被钳制, 实测不可行)
+             */
+            if (isFirstCommit && !self->IsDesktopMode()) {
+                char json[160];
+                if (shmFormat == 0) {
+                    snprintf(json, sizeof(json), "{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d}",
+                             screenX, screenY, contentW, contentH);
+                    OH_LOG_INFO(LOG_APP, "[MW] argb_created tl=%{public}u geo=(%{public}d,%{public}d %{public}dx%{public}d)",
+                                sd->toplevelId, screenX, screenY, contentW, contentH);
+                    self->FireToplevelEvent(sd->toplevelId, "argb_created", json);
+                } else {
+                    snprintf(json, sizeof(json), "{\"w\":%d,\"h\":%d}", contentW, contentH);
+                    self->FireToplevelEvent(sd->toplevelId, "created", json);
+                }
+            }
+            /*
+             * ARGB 窗口: Wine 位置为权威 (桌面小部件由 Wine 决定屏幕位置)。
+             * 普通 PC 窗口后续 commit 忽略 geoX/geoY (OHOS 窗口管理器为权威),
+             * ARGB 窗口相反: geo 变化 → 通知 ArkTS 移动子窗口。
+             */
+            if (!self->IsDesktopMode() && shmFormat == 0 && !isFirstCommit &&
+                (self->toplevelX_[sd->toplevelId] != screenX ||
+                 self->toplevelY_[sd->toplevelId] != screenY)) {
+                self->toplevelX_[sd->toplevelId] = screenX;
+                self->toplevelY_[sd->toplevelId] = screenY;
+                char json[96];
+                snprintf(json, sizeof(json), "{\"x\":%d,\"y\":%d}", screenX, screenY);
+                self->FireToplevelEvent(sd->toplevelId, "argb_move", json);
+            }
             // 后续 commit: 忽略 geoX/geoY, compositor 位置为权威
             self->toplevelDirty_[sd->toplevelId] = true;
             // 记录 shm 格式 (ARGB8888=layered/shaped 有意义 alpha), 变化时通知
@@ -749,6 +782,35 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                                     sd->toplevelId, shmFormat == 0 ? "ARGB8888" : "XRGB8888");
                         self->FireToplevelEvent(sd->toplevelId, "argb", json);
                     }
+                }
+            }
+            /*
+             * ARGB 窗口: 从 alpha 通道生成 0/1 剪影掩码 (setWindowMask 用)。
+             * - 阈值 128: 半透明抗锯齿边缘向内收半像素, 避免灰边外扩
+             * - 形状哈希没变就不重建: 时钟类静态形状零开销,
+             *   动画类 (桌面宠物) 每帧变形才按帧重算
+             * - 掩码是帧分辨率 (Wine 逻辑像素); setWindowMask 要求等于
+             *   窗口物理尺寸, ArkTS 侧按 effectiveScale 最近邻放大
+             */
+            if (shmFormat == 0 && !self->IsDesktopMode()) {
+                const auto& px = self->toplevelPixels_[sd->toplevelId];
+                const size_t pixCount = static_cast<size_t>(contentW) * contentH;
+                uint64_t hash = 1469598103934665603ULL;
+                for (size_t i = 3; i < pixCount * 4; i += 4) {
+                    hash ^= (px[i] >= 128) ? 1 : 0;
+                    hash *= 1099511628211ULL;
+                }
+                auto& m = self->toplevelMasks_[sd->toplevelId];
+                if (hash != m.hash || m.w != contentW || m.h != contentH) {
+                    m.hash = hash;
+                    m.w = contentW;
+                    m.h = contentH;
+                    m.bits.resize(pixCount);
+                    for (size_t i = 0; i < pixCount; i++) {
+                        m.bits[i] = (px[i * 4 + 3] >= 128) ? 1 : 0;
+                    }
+                    m.dirty = true;
+                    self->FireToplevelEvent(sd->toplevelId, "mask_dirty", "{}");
                 }
             }
             // 新 toplevel 加到 Z-order 顶层
@@ -1642,6 +1704,7 @@ void WaylandServer::OnToplevelDestroyed(uint32_t toplevelId) {
         toplevelWineY_.erase(toplevelId);
         toplevelDirty_.erase(toplevelId);
         toplevelShmFormat_.erase(toplevelId);
+        toplevelMasks_.erase(toplevelId);
         toplevelMinimized_.erase(toplevelId);
         toplevelMinimizeCompX_.erase(toplevelId);
         toplevelMinimizeCompY_.erase(toplevelId);
@@ -1700,6 +1763,17 @@ uint32_t WaylandServer::RemovePopupBySurfaceKeyLocked(uint64_t surfaceKey, uint3
     const uint32_t parent = rit->second.parentToplevel;
     RemovePopupDataLocked(outPopupId);
     return parent;
+}
+
+bool WaylandServer::TakeWindowMask(uint32_t id, int& w, int& h, std::vector<uint8_t>& out) {
+    std::lock_guard<std::mutex> lk(toplevelMutex_);
+    auto it = toplevelMasks_.find(id);
+    if (it == toplevelMasks_.end() || !it->second.dirty) return false;
+    w = it->second.w;
+    h = it->second.h;
+    out = it->second.bits;
+    it->second.dirty = false;
+    return true;
 }
 
 void WaylandServer::SendToplevelClose(uint32_t toplevelId) {

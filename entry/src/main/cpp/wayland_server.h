@@ -101,6 +101,15 @@ public:
         auto it = toplevelShmFormat_.find(id);
         return it != toplevelShmFormat_.end() ? it->second : 1;
     }
+    // ARGB 异型窗口的 0/1 剪影掩码 (setWindowMask 用, ArkTS 轮询拉取)
+    struct WindowMask {
+        int w = 0, h = 0;
+        uint64_t hash = 0;
+        std::vector<uint8_t> bits;  // w*h, 每像素 0/1
+        bool dirty = false;
+    };
+    // 取掩码: false = 无掩码或无更新; 取走清除 dirty
+    bool TakeWindowMask(uint32_t id, int& w, int& h, std::vector<uint8_t>& out);
     // Desktop 合成模式 (Tablet): 全部 toplevel 合成到一个 root framebuffer
     void SetDesktopMode(bool on) { desktopMode_ = on; }
     bool IsDesktopMode() const { return desktopMode_; }
@@ -196,6 +205,7 @@ private:
     std::unordered_map<uint32_t, int> toplevelWineX_, toplevelWineY_;  // Wine 坐标系位置 (首次 commit, 不变)
     std::unordered_map<uint32_t, bool> toplevelDirty_;
     std::unordered_map<uint32_t, uint32_t> toplevelShmFormat_;  // id → wl_shm format (0=ARGB8888)
+    std::unordered_map<uint32_t, WindowMask> toplevelMasks_;    // ARGB 窗口剪影掩码
     std::unordered_map<uint32_t, int> toplevelLastReportedW_, toplevelLastReportedH_;
     std::unordered_map<uint32_t, bool> toplevelMinimized_;  // 桌面合成时跳过最小化窗口
     std::unordered_map<uint32_t, int> toplevelMinimizeCompX_, toplevelMinimizeCompY_;  // 最小化时的 compositor 位置
