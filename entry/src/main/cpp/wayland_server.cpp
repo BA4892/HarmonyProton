@@ -497,16 +497,11 @@ void WaylandServer::surface_destroy(wl_client*, wl_resource* r) {
             self->toplevelSurfaceMap_.erase(sd->toplevelId);
         }
         // 清理 toplevel 像素数据 + 标记 root dirty
+        // (root 被销毁时 OnToplevelDestroyed 内部已复位 desktopRootToplevelId_)
         self->OnToplevelDestroyed(sd->toplevelId);
         // 重置 InputManager 焦点: 防止后续 Inject*Leave 引用已销毁的 surface
         // (否则 Wine 收到 invalid object 协议错误 → 断开连接)
         InputManager::GetInstance()->OnSurfaceDestroyed(r);
-        // 如果是 desktop root 被销毁，重置 root ID，等待下一个 explorer toplevel
-        if (sd->toplevelId == self->GetDesktopRootToplevelId()) {
-            OH_LOG_INFO(LOG_APP, "[MW] desktop root toplevel #%{public}u destroyed, clearing root",
-                        sd->toplevelId);
-            self->SetDesktopRootToplevelId(0);
-        }
         self->FireToplevelEvent(sd->toplevelId, "destroyed");
     }
     // subsurface 销毁: 清除 layer + 标记 root dirty 触发重绘 (移除残留像素)
@@ -832,74 +827,86 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                 self->FireToplevelEvent(sd->toplevelId, "resize", json);
             }
         }
-        // Desktop 模式子窗口 commit → 标记 root dirty
+        // Desktop 模式子窗口 commit → root 识别/切换 (决策入锁) + 标记 root dirty。
+        // backgroundLayers_/pendingDesktopRoot/desktopRootToplevelId_ 与渲染线程共享,
+        // 决策树必须在 toplevelMutex_ 内; MoveRendererToToplevel / FireToplevelEvent
+        // 延迟到锁外执行 (与 PromotePendingDesktopRoot 同一约定);
+        // GetSurfaceForToplevel 留在锁内 (锁序 toplevelMutex_ → toplevelSurfaceMutex_
+        // 已由 RemovePopupDataLocked 确立)
         if (self->IsDesktopMode() && sd->hasToplevel &&
             sd->toplevelId != self->GetDesktopRootToplevelId()) {
-            uint32_t rootId = self->GetDesktopRootToplevelId();
-            // 仅首次 commit 识别 explorer 桌面 (防止最大化误切 root)
-            if (isFirstCommit) {
-                bool isExplorer = (sd->appId.find("explorer") != std::string::npos);
-                bool isFullSize = (contentW >= self->outputW_ * 8 / 10 &&
-                                   contentH >= self->outputH_ * 8 / 10);
+            uint32_t moveRendererFrom = 0, moveRendererTo = 0;  // 0,0 = 不动
+            bool fireDesktopRoot = false;
+            {
+                std::lock_guard<std::mutex> lk(self->toplevelMutex_);
+                uint32_t rootId = self->desktopRootToplevelId_;
+                // 仅首次 commit 识别 explorer 桌面 (防止最大化误切 root)
+                if (isFirstCommit) {
+                    bool isExplorer = (sd->appId.find("explorer") != std::string::npos);
+                    bool isFullSize = (contentW >= self->outputW_ * 8 / 10 &&
+                                       contentH >= self->outputH_ * 8 / 10);
 
-                if (isExplorer && isFullSize) {
-                    if (!self->desktopRootRecognitionEnabled_) {
-                        if (!sd->title.empty()) {
-                            self->pendingDesktopRootToplevelId_ = sd->toplevelId;
-                            self->backgroundLayers_.erase(sd->toplevelId);
-                            OH_LOG_INFO(LOG_APP,
-                                        "[MW] full-size explorer #%{public}u pending as desktop root while recognition is disabled title=%{public}s",
-                                        sd->toplevelId, sd->title.c_str());
+                    if (isExplorer && isFullSize) {
+                        if (!self->desktopRootRecognitionEnabled_) {
+                            if (!sd->title.empty()) {
+                                self->pendingDesktopRootToplevelId_ = sd->toplevelId;
+                                self->backgroundLayers_.erase(sd->toplevelId);
+                                OH_LOG_INFO(LOG_APP,
+                                            "[MW] full-size explorer #%{public}u pending as desktop root while recognition is disabled title=%{public}s",
+                                            sd->toplevelId, sd->title.c_str());
+                            } else {
+                                self->backgroundLayers_.insert(sd->toplevelId);
+                                OH_LOG_INFO(LOG_APP,
+                                            "[MW] full-size explorer #%{public}u ignored while desktop root recognition is disabled (no title)",
+                                            sd->toplevelId);
+                            }
+                        } else if (rootId == 0) {
+                            if (self->pendingDesktopRootToplevelId_ > 0 &&
+                                self->pendingDesktopRootToplevelId_ != sd->toplevelId) {
+                                self->backgroundLayers_.insert(sd->toplevelId);
+                                OH_LOG_INFO(LOG_APP,
+                                            "[MW] full-size explorer #%{public}u -> background, pending root #%{public}u exists",
+                                            sd->toplevelId, self->pendingDesktopRootToplevelId_);
+                            } else {
+                                OH_LOG_INFO(LOG_APP, "[MW] desktop root: #%{public}u appId=explorer",
+                                            sd->toplevelId);
+                                moveRendererFrom = 0;
+                                moveRendererTo = sd->toplevelId;
+                                self->desktopRootToplevelId_ = sd->toplevelId;
+                                self->pendingDesktopRootToplevelId_ = 0;
+                                fireDesktopRoot = true;
+                            }
+                        } else if (!sd->title.empty()) {
+                            wl_resource* oldSurf = self->GetSurfaceForToplevel(rootId);
+                            auto* oldSd = oldSurf ? static_cast<SurfaceData*>(wl_resource_get_user_data(oldSurf)) : nullptr;
+                            if (oldSd && oldSd->title.empty()) {
+                                OH_LOG_INFO(LOG_APP, "[MW] root switch: #%{public}u (empty) -> #%{public}u (%{public}s)",
+                                            rootId, sd->toplevelId, sd->title.c_str());
+                                self->backgroundLayers_.insert(rootId);
+                                moveRendererFrom = rootId;
+                                moveRendererTo = sd->toplevelId;
+                                self->desktopRootToplevelId_ = sd->toplevelId;
+                                fireDesktopRoot = true;
+                            } else {
+                                self->backgroundLayers_.insert(sd->toplevelId);
+                                OH_LOG_INFO(LOG_APP, "[MW] extra full-size explorer #%{public}u -> background",
+                                            sd->toplevelId);
+                            }
                         } else {
                             self->backgroundLayers_.insert(sd->toplevelId);
-                            OH_LOG_INFO(LOG_APP,
-                                        "[MW] full-size explorer #%{public}u ignored while desktop root recognition is disabled (no title)",
+                            OH_LOG_INFO(LOG_APP, "[MW] extra full-size explorer #%{public}u (no title) -> background",
                                         sd->toplevelId);
                         }
-                    } else if (rootId == 0) {
-                        if (self->pendingDesktopRootToplevelId_ > 0 &&
-                            self->pendingDesktopRootToplevelId_ != sd->toplevelId) {
-                            self->backgroundLayers_.insert(sd->toplevelId);
-                            OH_LOG_INFO(LOG_APP,
-                                        "[MW] full-size explorer #%{public}u -> background, pending root #%{public}u exists",
-                                        sd->toplevelId, self->pendingDesktopRootToplevelId_);
-                        } else {
-                            OH_LOG_INFO(LOG_APP, "[MW] desktop root: #%{public}u appId=explorer",
-                                        sd->toplevelId);
-                            PluginManager::GetInstance()->MoveRendererToToplevel(0, sd->toplevelId);
-                            self->SetDesktopRootToplevelId(sd->toplevelId);
-                            self->pendingDesktopRootToplevelId_ = 0;
-                            self->FireToplevelEvent(sd->toplevelId, "desktop_root", "{}");
-                            rootId = sd->toplevelId;
-                        }
-                    } else if (!sd->title.empty()) {
-                        wl_resource* oldSurf = self->GetSurfaceForToplevel(rootId);
-                        auto* oldSd = oldSurf ? static_cast<SurfaceData*>(wl_resource_get_user_data(oldSurf)) : nullptr;
-                        if (oldSd && oldSd->title.empty()) {
-                            OH_LOG_INFO(LOG_APP, "[MW] root switch: #%{public}u (empty) -> #%{public}u (%{public}s)",
-                                        rootId, sd->toplevelId, sd->title.c_str());
-                            self->backgroundLayers_.insert(rootId);
-                            PluginManager::GetInstance()->MoveRendererToToplevel(rootId, sd->toplevelId);
-                            self->SetDesktopRootToplevelId(sd->toplevelId);
-                            self->FireToplevelEvent(sd->toplevelId, "desktop_root", "{}");
-                            rootId = sd->toplevelId;
-                        } else {
-                            self->backgroundLayers_.insert(sd->toplevelId);
-                            OH_LOG_INFO(LOG_APP, "[MW] extra full-size explorer #%{public}u -> background",
-                                        sd->toplevelId);
-                        }
-                    } else {
-                        self->backgroundLayers_.insert(sd->toplevelId);
-                        OH_LOG_INFO(LOG_APP, "[MW] extra full-size explorer #%{public}u (no title) -> background",
-                                    sd->toplevelId);
                     }
                 }
+                // 每次子窗口 commit 都标记 root dirty (包括 resize; 新 root 刚设置也生效)
+                if (self->desktopRootToplevelId_ > 0)
+                    self->toplevelDirty_[self->desktopRootToplevelId_] = true;
             }
-            // 每次子窗口 commit 都标记 root dirty (包括 resize)
-            if (rootId > 0) {
-                std::lock_guard<std::mutex> lk(self->toplevelMutex_);
-                self->toplevelDirty_[rootId] = true;
-            }
+            if (moveRendererTo)
+                PluginManager::GetInstance()->MoveRendererToToplevel(moveRendererFrom, moveRendererTo);
+            if (fireDesktopRoot)
+                self->FireToplevelEvent(sd->toplevelId, "desktop_root", "{}");
         }
         // subsurface: Desktop 模式存 layer 信息, 多窗口模式合成到父 toplevel
         if (sd->isSubsurface && sd->parentSurface && sd->pixels.size() > 0) {
@@ -1199,7 +1206,7 @@ bool WaylandServer::GetZeroCopyLayerInfo(uint64_t surfaceKey, uint32_t rendererT
         {
             if (rendererToplevelId != desktopRootToplevelId_ ||
                 (info.parentToplevel != desktopRootToplevelId_ &&
-                 !IsToplevelVisible(info.parentToplevel)))
+                 !IsToplevelVisibleLocked(info.parentToplevel)))
                 return false;
             for (const auto& layer : subsurfaceLayers_)
             {
@@ -1229,7 +1236,7 @@ bool WaylandServer::GetZeroCopyLayerInfo(uint64_t surfaceKey, uint32_t rendererT
     if (desktopMode_)
     {
         if (rendererToplevelId != desktopRootToplevelId_ ||
-            (sd->toplevelId != desktopRootToplevelId_ && !IsToplevelVisible(sd->toplevelId)))
+            (sd->toplevelId != desktopRootToplevelId_ && !IsToplevelVisibleLocked(sd->toplevelId)))
             return false;
         info.x = toplevelX_[sd->toplevelId];
         info.y = toplevelY_[sd->toplevelId];
@@ -1297,7 +1304,7 @@ int WaylandServer::GetZeroCopyOccluders(uint64_t surfaceKey, uint32_t rendererTo
     }
     for (auto zit = zbegin; zit != toplevelZOrder_.end() && count < maxOut; ++zit) {
         const uint32_t cid = *zit;
-        if (!IsToplevelVisible(cid)) continue;
+        if (!IsToplevelVisibleLocked(cid)) continue;
         pushRect(toplevelX_[cid], toplevelY_[cid], toplevelW_[cid], toplevelH_[cid]);
     }
 
@@ -1309,7 +1316,7 @@ int WaylandServer::GetZeroCopyOccluders(uint64_t surfaceKey, uint32_t rendererTo
         if (count >= maxOut) break;
         if (zeroCopySurfaceKeys_.count(layer.surfaceKey)) continue;
         if (layer.parentToplevel != desktopRootToplevelId_ &&
-            !IsToplevelVisible(layer.parentToplevel)) continue;
+            !IsToplevelVisibleLocked(layer.parentToplevel)) continue;
         int x = 0, y = 0;
         ResolveSubsurfaceLayerPositionLocked(layer, x, y);
         pushRect(x, y,
@@ -1420,7 +1427,7 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
         mixSignature(static_cast<uint32_t>(rootH));
         for (uint32_t childId : toplevelZOrder_) {
             mixSignature(childId);
-            const bool visible = IsToplevelVisible(childId);
+            const bool visible = IsToplevelVisibleLocked(childId);
             mixSignature(visible ? 1 : 0);
             if (!visible) continue;
             mixSignature(static_cast<uint32_t>(toplevelX_[childId]));
@@ -1434,7 +1441,7 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
             mixSignature(reinterpret_cast<uintptr_t>(layer.surface));
             mixSignature(zeroCopySurfaceKeys_.count(layer.surfaceKey) ? 1 : 0);
             mixSignature(layer.parentToplevel);
-            mixSignature(layer.parentToplevel == id || IsToplevelVisible(layer.parentToplevel));
+            mixSignature(layer.parentToplevel == id || IsToplevelVisibleLocked(layer.parentToplevel));
             mixSignature(static_cast<uint32_t>(layerX));
             mixSignature(static_cast<uint32_t>(layerY));
             mixSignature(static_cast<uint32_t>(layer.w));
@@ -1461,7 +1468,7 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
         // Wine explorer 会创建多个全尺寸 toplevel (#1=背景层, #3=新桌面),
         // #1 需合成到 root 之上以显示桌面背景, 不因同尺寸跳过。
         for (uint32_t childId : toplevelZOrder_) {
-            if (!IsToplevelVisible(childId)) continue;
+            if (!IsToplevelVisibleLocked(childId)) continue;
             int cw = toplevelW_[childId], ch = toplevelH_[childId];
             auto& childPx = toplevelPixels_[childId];
             int childW = toplevelW_[childId];
@@ -1515,7 +1522,7 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
         // 合成 subsurface 弹出层 (菜单/popup)
         for (auto& layer : subsurfaceLayers_) {
             if (zeroCopySurfaceKeys_.count(layer.surfaceKey)) continue;
-            if (layer.parentToplevel != id && !IsToplevelVisible(layer.parentToplevel)) continue;
+            if (layer.parentToplevel != id && !IsToplevelVisibleLocked(layer.parentToplevel)) continue;
             if (layer.w <= 0 || layer.h <= 0) continue;
             int layerX = 0, layerY = 0;
             ResolveSubsurfaceLayerPositionLocked(layer, layerX, layerY);
@@ -1773,6 +1780,21 @@ void WaylandServer::OnToplevelDestroyed(uint32_t toplevelId) {
         backgroundLayers_.erase(toplevelId);
         if (pendingDesktopRootToplevelId_ == toplevelId)
             pendingDesktopRootToplevelId_ = 0;
+        // root 本体被销毁 (xs_destroy / 客户端断连路径同样走到这里): 复位, 等待下一个 explorer
+        if (desktopRootToplevelId_ == toplevelId) {
+            OH_LOG_INFO(LOG_APP, "[MW] desktop root toplevel #%{public}u destroyed, clearing root",
+                        toplevelId);
+            desktopRootToplevelId_ = 0;
+        }
+        // 被抓取窗口销毁 → 复位 move grab, 防止悬空 grab 吞掉后续 motion
+        if (moveGrabToplevelId_ == toplevelId) {
+            OH_LOG_INFO(LOG_APP, "[MW-MOVE] grabbed toplevel #%{public}u destroyed, reset grab",
+                        toplevelId);
+            moveGrabToplevelId_ = 0;
+            moveGrabSerial_ = 0;
+            moveGrabLastWineX_ = 0;
+            moveGrabLastWineY_ = 0;
+        }
         auto zit = std::find(toplevelZOrder_.begin(), toplevelZOrder_.end(), toplevelId);
         if (zit != toplevelZOrder_.end()) toplevelZOrder_.erase(zit);
         // 级联清理该 toplevel 的全部 PC popup (帧数据 + 映射)
@@ -1782,6 +1804,13 @@ void WaylandServer::OnToplevelDestroyed(uint32_t toplevelId) {
         for (uint32_t pid : cascadePopups) RemovePopupDataLocked(pid);
         if (IsDesktopMode() && toplevelId != desktopRootToplevelId_) {
             if (desktopRootToplevelId_ > 0) toplevelDirty_[desktopRootToplevelId_] = true;
+        }
+        // 对称清理 surface 映射 (popup 路径在 RemovePopupDataLocked 已清, toplevel 路径此前缺失):
+        // xs_destroy 时 wl_surface 可能仍存活, 不清会让 GetSurfaceForToplevel(死 id) 命中
+        // 已无 toplevel 身份的 surface。嵌套锁序同 RemovePopupDataLocked。
+        {
+            std::lock_guard<std::mutex> slk(toplevelSurfaceMutex_);
+            toplevelSurfaceMap_.erase(toplevelId);
         }
     }
     // 通知 ArkTS 销毁 popup 子窗口 (锁外触发)
@@ -1873,7 +1902,7 @@ uint32_t WaylandServer::FindToplevelAt(int x, int y) {
         // 查的是实时集合: GPU→CPU fallback 时 key 被移出 zeroCopySurfaceKeys_,
         // 该层自动恢复为普通 subsurface (CPU 合成置顶, 命中也置顶), 无需特判
         if (zeroCopySurfaceKeys_.count(it->surfaceKey)) continue;
-        if (it->parentToplevel != rootId && !IsToplevelVisible(it->parentToplevel)) continue;
+        if (it->parentToplevel != rootId && !IsToplevelVisibleLocked(it->parentToplevel)) continue;
         if (it->w <= 0 || it->h <= 0) continue;
         int layerX = 0, layerY = 0;
         ResolveSubsurfaceLayerPositionLocked(*it, layerX, layerY);
@@ -1884,7 +1913,7 @@ uint32_t WaylandServer::FindToplevelAt(int x, int y) {
 
     for (auto it = toplevelZOrder_.rbegin(); it != toplevelZOrder_.rend(); ++it) {
         uint32_t id = *it;
-        if (!IsToplevelVisible(id)) continue;
+        if (!IsToplevelVisibleLocked(id)) continue;
         int tx = toplevelX_[id];
         int ty = toplevelY_[id];
         int tw = toplevelW_[id];
@@ -1901,8 +1930,8 @@ uint32_t WaylandServer::FindToplevelAt(int x, int y) {
     return rootId;
 }
 
-bool WaylandServer::IsToplevelVisible(uint32_t id) {
-    // 渲染和输入共用的可见性条件:
+bool WaylandServer::IsToplevelVisibleLocked(uint32_t id) {
+    // 渲染和输入共用的可见性条件 (调用方须已持有 toplevelMutex_):
     // 非 root + 非背景层 + 有像素 + 非最小化
     if (id == desktopRootToplevelId_) return false;
     if (backgroundLayers_.count(id)) return false;
