@@ -99,16 +99,33 @@ public:
     // Desktop 模式: 提到 Z-order 最顶层
     void RaiseToplevel(uint32_t id);
     // 读取 toplevel 桌面坐标 (InputManager 坐标转换用)
-    int GetToplevelX(uint32_t id) { std::lock_guard<std::mutex> lk(toplevelMutex_); return toplevelX_[id]; }
-    int GetToplevelY(uint32_t id) { std::lock_guard<std::mutex> lk(toplevelMutex_); return toplevelY_[id]; }
-    int GetToplevelW(uint32_t id) { std::lock_guard<std::mutex> lk(toplevelMutex_); return toplevelW_[id]; }
-    int GetToplevelH(uint32_t id) { std::lock_guard<std::mutex> lk(toplevelMutex_); return toplevelH_[id]; }
+    // miss 返回 0 (与旧实现返回值一致), find 语义无插入副作用
+    int GetToplevelX(uint32_t id) {
+        std::lock_guard<std::mutex> lk(toplevelMutex_);
+        auto it = toplevels_.find(id);
+        return it != toplevels_.end() ? it->second.x : 0;
+    }
+    int GetToplevelY(uint32_t id) {
+        std::lock_guard<std::mutex> lk(toplevelMutex_);
+        auto it = toplevels_.find(id);
+        return it != toplevels_.end() ? it->second.y : 0;
+    }
+    int GetToplevelW(uint32_t id) {
+        std::lock_guard<std::mutex> lk(toplevelMutex_);
+        auto it = toplevels_.find(id);
+        return it != toplevels_.end() ? it->second.w : 0;
+    }
+    int GetToplevelH(uint32_t id) {
+        std::lock_guard<std::mutex> lk(toplevelMutex_);
+        auto it = toplevels_.find(id);
+        return it != toplevels_.end() ? it->second.h : 0;
+    }
     // toplevel/popup 帧的 wl_shm 格式 (0=ARGB8888 有意义 alpha, 1=XRGB8888, 默认 1)
     // EglRenderer 据此决定 alpha 透传或强制不透明 (XRGB 的 X 字节是垃圾)
     uint32_t GetToplevelShmFormat(uint32_t id) {
         std::lock_guard<std::mutex> lk(toplevelMutex_);
-        auto it = toplevelShmFormat_.find(id);
-        return it != toplevelShmFormat_.end() ? it->second : 1;
+        auto it = toplevels_.find(id);
+        return it != toplevels_.end() ? it->second.shmFormat : 1;
     }
     // ARGB 异型窗口的 0/1 剪影掩码 (setWindowMask 用, ArkTS 轮询拉取)
     struct WindowMask {
@@ -204,19 +221,48 @@ private:
     int width_ = 0, height_ = 0;
     std::atomic<bool> dirty_{false};
 
-    // toplevel 帧缓冲: toplevelId -> pixels
+    // toplevel/popup 聚合状态: 一个 id 一条记录, 全部字段由 toplevelMutex_ 保护。
+    // PC 模式 popup (菜单) 复用 NextToplevelId 命名空间, 只使用
+    // {pixels, w, h, dirty, shmFormat} 子集, 其余字段保持默认值。
+    // 条目存在性不携带语义 (旧实现用 "map 里有没有这个 id" 表达状态),
+    // 语义全部落在显式字段: pixels.empty()=无帧, hasPosition=已定位, …
     std::mutex toplevelMutex_;
-    std::unordered_map<uint32_t, std::vector<uint8_t>> toplevelPixels_;
+    struct ToplevelState {
+        // -- 帧数据 (toplevel 与 PC popup 共用) --
+        std::vector<uint8_t> pixels;   // empty() = 尚无帧
+        int w = 0, h = 0;              // content 尺寸 (popup 为显示尺寸)
+        bool dirty = false;
+        uint32_t shmFormat = 1;        // wl_shm format (0=ARGB8888, 1=XRGB8888)
+        // -- 桌面坐标 (仅 toplevel) --
+        bool hasPosition = false;      // 首次 commit 置位 (isFirstCommit 判定 / 移动守卫)
+        int x = 0, y = 0;              // compositor 桌面位置 (含 move grab 偏移)
+        int wineX = 0, wineY = 0;      // Wine 坐标系位置 (首次 commit, 不变)
+        // -- 尺寸上报去重 --
+        int lastReportedW = 0, lastReportedH = 0;
+        // -- 状态标记 --
+        bool minimized = false;        // 桌面合成时跳过最小化窗口
+        bool isBackground = false;     // 渲染层, 不接收输入 (被切换掉的旧 root)
+        // -- ARGB 窗口剪影掩码 --
+        WindowMask mask;               // mask.w==0 = 从未生成
+    };
+    std::unordered_map<uint32_t, ToplevelState> toplevels_;
     std::unordered_map<uint64_t, wl_resource*> surfaceResources_;
     std::unordered_set<uint64_t> zeroCopySurfaceKeys_;
-    std::unordered_map<uint32_t, int> toplevelW_, toplevelH_;
-    std::unordered_map<uint32_t, int> toplevelX_, toplevelY_;  // compositor 桌面位置 (含 move grab 偏移)
-    std::unordered_map<uint32_t, int> toplevelWineX_, toplevelWineY_;  // Wine 坐标系位置 (首次 commit, 不变)
-    std::unordered_map<uint32_t, bool> toplevelDirty_;
-    std::unordered_map<uint32_t, uint32_t> toplevelShmFormat_;  // id → wl_shm format (0=ARGB8888)
-    std::unordered_map<uint32_t, WindowMask> toplevelMasks_;    // ARGB 窗口剪影掩码
-    std::unordered_map<uint32_t, int> toplevelLastReportedW_, toplevelLastReportedH_;
-    std::unordered_map<uint32_t, bool> toplevelMinimized_;  // 桌面合成时跳过最小化窗口
+    // 读路径: find 语义, miss 返回 nullptr (杜绝 operator[] 读污染)
+    ToplevelState* FindToplevelLocked(uint32_t id) {
+        auto it = toplevels_.find(id);
+        return it != toplevels_.end() ? &it->second : nullptr;
+    }
+    // 写路径显式建档 (首次 commit / 状态转换等合法创建点)
+    ToplevelState& EnsureToplevelLocked(uint32_t id) { return toplevels_[id]; }
+    // "root 存在则标 dirty" 样板的收敛 (miss 不建档:
+    // 消费端 TakeToplevelFrame 先查 pixels, 孤 dirty 条目不可观测)
+    void MarkDesktopRootDirtyLocked() {
+        if (desktopRootToplevelId_ == 0) return;
+        auto it = toplevels_.find(desktopRootToplevelId_);
+        if (it != toplevels_.end()) it->second.dirty = true;
+    }
+    static bool HasFrame(const ToplevelState& st) { return !st.pixels.empty(); }
 
     StateCb stateCb_;
     ToplevelCb toplevelCb_;
@@ -238,7 +284,7 @@ private:
     uint32_t moveGrabToplevelId_ = 0;
     uint32_t moveGrabSerial_ = 0;
     int32_t moveGrabLastWineX_ = 0, moveGrabLastWineY_ = 0;  // 上一帧 Wine 逻辑坐标
-    // subsurface 合成层 (不写入 toplevelPixels_, 避免污染)
+    // subsurface 合成层 (独立于 per-toplevel 帧缓冲, 避免污染)
     struct SubsurfaceLayer {
         wl_resource* surface = nullptr;
         uint64_t surfaceKey = 0;
@@ -262,8 +308,8 @@ private:
      * PC 多窗口模式 popup (菜单/tooltip/下拉框):
      * subsurface 不再合成进父 toplevel 像素 (会被窗口边缘裁剪),
      * 而是登记为伪 toplevel, 由 ArkTS 独立 OHOS 子窗口渲染。
-     * popupId 复用 NextToplevelId() 命名空间, 帧数据存在 toplevelPixels_ 等
-     * 现有结构中, EglRenderer/InputManager 按现有 per-toplevel 路径工作。
+     * popupId 复用 NextToplevelId() 命名空间, 帧数据存在 toplevels_ 的
+     * ToplevelState 子集中, EglRenderer/InputManager 按现有 per-toplevel 路径工作。
      */
     struct PopupRecord {
         uint32_t popupId = 0;
@@ -281,7 +327,6 @@ private:
     // 返回 parentToplevel 并出参 popupId; 记录不存在返回 0
     uint32_t RemovePopupBySurfaceKeyLocked(uint64_t surfaceKey, uint32_t& outPopupId);
     std::vector<uint32_t> toplevelZOrder_;  // 前景→背景
-    std::unordered_set<uint32_t> backgroundLayers_; // 渲染层, 不接收输入 (被切换掉的旧 root)
     uint64_t desktopRootFrameSerial_ = 0;
     uint64_t desktopOutputRootFrameSerial_ = 0;
     uint64_t desktopCompositionSignature_ = 0;

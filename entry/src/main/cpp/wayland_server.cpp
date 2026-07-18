@@ -220,8 +220,7 @@ void WaylandServer::compositor_create_surface(wl_client* client, wl_resource* co
             if (sd) {
                 popupParent = self->RemovePopupBySurfaceKeyLocked(sd->surfaceKey, removedPopup);
             }
-            if (self->desktopRootToplevelId_ > 0)
-                self->toplevelDirty_[self->desktopRootToplevelId_] = true;
+            self->MarkDesktopRootDirtyLocked();
         }
         if (sd && sd->hasToplevel) {
             {
@@ -300,8 +299,7 @@ void WaylandServer::subsurface_set_position(wl_client*, wl_resource* ssRes,
             layer.localY = y;
             break;
         }
-        if (self->desktopRootToplevelId_ > 0)
-            self->toplevelDirty_[self->desktopRootToplevelId_] = true;
+        self->MarkDesktopRootDirtyLocked();
     }
     // PC 模式: 更新已登记 popup 的偏移, 通知 ArkTS 移动子窗口
     uint32_t movePopupId = 0, moveParent = 0;
@@ -359,8 +357,7 @@ void WaylandServer::subsurface_place_above(wl_client*, wl_resource* ssRes, wl_re
     self->subsurfaceLayers_.erase(self->subsurfaceLayers_.begin() + myIdx);
     int target = (myIdx < siblingIdx) ? siblingIdx - 1 : siblingIdx;
     self->subsurfaceLayers_.insert(self->subsurfaceLayers_.begin() + target + 1, std::move(layer));
-    if (self->IsDesktopMode() && self->desktopRootToplevelId_ > 0)
-        self->toplevelDirty_[self->desktopRootToplevelId_] = true;
+    if (self->IsDesktopMode()) self->MarkDesktopRootDirtyLocked();
     OH_LOG_INFO(LOG_APP, "[MW-SUBSURF] place_above child=%{public}p above sibling=%{public}p",
                 childSurf, sibling);
 }
@@ -380,8 +377,7 @@ void WaylandServer::subsurface_place_below(wl_client*, wl_resource* ssRes, wl_re
     self->subsurfaceLayers_.erase(self->subsurfaceLayers_.begin() + myIdx);
     int target = (myIdx < siblingIdx) ? siblingIdx - 1 : siblingIdx;
     self->subsurfaceLayers_.insert(self->subsurfaceLayers_.begin() + target, std::move(layer));
-    if (self->IsDesktopMode() && self->desktopRootToplevelId_ > 0)
-        self->toplevelDirty_[self->desktopRootToplevelId_] = true;
+    if (self->IsDesktopMode()) self->MarkDesktopRootDirtyLocked();
     OH_LOG_INFO(LOG_APP, "[MW-SUBSURF] place_below child=%{public}p below sibling=%{public}p",
                 childSurf, sibling);
 }
@@ -516,8 +512,7 @@ void WaylandServer::surface_destroy(wl_client*, wl_resource* r) {
             }
             // PC popup 记录一并清除
             popupParent = self->RemovePopupBySurfaceKeyLocked(sd->surfaceKey, removedPopup);
-            if (self->IsDesktopMode() && self->desktopRootToplevelId_ > 0)
-                self->toplevelDirty_[self->desktopRootToplevelId_] = true;
+            if (self->IsDesktopMode()) self->MarkDesktopRootDirtyLocked();
         }
         if (removedPopup) {
             // 防止 pointer focus 悬在已销毁的 popup surface 上 (协议错误会断开 Wine)
@@ -590,8 +585,7 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                 if (self->subsurfaceLayers_.size() != before) {
                     OH_LOG_INFO(LOG_APP, "[MW-SUBSURF] NULL buffer commit → removed layer, layers %{public}zu→%{public}zu",
                                 before, self->subsurfaceLayers_.size());
-                    if (self->IsDesktopMode() && self->desktopRootToplevelId_ > 0)
-                        self->toplevelDirty_[self->desktopRootToplevelId_] = true;
+                    if (self->IsDesktopMode()) self->MarkDesktopRootDirtyLocked();
                 }
                 // PC popup: unmap (菜单关闭) → 销毁 ArkTS 子窗口
                 popupParent = self->RemovePopupBySurfaceKeyLocked(sd->surfaceKey, removedPopup);
@@ -697,9 +691,10 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                 self->toplevelSurfaceMap_[sd->toplevelId] = surfRes;
             }
             std::lock_guard<std::mutex> lk(self->toplevelMutex_);
-            copyTight(self->toplevelPixels_[sd->toplevelId]);
-            self->toplevelW_[sd->toplevelId] = contentW;
-            self->toplevelH_[sd->toplevelId] = contentH;
+            auto& st = self->EnsureToplevelLocked(sd->toplevelId);  // 首次 commit 在此建档
+            copyTight(st.pixels);
+            st.w = contentW;
+            st.h = contentH;
             if (sd->toplevelId == self->desktopRootToplevelId_) {
                 ++self->desktopRootFrameSerial_;
             }
@@ -713,16 +708,19 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
              */
             if (sd->minimized && contentW > 200 && contentH > 50) {
                 sd->minimized = false;
-                self->toplevelMinimized_.erase(sd->toplevelId);
+                st.minimized = false;
                 OH_LOG_INFO(LOG_APP, "[MW] auto-restore tl=%{public}u size=%{public}dx%{public}d",
                             sd->toplevelId, contentW, contentH);
             }
-            isFirstCommit = (self->toplevelX_.count(sd->toplevelId) == 0);
+            // 首帧判定只认 hasPosition, 不认条目存在
+            // (pre-commit 的 SetToplevelMinimized 等路径可能已建档)
+            isFirstCommit = !st.hasPosition;
             if (isFirstCommit) {
-                self->toplevelX_[sd->toplevelId] = screenX;
-                self->toplevelY_[sd->toplevelId] = screenY;
-                self->toplevelWineX_[sd->toplevelId] = screenX;
-                self->toplevelWineY_[sd->toplevelId] = screenY;
+                st.x = screenX;
+                st.y = screenY;
+                st.wineX = screenX;
+                st.wineY = screenY;
+                st.hasPosition = true;
                 OH_LOG_INFO(LOG_APP, "[MW-MOVE] initial pos tl=%{public}u (%{public}d,%{public}d)",
                     sd->toplevelId, screenX, screenY);
             }
@@ -751,29 +749,27 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
              * ARGB 窗口相反: geo 变化 → 通知 ArkTS 移动子窗口。
              */
             if (!self->IsDesktopMode() && shmFormat == 0 && !isFirstCommit &&
-                (self->toplevelX_[sd->toplevelId] != screenX ||
-                 self->toplevelY_[sd->toplevelId] != screenY)) {
-                self->toplevelX_[sd->toplevelId] = screenX;
-                self->toplevelY_[sd->toplevelId] = screenY;
+                (st.x != screenX || st.y != screenY)) {
+                st.x = screenX;
+                st.y = screenY;
                 char json[96];
                 snprintf(json, sizeof(json), "{\"x\":%d,\"y\":%d}", screenX, screenY);
                 self->FireToplevelEvent(sd->toplevelId, "argb_move", json);
             }
             // 后续 commit: 忽略 geoX/geoY, compositor 位置为权威
-            self->toplevelDirty_[sd->toplevelId] = true;
+            st.dirty = true;
             // 记录 shm 格式 (ARGB8888=layered/shaped 有意义 alpha), 变化时通知
             // ArkTS 切换窗口背景 (PC 模式透明背景才能透过 per-pixel alpha)
-            {
-                auto fmtIt = self->toplevelShmFormat_.find(sd->toplevelId);
-                if (fmtIt == self->toplevelShmFormat_.end() || fmtIt->second != shmFormat) {
-                    self->toplevelShmFormat_[sd->toplevelId] = shmFormat;
-                    if (!self->IsDesktopMode()) {
-                        char json[32];
-                        snprintf(json, sizeof(json), "{\"argb\":%d}", shmFormat == 0 ? 1 : 0);
-                        OH_LOG_INFO(LOG_APP, "[MW] toplevel #%{public}u shm format → %{public}s",
-                                    sd->toplevelId, shmFormat == 0 ? "ARGB8888" : "XRGB8888");
-                        self->FireToplevelEvent(sd->toplevelId, "argb", json);
-                    }
+            // 注意: 首帧必发 argb 事件 (即使首帧就是默认的 XRGB), 与旧的
+            // "format 表无此 id" 判定等价 — 只按值比较会吞掉首帧事件
+            if (isFirstCommit || st.shmFormat != shmFormat) {
+                st.shmFormat = shmFormat;
+                if (!self->IsDesktopMode()) {
+                    char json[32];
+                    snprintf(json, sizeof(json), "{\"argb\":%d}", shmFormat == 0 ? 1 : 0);
+                    OH_LOG_INFO(LOG_APP, "[MW] toplevel #%{public}u shm format → %{public}s",
+                                sd->toplevelId, shmFormat == 0 ? "ARGB8888" : "XRGB8888");
+                    self->FireToplevelEvent(sd->toplevelId, "argb", json);
                 }
             }
             /*
@@ -785,14 +781,14 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
              *   窗口物理尺寸, ArkTS 侧按 effectiveScale 最近邻放大
              */
             if (shmFormat == 0 && !self->IsDesktopMode()) {
-                const auto& px = self->toplevelPixels_[sd->toplevelId];
+                const auto& px = st.pixels;
                 const size_t pixCount = static_cast<size_t>(contentW) * contentH;
                 uint64_t hash = 1469598103934665603ULL;
                 for (size_t i = 3; i < pixCount * 4; i += 4) {
                     hash ^= (px[i] >= 128) ? 1 : 0;
                     hash *= 1099511628211ULL;
                 }
-                auto& m = self->toplevelMasks_[sd->toplevelId];
+                auto& m = st.mask;
                 if (hash != m.hash || m.w != contentW || m.h != contentH) {
                     m.hash = hash;
                     m.w = contentW;
@@ -811,14 +807,12 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                 if (zit == self->toplevelZOrder_.end()) self->toplevelZOrder_.push_back(sd->toplevelId);
             }
             OH_LOG_INFO(LOG_APP, "[MW-COMMIT] toplevel #%{public}u frame %{public}dx%{public}d stride=%{public}d stored=%{public}zu",
-                        sd->toplevelId, contentW, contentH, stride, self->toplevelPixels_[sd->toplevelId].size());
+                        sd->toplevelId, contentW, contentH, stride, st.pixels.size());
 
             // 检测尺寸变化 -> 通知 ArkTS 调整子窗口
-            int lastW = self->toplevelLastReportedW_[sd->toplevelId];
-            int lastH = self->toplevelLastReportedH_[sd->toplevelId];
-            if (contentW != lastW || contentH != lastH) {
-                self->toplevelLastReportedW_[sd->toplevelId] = contentW;
-                self->toplevelLastReportedH_[sd->toplevelId] = contentH;
+            if (contentW != st.lastReportedW || contentH != st.lastReportedH) {
+                st.lastReportedW = contentW;
+                st.lastReportedH = contentH;
                 char json[64];
                 snprintf(json, sizeof(json), "{\"w\":%d,\"h\":%d}", contentW, contentH);
                 OH_LOG_INFO(LOG_APP, "[MW] toplevel #%{public}u size changed: %{public}dx%{public}d max=%{public}s -> ArkTS",
@@ -828,7 +822,7 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
             }
         }
         // Desktop 模式子窗口 commit → root 识别/切换 (决策入锁) + 标记 root dirty。
-        // backgroundLayers_/pendingDesktopRoot/desktopRootToplevelId_ 与渲染线程共享,
+        // isBackground/pendingDesktopRoot/desktopRootToplevelId_ 与渲染线程共享,
         // 决策树必须在 toplevelMutex_ 内; MoveRendererToToplevel / FireToplevelEvent
         // 延迟到锁外执行 (与 PromotePendingDesktopRoot 同一约定);
         // GetSurfaceForToplevel 留在锁内 (锁序 toplevelMutex_ → toplevelSurfaceMutex_
@@ -850,12 +844,12 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                         if (!self->desktopRootRecognitionEnabled_) {
                             if (!sd->title.empty()) {
                                 self->pendingDesktopRootToplevelId_ = sd->toplevelId;
-                                self->backgroundLayers_.erase(sd->toplevelId);
+                                self->EnsureToplevelLocked(sd->toplevelId).isBackground = false;
                                 OH_LOG_INFO(LOG_APP,
                                             "[MW] full-size explorer #%{public}u pending as desktop root while recognition is disabled title=%{public}s",
                                             sd->toplevelId, sd->title.c_str());
                             } else {
-                                self->backgroundLayers_.insert(sd->toplevelId);
+                                self->EnsureToplevelLocked(sd->toplevelId).isBackground = true;
                                 OH_LOG_INFO(LOG_APP,
                                             "[MW] full-size explorer #%{public}u ignored while desktop root recognition is disabled (no title)",
                                             sd->toplevelId);
@@ -863,7 +857,7 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                         } else if (rootId == 0) {
                             if (self->pendingDesktopRootToplevelId_ > 0 &&
                                 self->pendingDesktopRootToplevelId_ != sd->toplevelId) {
-                                self->backgroundLayers_.insert(sd->toplevelId);
+                                self->EnsureToplevelLocked(sd->toplevelId).isBackground = true;
                                 OH_LOG_INFO(LOG_APP,
                                             "[MW] full-size explorer #%{public}u -> background, pending root #%{public}u exists",
                                             sd->toplevelId, self->pendingDesktopRootToplevelId_);
@@ -882,26 +876,25 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                             if (oldSd && oldSd->title.empty()) {
                                 OH_LOG_INFO(LOG_APP, "[MW] root switch: #%{public}u (empty) -> #%{public}u (%{public}s)",
                                             rootId, sd->toplevelId, sd->title.c_str());
-                                self->backgroundLayers_.insert(rootId);
+                                self->EnsureToplevelLocked(rootId).isBackground = true;
                                 moveRendererFrom = rootId;
                                 moveRendererTo = sd->toplevelId;
                                 self->desktopRootToplevelId_ = sd->toplevelId;
                                 fireDesktopRoot = true;
                             } else {
-                                self->backgroundLayers_.insert(sd->toplevelId);
+                                self->EnsureToplevelLocked(sd->toplevelId).isBackground = true;
                                 OH_LOG_INFO(LOG_APP, "[MW] extra full-size explorer #%{public}u -> background",
                                             sd->toplevelId);
                             }
                         } else {
-                            self->backgroundLayers_.insert(sd->toplevelId);
+                            self->EnsureToplevelLocked(sd->toplevelId).isBackground = true;
                             OH_LOG_INFO(LOG_APP, "[MW] extra full-size explorer #%{public}u (no title) -> background",
                                         sd->toplevelId);
                         }
                     }
                 }
                 // 每次子窗口 commit 都标记 root dirty (包括 resize; 新 root 刚设置也生效)
-                if (self->desktopRootToplevelId_ > 0)
-                    self->toplevelDirty_[self->desktopRootToplevelId_] = true;
+                self->MarkDesktopRootDirtyLocked();
             }
             if (moveRendererTo)
                 PluginManager::GetInstance()->MoveRendererToToplevel(moveRendererFrom, moveRendererTo);
@@ -925,8 +918,9 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                             }
                         }
                     }
-                    // Desktop 模式: 存 layer, 在 TakeToplevelFrame 中合成 (不污染 toplevelPixels_)
+                    // Desktop 模式: 存 layer, 在 TakeToplevelFrame 中合成 (不进入 per-toplevel 帧缓冲)
                     std::lock_guard<std::mutex> lk(self->toplevelMutex_);
+                    const auto* pst = self->FindToplevelLocked(parentId);
                     SubsurfaceLayer layer;
                     layer.surface = surfRes;  // 用 subsurface 自己的 surface 做 key
                     layer.surfaceKey = sd->surfaceKey;
@@ -940,17 +934,17 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                      *     local_x = surface->window.rect.left - toplevel->window.rect.left
                      *             = 正常屏幕坐标 - (-32000) = 正常坐标 + 32000
                      * compositor 收到偏了 32000 的 subsurface offset,
-                     * 再用 toplevelX_ (compositor 位置) 累加 → 菜单跑出屏幕。
+                     * 再用 x/y (compositor 位置) 累加 → 菜单跑出屏幕。
                      * 补偿: 检测 offset > 16000 时减去 32000 还原真实偏移。
                      */
-                    if (self->toplevelMinimized_.count(parentId)) {
+                    if (pst && pst->minimized) {
                         if (sx > 16000) sx -= 32000;
                         if (sy > 16000) sy -= 32000;
                     }
                     /*
                      * Wine 和 compositor 有两套坐标系:
-                     * - toplevelWineX_/Y_: Wine 认为的窗口位置 (首次 commit 后不变)
-                     * - toplevelX_/Y_:     compositor 管理的桌面位置 (move grab 后会变)
+                     * - wineX/wineY: Wine 认为的窗口位置 (首次 commit 后不变)
+                     * - x/y:         compositor 管理的桌面位置 (move grab 后会变)
                      *
                      * 窗口内菜单: subsurface offset 是相对于窗口内部的 → 跟 compositor 位置
                      * 外部菜单 (如任务栏右击): subsurface offset 是 Wine 虚拟屏幕坐标
@@ -958,12 +952,12 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                      *
                      * 判断方法: offset 是否在窗口内容范围内
                      */
-                    int wineX = (self->toplevelWineX_.count(parentId) ? self->toplevelWineX_[parentId] : 0);
-                    int wineY = (self->toplevelWineY_.count(parentId) ? self->toplevelWineY_[parentId] : 0);
-                    int compX = self->toplevelX_[parentId];
-                    int compY = self->toplevelY_[parentId];
-                    int compW = self->toplevelW_[parentId];
-                    int compH = self->toplevelH_[parentId];
+                    int wineX = pst ? pst->wineX : 0;
+                    int wineY = pst ? pst->wineY : 0;
+                    int compX = pst ? pst->x : 0;
+                    int compY = pst ? pst->y : 0;
+                    int compW = pst ? pst->w : 0;
+                    int compH = pst ? pst->h : 0;
                     bool insideWin = (sx >= 0 && sx < compW && sy >= 0 && sy < compH);
                     layer.isExternal = !insideWin;
                     layer.localX = sx;
@@ -1002,7 +996,7 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                         layer.pixels = std::move(sd->pixels);
                         self->subsurfaceLayers_.push_back(std::move(layer));
                     }
-                    self->toplevelDirty_[self->desktopRootToplevelId_] = true;
+                    self->MarkDesktopRootDirtyLocked();
                     OH_LOG_INFO(LOG_APP, "[MW-SUBSURF] stored layer %{public}dx%{public}d at (%{public}d,%{public}d) parent=#%{public}u",
                                 layer.w, layer.h, layer.x, layer.y, parentId);
                 } else {
@@ -1084,7 +1078,8 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                                 }
                             }
                             if (popupId > 0) {
-                                auto& buf = self->toplevelPixels_[popupId];
+                                auto& pbuf = self->EnsureToplevelLocked(popupId);
+                                auto& buf = pbuf.pixels;
                                 if (cropX == 0 && cropY == 0 && dispW == sd->w && dispH == sd->h) {
                                     // 无裁剪: 像素双缓冲轮换 (同 desktop layer 做法)
                                     auto reusablePixels = std::move(buf);
@@ -1099,10 +1094,10 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                                                     static_cast<size_t>(dispW) * 4);
                                     }
                                 }
-                                self->toplevelW_[popupId] = dispW;
-                                self->toplevelH_[popupId] = dispH;
-                                self->toplevelDirty_[popupId] = true;
-                                self->toplevelShmFormat_[popupId] = shmFormat;
+                                pbuf.w = dispW;
+                                pbuf.h = dispH;
+                                pbuf.dirty = true;
+                                pbuf.shmFormat = shmFormat;
                             }
                         }
                         if (popupId == 0) {
@@ -1176,10 +1171,11 @@ void WaylandServer::ResolveSubsurfaceLayerPositionLocked(
     y = layer.y;
     if (layer.isExternal) return;
 
-    const auto xIt = toplevelX_.find(layer.parentToplevel);
-    const auto yIt = toplevelY_.find(layer.parentToplevel);
-    if (xIt != toplevelX_.end()) x = xIt->second + layer.localX;
-    if (yIt != toplevelY_.end()) y = yIt->second + layer.localY;
+    const auto it = toplevels_.find(layer.parentToplevel);
+    if (it != toplevels_.end() && it->second.hasPosition) {
+        x = it->second.x + layer.localX;
+        y = it->second.y + layer.localY;
+    }
 }
 
 bool WaylandServer::GetZeroCopyLayerInfo(uint64_t surfaceKey, uint32_t rendererToplevelId,
@@ -1238,8 +1234,10 @@ bool WaylandServer::GetZeroCopyLayerInfo(uint64_t surfaceKey, uint32_t rendererT
         if (rendererToplevelId != desktopRootToplevelId_ ||
             (sd->toplevelId != desktopRootToplevelId_ && !IsToplevelVisibleLocked(sd->toplevelId)))
             return false;
-        info.x = toplevelX_[sd->toplevelId];
-        info.y = toplevelY_[sd->toplevelId];
+        if (const auto* st = FindToplevelLocked(sd->toplevelId)) {
+            info.x = st->x;
+            info.y = st->y;
+        }
         info.desktopCoordinates = true;
         return info.width > 0 && info.height > 0;
     }
@@ -1254,8 +1252,7 @@ void WaylandServer::SetSurfaceZeroCopy(uint64_t surfaceKey, bool enabled)
         zeroCopySurfaceKeys_.insert(surfaceKey);
     else
         zeroCopySurfaceKeys_.erase(surfaceKey);
-    if (desktopRootToplevelId_ > 0)
-        toplevelDirty_[desktopRootToplevelId_] = true;
+    MarkDesktopRootDirtyLocked();
     desktopCompositionSignature_ = 0;
 }
 
@@ -1279,8 +1276,10 @@ int WaylandServer::GetZeroCopyOccluders(uint64_t surfaceKey, uint32_t rendererTo
     const int layerR = info.x + info.width;
     const int layerB = info.y + info.height;
     // 遮挡矩形同时裁剪到 root 帧范围内, 保证渲染器换算的纹理 UV 不越界
-    const int rootW = toplevelW_[desktopRootToplevelId_];
-    const int rootH = toplevelH_[desktopRootToplevelId_];
+    const auto* rootSt = FindToplevelLocked(desktopRootToplevelId_);
+    if (!rootSt) return 0;  // root 尚无状态 → 无遮挡概念 (旧实现同样返回 0 个矩形)
+    const int rootW = rootSt->w;
+    const int rootH = rootSt->h;
     int count = 0;
     auto pushRect = [&](int x, int y, int w, int h) {
         if (count >= maxOut || w <= 0 || h <= 0) return;
@@ -1305,7 +1304,9 @@ int WaylandServer::GetZeroCopyOccluders(uint64_t surfaceKey, uint32_t rendererTo
     for (auto zit = zbegin; zit != toplevelZOrder_.end() && count < maxOut; ++zit) {
         const uint32_t cid = *zit;
         if (!IsToplevelVisibleLocked(cid)) continue;
-        pushRect(toplevelX_[cid], toplevelY_[cid], toplevelW_[cid], toplevelH_[cid]);
+        const auto* cst = FindToplevelLocked(cid);
+        if (!cst) continue;
+        pushRect(cst->x, cst->y, cst->w, cst->h);
     }
 
     // popup subsurface 层 (菜单等) 在 CPU 合成中画在所有 toplevel 之后,
@@ -1384,20 +1385,20 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
     // 因为 Wine 不会在子窗口变化时重新提交桌面 surface，
     // 所以必须手动把子窗口像素覆盖到桌面帧上。
     if (desktopMode_ && id == desktopRootToplevelId_) {
-        auto rit = toplevelPixels_.find(id);
-        if (rit == toplevelPixels_.end()) return false;
+        auto* rst = FindToplevelLocked(id);
+        if (!rst || !HasFrame(*rst)) return false;
+        if (!rst->dirty) return false;
 
-        auto dit = toplevelDirty_.find(id);
-        if (dit == toplevelDirty_.end() || !dit->second) return false;
-
-        int rootW = toplevelW_[id];
-        int rootH = toplevelH_[id];
+        int rootW = rst->w;
+        int rootH = rst->h;
 
         // 快速路径: 无子窗口且无 subsurface 层 → 零拷贝直接输出 root pixels
         // 节省每帧 3.7MB 的 vector 分配+拷贝 (1280×725×4 × 60fps ≈ 222MB/s)
         bool hasChildren = false;
         for (uint32_t cid : toplevelZOrder_) {
-            if (cid != id && toplevelPixels_.count(cid)) {
+            if (cid == id) continue;
+            const auto* cst = FindToplevelLocked(cid);
+            if (cst && HasFrame(*cst)) {
                 hasChildren = true;
                 break;
             }
@@ -1405,10 +1406,10 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
         if (!hasChildren && subsurfaceLayers_.empty()) {
             // 拷贝而非 move: 子窗口后续 commit 会设 dirty=true 但不填充 root pixels,
             // move 后 root pixels 为空 → 下次合成时越界 SIGSEGV
-            out = rit->second;
+            out = rst->pixels;
             w = rootW;
             h = rootH;
-            toplevelDirty_[id] = false;
+            rst->dirty = false;
             return true;
         }
 
@@ -1430,10 +1431,12 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
             const bool visible = IsToplevelVisibleLocked(childId);
             mixSignature(visible ? 1 : 0);
             if (!visible) continue;
-            mixSignature(static_cast<uint32_t>(toplevelX_[childId]));
-            mixSignature(static_cast<uint32_t>(toplevelY_[childId]));
-            mixSignature(static_cast<uint32_t>(toplevelW_[childId]));
-            mixSignature(static_cast<uint32_t>(toplevelH_[childId]));
+            const auto* cst = FindToplevelLocked(childId);
+            if (!cst) continue;
+            mixSignature(static_cast<uint32_t>(cst->x));
+            mixSignature(static_cast<uint32_t>(cst->y));
+            mixSignature(static_cast<uint32_t>(cst->w));
+            mixSignature(static_cast<uint32_t>(cst->h));
         }
         for (const auto& layer : subsurfaceLayers_) {
             int layerX = 0, layerY = 0;
@@ -1456,7 +1459,7 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
             desktopOutputRootFrameSerial_ != desktopRootFrameSerial_ ||
             desktopCompositionSignature_ != compositionSignature;
         if (rebuildBase) {
-            out = rit->second;
+            out = rst->pixels;
             desktopOutputInitialized_ = true;
             desktopOutputRootFrameSerial_ = desktopRootFrameSerial_;
             desktopCompositionSignature_ = compositionSignature;
@@ -1469,12 +1472,13 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
         // #1 需合成到 root 之上以显示桌面背景, 不因同尺寸跳过。
         for (uint32_t childId : toplevelZOrder_) {
             if (!IsToplevelVisibleLocked(childId)) continue;
-            int cw = toplevelW_[childId], ch = toplevelH_[childId];
-            auto& childPx = toplevelPixels_[childId];
-            int childW = toplevelW_[childId];
-            int childH = toplevelH_[childId];
-            int posX = toplevelX_[childId];
-            int posY = toplevelY_[childId];
+            auto* cst = FindToplevelLocked(childId);
+            if (!cst) continue;
+            auto& childPx = cst->pixels;
+            int childW = cst->w;
+            int childH = cst->h;
+            int posX = cst->x;
+            int posY = cst->y;
             // 计算子窗口在 root framebuffer 中的可见区域
             int dstX = (posX > 0) ? posX : 0;
             int dstY = (posY > 0) ? posY : 0;
@@ -1487,8 +1491,7 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
             if (copyW <= 0 || copyH <= 0) continue;
             // WL_SHM_FORMAT_ARGB8888=0: layered/shaped (异型) 窗口, 有意义 alpha,
             // 需按预乘 over 混合 (wl_shm alpha 格式均为预乘), 否则透明区域显示黑块
-            const bool childArgb =
-                (toplevelShmFormat_.count(childId) && toplevelShmFormat_[childId] == 0);
+            const bool childArgb = (cst->shmFormat == 0);
             for (int y = 0; y < copyH; y++) {
                 auto* srcRow = &childPx[(srcY + y) * childW * 4];
                 auto* dstRow = &composited[(dstY + y) * rootW * 4];
@@ -1606,18 +1609,19 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
                       elapsedUs(takeStarted, outputMoved));
         w = rootW;
         h = rootH;
-        toplevelDirty_[id] = false;
+        rst->dirty = false;
         OH_LOG_INFO(LOG_APP, "[MW-TAKE] root #%{public}u %{public}dx%{public}d children=%{public}zu subsurfaces=%{public}zu",
                     id, w, h, toplevelZOrder_.size(), subsurfaceLayers_.size());
         return true;
     }
 
-    auto it = toplevelDirty_.find(id);
-    if (it == toplevelDirty_.end() || !it->second) return false;
-    out = toplevelPixels_[id];
-    w = toplevelW_[id];
-    h = toplevelH_[id];
-    toplevelDirty_[id] = false;
+    auto* st = FindToplevelLocked(id);
+    if (!st || !st->dirty) return false;
+    // 拷贝而非 move: 同 root 快速路径的 SIGSEGV 教训
+    out = st->pixels;
+    w = st->w;
+    h = st->h;
+    st->dirty = false;
     OH_LOG_INFO(LOG_APP, "[MW-TAKE] toplevel #%{public}u frame %{public}dx%{public}d px=%{public}zu", id, w, h, out.size());
     return true;
 }
@@ -1629,8 +1633,8 @@ void WaylandServer::RaiseToplevel(uint32_t id) {
     toplevelZOrder_.push_back(id);
     // 任务栏始终在顶层: 底部对齐 + 高度 <100 的 toplevel
     uint32_t taskbarId = 0;
-    for (auto& [tid, th] : toplevelH_) {
-        if (th > 0 && th < 100 && toplevelY_[tid] + th >= outputH_) {
+    for (auto& [tid, st] : toplevels_) {
+        if (st.h > 0 && st.h < 100 && st.y + st.h >= outputH_) {
             taskbarId = tid;
             break;
         }
@@ -1640,7 +1644,7 @@ void WaylandServer::RaiseToplevel(uint32_t id) {
         if (tit != toplevelZOrder_.end()) toplevelZOrder_.erase(tit);
         toplevelZOrder_.push_back(taskbarId);
     }
-    toplevelDirty_[desktopRootToplevelId_] = true;
+    MarkDesktopRootDirtyLocked();
 }
 
 // -- 交互式窗口移动 (xdg_toplevel.move) --
@@ -1678,11 +1682,11 @@ bool WaylandServer::ProcessMoveGrabMotion(wl_fixed_t wx, wl_fixed_t wy) {
     std::lock_guard<std::mutex> lk(toplevelMutex_);
     uint32_t tl = moveGrabToplevelId_;
     if (tl == 0) return false;
-    auto xit = toplevelX_.find(tl);
-    if (xit == toplevelX_.end()) return false;
+    auto* st = FindToplevelLocked(tl);
+    if (!st || !st->hasPosition) return false;
 
-    int32_t rx = wl_fixed_to_int(wx) + xit->second;
-    int32_t ry = wl_fixed_to_int(wy) + toplevelY_[tl];
+    int32_t rx = wl_fixed_to_int(wx) + st->x;
+    int32_t ry = wl_fixed_to_int(wy) + st->y;
 
     if (moveGrabLastWineX_ == 0 && moveGrabLastWineY_ == 0) {
         // 首帧: 只记录位置, 不移动
@@ -1694,13 +1698,13 @@ bool WaylandServer::ProcessMoveGrabMotion(wl_fixed_t wx, wl_fixed_t wy) {
     int32_t dx = rx - moveGrabLastWineX_;
     int32_t dy = ry - moveGrabLastWineY_;
     if (dx != 0 || dy != 0) {
-        xit->second += dx;
-        toplevelY_[tl] += dy;
+        st->x += dx;
+        st->y += dy;
         moveGrabLastWineX_ = rx;
         moveGrabLastWineY_ = ry;
-        toplevelDirty_[desktopRootToplevelId_] = true;
+        MarkDesktopRootDirtyLocked();
         OH_LOG_INFO(LOG_APP, "[MW-MOVE] grab move tl=%{public}u dx=%{public}d dy=%{public}d newPos=(%{public}d,%{public}d)",
-                    tl, dx, dy, xit->second, toplevelY_[tl]);
+                    tl, dx, dy, st->x, st->y);
     }
     return true;
 }
@@ -1722,7 +1726,8 @@ void WaylandServer::PromotePendingDesktopRoot() {
     {
         std::lock_guard<std::mutex> lk(toplevelMutex_);
         id = pendingDesktopRootToplevelId_;
-        if (id == 0 || toplevelPixels_.find(id) == toplevelPixels_.end()) {
+        auto* pst = id ? FindToplevelLocked(id) : nullptr;
+        if (id == 0 || !pst || !HasFrame(*pst)) {
             if (id != 0) {
                 OH_LOG_WARN(LOG_APP, "[MW] pending desktop root #%{public}u has no pixels, skip", id);
                 pendingDesktopRootToplevelId_ = 0;
@@ -1733,12 +1738,14 @@ void WaylandServer::PromotePendingDesktopRoot() {
             pendingDesktopRootToplevelId_ = 0;
             return;
         }
-        if (desktopRootToplevelId_ > 0)
-            backgroundLayers_.insert(desktopRootToplevelId_);
-        backgroundLayers_.erase(id);
+        if (desktopRootToplevelId_ > 0) {
+            if (auto* oldRoot = FindToplevelLocked(desktopRootToplevelId_))
+                oldRoot->isBackground = true;
+        }
+        pst->isBackground = false;
         desktopRootToplevelId_ = id;
         pendingDesktopRootToplevelId_ = 0;
-        toplevelDirty_[id] = true;
+        pst->dirty = true;
     }
 
     OH_LOG_INFO(LOG_APP, "[MW] pending desktop root promoted: #%{public}u", id);
@@ -1766,18 +1773,7 @@ void WaylandServer::OnToplevelDestroyed(uint32_t toplevelId) {
     std::vector<uint32_t> cascadePopups;
     {
         std::lock_guard<std::mutex> lk(toplevelMutex_);
-        toplevelPixels_.erase(toplevelId);
-        toplevelW_.erase(toplevelId);
-        toplevelH_.erase(toplevelId);
-        toplevelX_.erase(toplevelId);
-        toplevelY_.erase(toplevelId);
-        toplevelWineX_.erase(toplevelId);
-        toplevelWineY_.erase(toplevelId);
-        toplevelDirty_.erase(toplevelId);
-        toplevelShmFormat_.erase(toplevelId);
-        toplevelMasks_.erase(toplevelId);
-        toplevelMinimized_.erase(toplevelId);
-        backgroundLayers_.erase(toplevelId);
+        toplevels_.erase(toplevelId);
         if (pendingDesktopRootToplevelId_ == toplevelId)
             pendingDesktopRootToplevelId_ = 0;
         // root 本体被销毁 (xs_destroy / 客户端断连路径同样走到这里): 复位, 等待下一个 explorer
@@ -1802,9 +1798,7 @@ void WaylandServer::OnToplevelDestroyed(uint32_t toplevelId) {
             if (rec.parentToplevel == toplevelId) cascadePopups.push_back(pid);
         }
         for (uint32_t pid : cascadePopups) RemovePopupDataLocked(pid);
-        if (IsDesktopMode() && toplevelId != desktopRootToplevelId_) {
-            if (desktopRootToplevelId_ > 0) toplevelDirty_[desktopRootToplevelId_] = true;
-        }
+        MarkDesktopRootDirtyLocked();  // 非 desktop / root 已复位时 root=0, 自然 no-op
         // 对称清理 surface 映射 (popup 路径在 RemovePopupDataLocked 已清, toplevel 路径此前缺失):
         // xs_destroy 时 wl_surface 可能仍存活, 不清会让 GetSurfaceForToplevel(死 id) 命中
         // 已无 toplevel 身份的 surface。嵌套锁序同 RemovePopupDataLocked。
@@ -1827,11 +1821,7 @@ void WaylandServer::RemovePopupDataLocked(uint32_t popupId) {
     if (it == popups_.end()) return;
     popupBySurfaceKey_.erase(it->second.surfaceKey);
     popups_.erase(it);
-    toplevelPixels_.erase(popupId);
-    toplevelW_.erase(popupId);
-    toplevelH_.erase(popupId);
-    toplevelDirty_.erase(popupId);
-    toplevelShmFormat_.erase(popupId);
+    toplevels_.erase(popupId);
     {
         std::lock_guard<std::mutex> lk(toplevelSurfaceMutex_);
         toplevelSurfaceMap_.erase(popupId);
@@ -1857,12 +1847,12 @@ uint32_t WaylandServer::RemovePopupBySurfaceKeyLocked(uint64_t surfaceKey, uint3
 
 bool WaylandServer::TakeWindowMask(uint32_t id, int& w, int& h, std::vector<uint8_t>& out) {
     std::lock_guard<std::mutex> lk(toplevelMutex_);
-    auto it = toplevelMasks_.find(id);
-    if (it == toplevelMasks_.end() || !it->second.dirty) return false;
-    w = it->second.w;
-    h = it->second.h;
-    out = it->second.bits;
-    it->second.dirty = false;
+    auto* st = FindToplevelLocked(id);
+    if (!st || !st->mask.dirty) return false;
+    w = st->mask.w;
+    h = st->mask.h;
+    out = st->mask.bits;
+    st->mask.dirty = false;
     return true;
 }
 
@@ -1914,11 +1904,9 @@ uint32_t WaylandServer::FindToplevelAt(int x, int y) {
     for (auto it = toplevelZOrder_.rbegin(); it != toplevelZOrder_.rend(); ++it) {
         uint32_t id = *it;
         if (!IsToplevelVisibleLocked(id)) continue;
-        int tx = toplevelX_[id];
-        int ty = toplevelY_[id];
-        int tw = toplevelW_[id];
-        int th = toplevelH_[id];
-        if (x >= tx && x < tx + tw && y >= ty && y < ty + th) {
+        const auto* st = FindToplevelLocked(id);
+        if (!st) continue;
+        if (x >= st->x && x < st->x + st->w && y >= st->y && y < st->y + st->h) {
             wl_resource* surf = GetSurfaceForToplevel(id);
             if (surf) {
                 auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(surf));
@@ -1934,20 +1922,18 @@ bool WaylandServer::IsToplevelVisibleLocked(uint32_t id) {
     // 渲染和输入共用的可见性条件 (调用方须已持有 toplevelMutex_):
     // 非 root + 非背景层 + 有像素 + 非最小化
     if (id == desktopRootToplevelId_) return false;
-    if (backgroundLayers_.count(id)) return false;
-    if (toplevelPixels_.find(id) == toplevelPixels_.end()) return false;
-    if (toplevelMinimized_.count(id)) return false;
-    return true;
+    const auto* st = FindToplevelLocked(id);
+    if (!st) return false;
+    return !st->isBackground && HasFrame(*st) && !st->minimized;
 }
 
 int32_t WaylandServer::GetWorkAreaHeight() {
     std::lock_guard<std::mutex> lk(toplevelMutex_);
     int32_t h = outputH_;
     // 找底部对齐的小高度 toplevel (任务栏), 工作区 = 任务栏上方空间
-    for (auto& [id, y] : toplevelY_) {
-        if (toplevelH_.count(id) && toplevelH_[id] > 0 && toplevelH_[id] < 100 &&
-            y + toplevelH_[id] >= outputH_ && y < h) {
-            h = y;
+    for (auto& [id, st] : toplevels_) {
+        if (st.h > 0 && st.h < 100 && st.y + st.h >= outputH_ && st.y < h) {
+            h = st.y;
         }
     }
     return h;
@@ -1955,18 +1941,17 @@ int32_t WaylandServer::GetWorkAreaHeight() {
 
 void WaylandServer::SetToplevelMinimized(uint32_t id) {
     std::lock_guard<std::mutex> lk(toplevelMutex_);
-    toplevelMinimized_[id] = true;
-    if (desktopRootToplevelId_ > 0)
-        toplevelDirty_[desktopRootToplevelId_] = true;
+    // 保留 operator[] 建档语义: pre-commit 最小化同样记录状态
+    EnsureToplevelLocked(id).minimized = true;
+    MarkDesktopRootDirtyLocked();
 }
 
 void WaylandServer::SetToplevelRestored(uint32_t id) {
     // 清除 minimized 状态
     {
         std::lock_guard<std::mutex> lk(toplevelMutex_);
-        toplevelMinimized_.erase(id);
-        if (desktopRootToplevelId_ > 0)
-        toplevelDirty_[desktopRootToplevelId_] = true;
+        if (auto* st = FindToplevelLocked(id)) st->minimized = false;
+        MarkDesktopRootDirtyLocked();
     }
     // 发 configure 通知 Wine (如果 toplevel resource 存在)
     wl_resource* tl = nullptr;
@@ -1997,17 +1982,16 @@ void WaylandServer::SetToplevelMaximized(uint32_t id) {
     OH_LOG_INFO(LOG_APP, "[MW] SetToplevelMaximized id=%{public}u desktop=%{public}s",
                 id, IsDesktopMode() ? "yes" : "no");
     std::lock_guard<std::mutex> lk(toplevelMutex_);
-    if (toplevelX_.count(id)) {
-        toplevelX_[id] = 0;
-        toplevelY_[id] = 0;
+    if (auto* st = FindToplevelLocked(id); st && st->hasPosition) {
+        st->x = 0;
+        st->y = 0;
     }
-    if (desktopRootToplevelId_ > 0)
-        toplevelDirty_[desktopRootToplevelId_] = true;
+    MarkDesktopRootDirtyLocked();
 }
 
 void WaylandServer::ForceToplevelRedraw(uint32_t id) {
     std::lock_guard<std::mutex> lk(toplevelMutex_);
-    toplevelDirty_[id] = true;
+    if (auto* st = FindToplevelLocked(id)) st->dirty = true;
 }
 
 void WaylandServer::NotifyToplevelResize(uint32_t toplevelId, int32_t w, int32_t h) {
