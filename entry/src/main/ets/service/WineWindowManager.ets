@@ -529,7 +529,11 @@ export class WineWindowManager {
             toplevelId, alreadyInFlight ? 'yes' : 'no', JSON.stringify(preDim));
           e.everMaximized = true;
           hilog.info(DOMAIN, TAG, '[MW] → win.maximize() START #%{public}d', toplevelId);
-          win.maximize().then(() => {
+          // EXIT_IMMERSIVE: maximize() 不带参数时默认 ENTER_IMMERSIVE (进入全屏
+          // 沉浸式), 窗口会铺满整个屏幕、盖住系统 dock/任务栏 (hover 底部才浮现),
+          // 不符合桌面语义 (最大化应只占工作区)。EXIT_IMMERSIVE 让 OHOS 最大化到
+          // 避让任务栏后的工作区, 随后 onSurfaceChanged 把实际尺寸回传 Wine。
+          win.maximize(window.MaximizePresentation.EXIT_IMMERSIVE).then(() => {
             hilog.info(DOMAIN, TAG, '[MW] win.maximize() OK #%{public}d', toplevelId);
           }).catch((e: Error) => {
             hilog.warn(DOMAIN, TAG, '[MW] maximize #%{public}d failed: %{public}s', toplevelId, JSON.stringify(e));
