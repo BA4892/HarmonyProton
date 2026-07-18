@@ -652,6 +652,7 @@ void EglRenderer::RenderLoop() {
     glGenBuffers(1, &vbo_);
     glBindBuffer(GL_ARRAY_BUFFER, vbo_);
     glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+    glGenBuffers(1, &occluderVbo_);
 
     // 4. 纹理 (初始空)
     glGenTextures(1, &texture_);
@@ -933,6 +934,58 @@ void EglRenderer::RenderLoop() {
             glUniform1i(glGetUniformLocation(zeroCopyProgram_, "uTex"), 0);
             glUniformMatrix4fv(zeroCopyTransformLocation_, 1, GL_FALSE, zeroCopyTransform_);
             glDrawArrays(GL_TRIANGLES, 0, 6);
+
+            // Desktop 模式 z-order 修复: GL overlay 不参与 CPU 合成的层序,
+            // 画完 overlay 后, 把压在 GL 窗口之上的区域 (z-order 更高的窗口/
+            // 任务栏/popup 菜单) 用桌面纹理对应子区域重绘回来。桌面纹理里这些
+            // 区域已是 CPU 合成好的最终像素, 重绘即恢复正确层序。
+            // 本 context 从不开启 GL_BLEND: 重绘就是不透明覆盖, 无需混合,
+            // 也不要加混合 —— 目标就是盖住 overlay, 不是与它融合。
+            // PC 模式不需要: GL 内容画在各自窗口内, 层序由系统合成器保证。
+            if (ws->IsDesktopMode() && rendered) {
+                // 32 上限: 遮挡源 = 上层窗口 + popup 层, 真实场景个位数;
+                // 超出的部分不重绘 (该区域 GL 内容会透出), 比动态扩容简单且够用
+                static constexpr int kMaxOccluders = 32;
+                WaylandServer::ZeroCopyOccluderRect occluders[kMaxOccluders];
+                const int occluderCount = ws->GetZeroCopyOccluders(
+                    zeroCopySurfaceKey_, useToplevel, occluders, kMaxOccluders);
+                if (occluderCount > 0) {
+                    glUseProgram(program_);
+                    glBindTexture(GL_TEXTURE_2D, texture_);
+                    glUniform1i(glGetUniformLocation(program_, "uTex"), 0);
+                    glUniform1f(glGetUniformLocation(program_, "uForceOpaque"),
+                                frameArgb_ ? 0.0f : 1.0f);
+                    glBindBuffer(GL_ARRAY_BUFFER, occluderVbo_);
+                    glEnableVertexAttribArray(0);
+                    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 16, (void*)0);
+                    glEnableVertexAttribArray(1);
+                    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 16, (void*)8);
+                    for (int i = 0; i < occluderCount; ++i) {
+                        const auto& r = occluders[i];
+                        // 桌面帧像素坐标 → surface 视口 (与 layer 同一 letterbox 映射)
+                        const int vx = vpX_ + static_cast<int>(
+                            (static_cast<int64_t>(r.x) * vpW_) / frameW_);
+                        const int vy = vpY_ + static_cast<int>(
+                            (static_cast<int64_t>(frameH_ - r.y - r.h) * vpH_) / frameH_);
+                        const int vw = std::max(1, static_cast<int>(
+                            (static_cast<int64_t>(r.w) * vpW_) / frameW_));
+                        const int vh = std::max(1, static_cast<int>(
+                            (static_cast<int64_t>(r.h) * vpH_) / frameH_));
+                        // 桌面纹理 UV 子区域 (纹理第 0 行 = 帧顶部, v 无需翻转)
+                        const float u0 = static_cast<float>(r.x) / frameW_;
+                        const float u1 = static_cast<float>(r.x + r.w) / frameW_;
+                        const float v0 = static_cast<float>(r.y) / frameH_;
+                        const float v1 = static_cast<float>(r.y + r.h) / frameH_;
+                        const float rquad[] = {
+                            -1,-1, u0,v1,   1,-1, u1,v1,   -1,1, u0,v0,
+                             1,-1, u1,v1,    1,1, u1,v0,   -1,1, u0,v0,
+                        };
+                        glBufferData(GL_ARRAY_BUFFER, sizeof(rquad), rquad, GL_DYNAMIC_DRAW);
+                        glViewport(vx, vy, vw, vh);
+                        glDrawArrays(GL_TRIANGLES, 0, 6);
+                    }
+                }
+            }
         }
 
         const uint64_t swapStartedUs = PerfNowUs();

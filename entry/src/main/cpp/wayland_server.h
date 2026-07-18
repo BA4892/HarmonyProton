@@ -27,6 +27,13 @@ public:
         bool desktopCoordinates = false;
     };
 
+    // Desktop 模式 zero-copy 遮挡矩形 (桌面坐标):
+    // GL overlay 是在桌面合成帧之上单独绘制的, 不参与 CPU 合成的 z-order,
+    // 需要把 "压在 GL 窗口之上的内容" 以矩形列表交给渲染器重绘回去
+    struct ZeroCopyOccluderRect {
+        int x = 0, y = 0, w = 0, h = 0;
+    };
+
     using StateCb = std::function<void(const char*)>;
     // toplevel 回调: (toplevelId, eventName, jsonData)
     // events: "created", "destroyed", "title", "configure"
@@ -46,6 +53,12 @@ public:
     bool GetZeroCopyLayerInfo(uint64_t surfaceKey, uint32_t rendererToplevelId,
                               ZeroCopyLayerInfo& info);
     void SetSurfaceZeroCopy(uint64_t surfaceKey, bool enabled);
+    // Desktop 模式: 计算覆盖在 zero-copy layer 之上的内容矩形 (桌面坐标),
+    // = z-order 中排在 GL 窗口之后的可见 toplevel + 可见 popup subsurface 层,
+    // 各自与 layer 矩形求交。返回矩形个数 (最多写 maxOut 个)。
+    // 非桌面模式 / layer 不可用时返回 0 (调用方保持 overlay 原样绘制)。
+    int GetZeroCopyOccluders(uint64_t surfaceKey, uint32_t rendererToplevelId,
+                             ZeroCopyOccluderRect* out, int maxOut);
 
     // 状态回调 (首帧到达 -> 通知 ArkTS)
     void SetStateCallback(StateCb cb) { stateCb_ = std::move(cb); }

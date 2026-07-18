@@ -59,6 +59,7 @@ private:
     GLuint texture_ = 0;
     GLuint program_ = 0;
     GLuint vbo_ = 0;
+    GLuint occluderVbo_ = 0;  // desktop 模式 zero-copy 遮挡区域重绘 (动态 UV quad)
     OH_NativeImage* zeroCopyImage_ = nullptr;
     OHNativeWindow* zeroCopyProducerWindow_ = nullptr;
     GLuint zeroCopyTexture_ = 0;

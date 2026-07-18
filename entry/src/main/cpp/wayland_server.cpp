@@ -1255,6 +1255,73 @@ void WaylandServer::SetSurfaceZeroCopy(uint64_t surfaceKey, bool enabled)
     desktopCompositionSignature_ = 0;
 }
 
+int WaylandServer::GetZeroCopyOccluders(uint64_t surfaceKey, uint32_t rendererToplevelId,
+                                        ZeroCopyOccluderRect* out, int maxOut)
+{
+    if (!out || maxOut <= 0) return 0;
+    // 先复用 layer 查询 (内部自行加锁): 非桌面模式 / layer 不可用时无遮挡概念,
+    // 返回 0 让渲染器保持 overlay 原样绘制 (与修复前行为一致的安全回退)
+    ZeroCopyLayerInfo info;
+    if (!GetZeroCopyLayerInfo(surfaceKey, rendererToplevelId, info) ||
+        !info.desktopCoordinates)
+        return 0;
+
+    // 注意: info 来自上一次加锁, 与本锁期间的 z-order/几何可能差一拍,
+    // 最坏情况是一帧的遮挡矩形偏差, 可接受; 不要为此合并成一次加锁去
+    // 复制 GetZeroCopyLayerInfo 的整套判定逻辑
+    std::lock_guard<std::mutex> lk(toplevelMutex_);
+    const int layerL = info.x;
+    const int layerT = info.y;
+    const int layerR = info.x + info.width;
+    const int layerB = info.y + info.height;
+    // 遮挡矩形同时裁剪到 root 帧范围内, 保证渲染器换算的纹理 UV 不越界
+    const int rootW = toplevelW_[desktopRootToplevelId_];
+    const int rootH = toplevelH_[desktopRootToplevelId_];
+    int count = 0;
+    auto pushRect = [&](int x, int y, int w, int h) {
+        if (count >= maxOut || w <= 0 || h <= 0) return;
+        const int l = std::max({x, layerL, 0});
+        const int t = std::max({y, layerT, 0});
+        const int r = std::min({x + w, layerR, rootW});
+        const int b = std::min({y + h, layerB, rootH});
+        if (r <= l || b <= t) return;
+        out[count++] = {l, t, r - l, b - t};
+    };
+
+    // toplevelZOrder_ 尾部 = 最顶层 (RaiseToplevel push_back, 任务栏强制最后)。
+    // GL 窗口之后的可见 toplevel 都压在它上面; GL 直接挂在 root 上时所有窗口都在其上。
+    // 找不到 z 位时 zbegin 保持 begin(): 保守按最底层处理 —— 宁可被挡一帧,
+    // 不可错误置顶 (置顶就是本函数要修的那个 bug)
+    auto zbegin = toplevelZOrder_.begin();
+    if (info.parentToplevel != desktopRootToplevelId_) {
+        const auto zit = std::find(toplevelZOrder_.begin(), toplevelZOrder_.end(),
+                                   info.parentToplevel);
+        if (zit != toplevelZOrder_.end()) zbegin = std::next(zit);
+    }
+    for (auto zit = zbegin; zit != toplevelZOrder_.end() && count < maxOut; ++zit) {
+        const uint32_t cid = *zit;
+        if (!IsToplevelVisible(cid)) continue;
+        pushRect(toplevelX_[cid], toplevelY_[cid], toplevelW_[cid], toplevelH_[cid]);
+    }
+
+    // popup subsurface 层 (菜单等) 在 CPU 合成中画在所有 toplevel 之后,
+    // 与 TakeToplevelFrame 合成循环保持同一可见性条件 —— 因此对 GL overlay
+    // 而言它们同样是遮挡者, 无论其父窗口 z 位高低。
+    // 遮挡按层完整矩形算: damage 只是增量更新优化, 层在屏幕上占据的是整个矩形
+    for (const auto& layer : subsurfaceLayers_) {
+        if (count >= maxOut) break;
+        if (zeroCopySurfaceKeys_.count(layer.surfaceKey)) continue;
+        if (layer.parentToplevel != desktopRootToplevelId_ &&
+            !IsToplevelVisible(layer.parentToplevel)) continue;
+        int x = 0, y = 0;
+        ResolveSubsurfaceLayerPositionLocked(layer, x, y);
+        pushRect(x, y,
+                 layer.vpDstW > 0 ? layer.vpDstW : layer.w,
+                 layer.vpDstH > 0 ? layer.vpDstH : layer.h);
+    }
+    return count;
+}
+
 bool WaylandServer::TakeFrame(std::vector<uint8_t>& out, int& w, int& h) {
     std::lock_guard<std::mutex> lk(mutex_);
     if (!dirty_) return false;
@@ -1806,6 +1873,12 @@ uint32_t WaylandServer::FindToplevelAt(int x, int y) {
      *   (直接发给父 toplevel 会导致 Wine 收到错误的窗口相对坐标)
      */
     for (auto it = subsurfaceLayers_.rbegin(); it != subsurfaceLayers_.rend(); ++it) {
+        // zero-copy GL 层不参与置顶命中: 渲染时它按窗口 z 位被遮挡重绘压回
+        // (egl_renderer occluder redraw), 命中同样交给下方 toplevel z-order 循环,
+        // 否则被挡住的 GL 窗口仍会收到点击。
+        // 查的是实时集合: GPU→CPU fallback 时 key 被移出 zeroCopySurfaceKeys_,
+        // 该层自动恢复为普通 subsurface (CPU 合成置顶, 命中也置顶), 无需特判
+        if (zeroCopySurfaceKeys_.count(it->surfaceKey)) continue;
         if (it->parentToplevel != rootId && !IsToplevelVisible(it->parentToplevel)) continue;
         if (it->w <= 0 || it->h <= 0) continue;
         int layerX = 0, layerY = 0;
