@@ -82,12 +82,10 @@ public:
     void SetToplevelMinimized(uint32_t id);
     void SetToplevelRestored(uint32_t id);
     void SetToplevelMaximized(uint32_t id);
-    void SetToplevelUnmaximized(uint32_t id);
     // surface 尺寸变化后强制下次渲染循环取帧重绘 (避免旧 viewport 贴新 surface 导致黑边)
     void ForceToplevelRedraw(uint32_t id);
     // 旧接口 → 转发到新方法
     void NotifyWindowRestored(uint32_t id) { SetToplevelRestored(id); }
-    void NotifyToplevelMaximized(uint32_t id) { SetToplevelMaximized(id); }
     void NotifyToplevelMinimized(uint32_t id, int32_t, int32_t) { SetToplevelMinimized(id); }
     // 鸿蒙侧 surface 尺寸变化时调用: 发 configure 通知 Wine 用新尺寸渲染
     void NotifyToplevelResize(uint32_t toplevelId, int32_t w, int32_t h);
@@ -221,8 +219,6 @@ private:
     std::unordered_map<uint32_t, WindowMask> toplevelMasks_;    // ARGB 窗口剪影掩码
     std::unordered_map<uint32_t, int> toplevelLastReportedW_, toplevelLastReportedH_;
     std::unordered_map<uint32_t, bool> toplevelMinimized_;  // 桌面合成时跳过最小化窗口
-    std::unordered_map<uint32_t, int> toplevelMinimizeCompX_, toplevelMinimizeCompY_;  // 最小化时的 compositor 位置
-    std::unordered_map<uint32_t, uint64_t> toplevelMinimizeTimeMs_;  // 最小化时间戳
 
     StateCb stateCb_;
     ToplevelCb toplevelCb_;

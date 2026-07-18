@@ -719,9 +719,6 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
             if (sd->minimized && contentW > 200 && contentH > 50) {
                 sd->minimized = false;
                 self->toplevelMinimized_.erase(sd->toplevelId);
-                self->toplevelMinimizeCompX_.erase(sd->toplevelId);
-                self->toplevelMinimizeCompY_.erase(sd->toplevelId);
-                self->toplevelMinimizeTimeMs_.erase(sd->toplevelId);
                 OH_LOG_INFO(LOG_APP, "[MW] auto-restore tl=%{public}u size=%{public}dx%{public}d",
                             sd->toplevelId, contentW, contentH);
             }
@@ -1773,9 +1770,6 @@ void WaylandServer::OnToplevelDestroyed(uint32_t toplevelId) {
         toplevelShmFormat_.erase(toplevelId);
         toplevelMasks_.erase(toplevelId);
         toplevelMinimized_.erase(toplevelId);
-        toplevelMinimizeCompX_.erase(toplevelId);
-        toplevelMinimizeCompY_.erase(toplevelId);
-        toplevelMinimizeTimeMs_.erase(toplevelId);
         backgroundLayers_.erase(toplevelId);
         if (pendingDesktopRootToplevelId_ == toplevelId)
             pendingDesktopRootToplevelId_ = 0;
@@ -1933,12 +1927,6 @@ int32_t WaylandServer::GetWorkAreaHeight() {
 void WaylandServer::SetToplevelMinimized(uint32_t id) {
     std::lock_guard<std::mutex> lk(toplevelMutex_);
     toplevelMinimized_[id] = true;
-    if (toplevelX_.count(id)) {
-        toplevelMinimizeCompX_[id] = toplevelX_[id];
-        toplevelMinimizeCompY_[id] = toplevelY_[id];
-    }
-    toplevelMinimizeTimeMs_[id] = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
     if (desktopRootToplevelId_ > 0)
         toplevelDirty_[desktopRootToplevelId_] = true;
 }
@@ -1948,9 +1936,6 @@ void WaylandServer::SetToplevelRestored(uint32_t id) {
     {
         std::lock_guard<std::mutex> lk(toplevelMutex_);
         toplevelMinimized_.erase(id);
-        toplevelMinimizeCompX_.erase(id);
-        toplevelMinimizeCompY_.erase(id);
-        toplevelMinimizeTimeMs_.erase(id);
         if (desktopRootToplevelId_ > 0)
         toplevelDirty_[desktopRootToplevelId_] = true;
     }
@@ -1987,14 +1972,6 @@ void WaylandServer::SetToplevelMaximized(uint32_t id) {
         toplevelX_[id] = 0;
         toplevelY_[id] = 0;
     }
-    if (desktopRootToplevelId_ > 0)
-        toplevelDirty_[desktopRootToplevelId_] = true;
-}
-
-void WaylandServer::SetToplevelUnmaximized(uint32_t id) {
-    OH_LOG_INFO(LOG_APP, "[MW] SetToplevelUnmaximized id=%{public}u desktop=%{public}s",
-                id, IsDesktopMode() ? "yes" : "no");
-    // 仅清除标记, 位置/尺寸由 surface_commit 恢复
     if (desktopRootToplevelId_ > 0)
         toplevelDirty_[desktopRootToplevelId_] = true;
 }
