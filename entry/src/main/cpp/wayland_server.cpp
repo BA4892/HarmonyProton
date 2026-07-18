@@ -637,6 +637,23 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                 contentOffX = sd->geoX;
                 contentOffY = sd->geoY;
             }
+            /*
+             * 防御: geometry 与 buffer 是异步更新的 — 显示模式切换瞬间
+             * Wine 会先发新 geometry (如 1400x920) 而 buffer 仍是旧尺寸
+             * (如 896x640, GL readback 管线尚未跟上)。content 必须 clamp
+             * 进 buffer 实际范围, 否则 copyTight 越界读 shm → SIGSEGV
+             * (实测: 游戏退出恢复桌面分辨率的瞬间崩溃于 memcpy)。
+             * 该帧显示为部分内容, 下一帧 buffer 跟上后自然恢复。
+             */
+            if (contentOffX < 0 || contentOffX >= w) contentOffX = 0;
+            if (contentOffY < 0 || contentOffY >= h) contentOffY = 0;
+            if (contentOffX + contentW > w) contentW = w - contentOffX;
+            if (contentOffY + contentH > h) contentH = h - contentOffY;
+            if (contentW <= 0 || contentH <= 0) {
+                contentOffX = contentOffY = 0;
+                contentW = w;
+                contentH = h;
+            }
             OH_LOG_INFO(LOG_APP, "[MW-GEO] using window_geometry: src=%{public}dx%{public}d geo=(%{public}d,%{public}d %{public}dx%{public}d) screen=(%{public}d,%{public}d) vpSrc=(%{public}d,%{public}d %{public}dx%{public}d) vpDst=%{public}dx%{public}d",
                         w, h, contentOffX, contentOffY, contentW, contentH, screenX, screenY,
                         sd->vpSrcX, sd->vpSrcY, sd->vpSrcW, sd->vpSrcH, sd->vpDstW, sd->vpDstH);
