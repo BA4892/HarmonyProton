@@ -292,10 +292,23 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
     // 坐标转换
     wl_fixed_t wx, wy;
     auto* ws = WaylandServer::GetInstance();
+    // Desktop 模式: 按桌面坐标解析精确输入目标 (菜单 subsurface 有自己的
+    // wl_surface, 必须 enter 它并用层相对坐标 — 经父窗口 surface 的越界
+    // 坐标会被 winewayland 的 motion clamp 夹回窗口内, 菜单伸出部分点不中)
+    wl_resource* targetSurf = nullptr;
     if (ws->IsDesktopMode() && tl != ws->GetDesktopRootToplevelId()) {
         CoordTransform(px, py, ws->GetDesktopRootToplevelId(), &wx, &wy);
-        wx -= wl_fixed_from_int(ws->GetToplevelX(tl));
-        wy -= wl_fixed_from_int(ws->GetToplevelY(tl));
+        WaylandServer::InputTarget target;
+        if (ws->FindInputTargetAt(wl_fixed_to_int(wx), wl_fixed_to_int(wy), target)) {
+            tl = target.toplevelId;
+            targetSurf = target.surface;
+            wx -= wl_fixed_from_int(target.originX);
+            wy -= wl_fixed_from_int(target.originY);
+        } else {
+            // 目标 surface 不可用: 退回旧路径 (父窗口相对坐标)
+            wx -= wl_fixed_from_int(ws->GetToplevelX(tl));
+            wy -= wl_fixed_from_int(ws->GetToplevelY(tl));
+        }
     } else {
         CoordTransform(px, py, tl, &wx, &wy);
     }
@@ -310,9 +323,15 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
         case ACT_PRESS: {
             // 每次都发 enter: Wine 在两次点击间需要新的 pointer focus
             {
-                wl_resource* surf = ws->GetSurfaceForToplevel(tl);
+                wl_resource* surf = targetSurf ? targetSurf : ws->GetSurfaceForToplevel(tl);
                 if (surf) {
-                    if (pointerFocusedToplevel_.load() != 0 && pointerFocusedToplevel_.load() != tl)
+                    // desktop: surface 级比较 (菜单层与父窗口同 toplevelId);
+                    // 其余模式保持 toplevel 级比较 (一窗一 surface, 语义等价)
+                    wl_resource* focused = pointerFocusedSurface_.load();
+                    const bool needLeave = targetSurf
+                        ? (focused != nullptr && focused != surf)
+                        : (pointerFocusedToplevel_.load() != 0 && pointerFocusedToplevel_.load() != tl);
+                    if (needLeave)
                         Enqueue(InputEvent::PTR_LEAVE, 0, nullptr, 0, 0, 0, 0);
                     Enqueue(InputEvent::PTR_ENTER, tl, surf, wx, wy, 0, 0);
                 }
@@ -374,11 +393,20 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
             OH_LOG_INFO(LOG_APP, "[Input] MOVE tl=%{public}u wine=(%{public}.0f,%{public}.0f) needsEnter=%{public}d focusedTl=%{public}u ptrRes=%{public}d",
                         tl, wl_fixed_to_double(wx), wl_fixed_to_double(wy),
                         NeedsPointerEnter(), pointerFocusedToplevel_.load(), seat->HasPointerResource());
-            if (NeedsPointerEnter() || pointerFocusedToplevel_.load() != tl) {
-                wl_resource* surf = WaylandServer::GetInstance()->GetSurfaceForToplevel(tl);
+            // desktop: surface 级焦点判定 — 鼠标从窗口移入菜单层 (同 toplevelId,
+            // 不同 surface) 时必须重新 enter, 否则 motion 继续发给窗口 surface
+            const bool needEnter = targetSurf
+                ? (NeedsPointerEnter() || pointerFocusedSurface_.load() != targetSurf)
+                : (NeedsPointerEnter() || pointerFocusedToplevel_.load() != tl);
+            if (needEnter) {
+                wl_resource* surf = targetSurf ? targetSurf : ws->GetSurfaceForToplevel(tl);
                 OH_LOG_INFO(LOG_APP, "[Input] MOVE-ENTER try surf=%{public}p for tl=%{public}u", surf, tl);
                 if (surf) {
-                    if (pointerFocusedToplevel_.load() != 0 && pointerFocusedToplevel_.load() != tl)
+                    wl_resource* focused = pointerFocusedSurface_.load();
+                    const bool needLeave = targetSurf
+                        ? (focused != nullptr && focused != surf)
+                        : (pointerFocusedToplevel_.load() != 0 && pointerFocusedToplevel_.load() != tl);
+                    if (needLeave)
                         Enqueue(InputEvent::PTR_LEAVE, 0, nullptr, 0, 0, 0, 0);
                     Enqueue(InputEvent::PTR_ENTER, tl, surf, wx, wy, 0, 0);
                     OH_LOG_INFO(LOG_APP, "[Input] MOVE-ENTER enqueued OK");
@@ -615,10 +643,11 @@ void InputManager::InjectPointerEnter(uint32_t tl, wl_resource* surface, wl_fixe
         return;
     }
 
-    // 防御: surface 可能在入队后到 flush 前被 Wine 销毁
-    // 通过 toplevelSurfaceMap_ 验证 surface 仍然有效
-    if (!WaylandServer::GetInstance()->GetSurfaceForToplevel(tl)) {
-        OH_LOG_WARN(LOG_APP, "[Input] InjectEnter DROP tl=%{public}u: surface no longer in map (destroyed before flush?)", tl);
+    // 防御: surface 可能在入队后到 flush 前被 Wine 销毁。
+    // 用 surfaceResources_ 精确验证该 surface 本体仍存活 —
+    // 菜单 subsurface 不在 toplevelSurfaceMap_ 里, 不能用 tl 的映射代替
+    if (!WaylandServer::GetInstance()->IsSurfaceAlive(surface)) {
+        OH_LOG_WARN(LOG_APP, "[Input] InjectEnter DROP tl=%{public}u surf=%{public}p: surface destroyed before flush", tl, surface);
         gDropEnter.fetch_add(1); MaybeReportDrops();
         return;
     }
@@ -700,8 +729,17 @@ void InputManager::InjectPointerAxis(int axis, wl_fixed_t value) {
 
 void InputManager::InjectPointerLeave() {
     auto ptrs = Seat::GetInstance()->GetAllPointerResources();
-    wl_resource* surf = pointerFocusedSurface_;
+    wl_resource* surf = pointerFocusedSurface_.load();
     if (ptrs.empty() || !surf) return;
+    // 防御: surface 可能在 leave 入队后到 flush 前被销毁 — 对已复用的
+    // 对象 id 发 leave 会让 client 报 "invalid object ... leave(uo)" 并断开
+    if (!WaylandServer::GetInstance()->IsSurfaceAlive(surf)) {
+        OH_LOG_WARN(LOG_APP, "[Input] InjectLeave SKIP surf=%{public}p: destroyed before flush", surf);
+        pointerFocusedToplevel_ = 0;
+        pointerFocusedSurface_ = nullptr;
+        pointerEnterSerial_ = 0;
+        return;
+    }
     uint32_t s = serial_++;
     struct wl_client* surfClient = wl_resource_get_client(surf);
     for (auto* ptr : ptrs) {
@@ -787,6 +825,14 @@ void InputManager::InjectKeyboardLeave() {
     auto kbds = Seat::GetInstance()->GetAllKeyboardResources();
     wl_resource* surf = keyboardFocusedSurface_;
     if (kbds.empty() || !keyboardEntered_.load() || !surf) return;
+    // 防御: 同 InjectPointerLeave — 对已销毁/复用的对象 id 发 leave 会断开 client
+    if (!WaylandServer::GetInstance()->IsSurfaceAlive(surf)) {
+        OH_LOG_WARN(LOG_APP, "[Input] InjectKbdLeave SKIP surf=%{public}p: destroyed before flush", surf);
+        keyboardEntered_ = false;
+        keyboardFocusedToplevel_ = 0;
+        keyboardFocusedSurface_ = nullptr;
+        return;
+    }
     uint32_t s = serial_++;
     struct wl_client* surfClient = wl_resource_get_client(surf);
     for (auto* kbd : kbds) {

@@ -222,17 +222,19 @@ void WaylandServer::compositor_create_surface(wl_client* client, wl_resource* co
             }
             self->MarkDesktopRootDirtyLocked();
         }
+        // 无条件重置输入焦点: 任何 surface (含 desktop 菜单 subsurface) 销毁时
+        // 都可能是当前 pointer/keyboard 焦点 — 焦点悬垂后下一次 leave 会引用
+        // 已复用的对象 id, client 报 "invalid object ... leave(uo)" 并断开。
+        // 内部按指针比较, 非焦点 surface 是 no-op
+        InputManager::GetInstance()->OnSurfaceDestroyed(r);
         if (sd && sd->hasToplevel) {
             {
                 std::lock_guard<std::mutex> lk(self->toplevelSurfaceMutex_);
                 self->toplevelSurfaceMap_.erase(sd->toplevelId);
             }
-            InputManager::GetInstance()->OnSurfaceDestroyed(r);
             self->FireToplevelEvent(sd->toplevelId, "destroyed");
         }
         if (removedPopup) {
-            // 防止 pointer focus 悬在已销毁的 popup surface 上 (协议错误会断开 Wine)
-            InputManager::GetInstance()->OnSurfaceDestroyed(r);
             char json[64];
             snprintf(json, sizeof(json), "{\"popupId\":%u}", removedPopup);
             self->FireToplevelEvent(popupParent, "popup_hide", json);
@@ -1878,15 +1880,24 @@ void WaylandServer::SendToplevelClose(uint32_t toplevelId) {
 }
 
 uint32_t WaylandServer::FindToplevelAt(int x, int y) {
+    InputTarget target;
+    FindInputTargetAt(x, y, target);
+    return target.toplevelId;
+}
+
+bool WaylandServer::FindInputTargetAt(int x, int y, InputTarget& out) {
     std::lock_guard<std::mutex> lk(toplevelMutex_);
     uint32_t rootId = desktopRootToplevelId_;
 
     /*
      * subsurface 命中优先于 toplevel (渲染在上层):
-     * - 内部菜单: 在父窗口范围内 → 走父 toplevel
-     * - 外部菜单 (isExternal): 任务栏弹出等, 超出父窗口范围
-     *   → 走 root, Wine explorer 内部处理点击分发
-     *   (直接发给父 toplevel 会导致 Wine 收到错误的窗口相对坐标)
+     * - 内部菜单: enter 层自己的 wl_surface, 坐标以层原点为基。
+     *   层可伸出父窗口边界 — 若改走父窗口 surface, 伸出部分产生越界的
+     *   窗口相对坐标, 会被 winewayland 的 motion clamp
+     *   (wayland_pointer.c "bring them within bounds") 夹回窗口内,
+     *   菜单项永远收不到该区域的点击
+     * - 外部菜单 (isExternal): 任务栏弹出等, subsurface offset 是 Wine
+     *   虚拟屏幕坐标 → 走 root, Wine explorer 内部处理点击分发
      */
     for (auto it = subsurfaceLayers_.rbegin(); it != subsurfaceLayers_.rend(); ++it) {
         // zero-copy GL 层不参与置顶命中: 渲染时它按窗口 z 位被遮挡重绘压回
@@ -1900,7 +1911,18 @@ uint32_t WaylandServer::FindToplevelAt(int x, int y) {
         int layerX = 0, layerY = 0;
         ResolveSubsurfaceLayerPositionLocked(*it, layerX, layerY);
         if (x >= layerX && x < layerX + it->w && y >= layerY && y < layerY + it->h) {
-            return it->isExternal ? rootId : it->parentToplevel;
+            if (it->isExternal) {
+                out.toplevelId = rootId;
+                out.surface = GetSurfaceForToplevel(rootId);
+                out.originX = 0;
+                out.originY = 0;
+            } else {
+                out.toplevelId = it->parentToplevel;
+                out.surface = it->surface;
+                out.originX = layerX;
+                out.originY = layerY;
+            }
+            return out.surface != nullptr;
         }
     }
 
@@ -1915,10 +1937,28 @@ uint32_t WaylandServer::FindToplevelAt(int x, int y) {
                 auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(surf));
                 if (sd && sd->inputRegionEmpty) continue;
             }
-            return id;
+            out.toplevelId = id;
+            out.surface = surf;
+            out.originX = st->x;
+            out.originY = st->y;
+            return out.surface != nullptr;
         }
     }
-    return rootId;
+
+    out.toplevelId = rootId;
+    out.surface = GetSurfaceForToplevel(rootId);
+    out.originX = 0;
+    out.originY = 0;
+    return out.surface != nullptr;
+}
+
+bool WaylandServer::IsSurfaceAlive(wl_resource* surface) {
+    if (!surface) return false;
+    std::lock_guard<std::mutex> lk(toplevelMutex_);
+    for (auto& [key, res] : surfaceResources_) {
+        if (res == surface) return true;
+    }
+    return false;
 }
 
 bool WaylandServer::IsToplevelVisibleLocked(uint32_t id) {

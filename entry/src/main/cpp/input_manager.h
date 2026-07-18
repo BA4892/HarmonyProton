@@ -131,7 +131,10 @@ private:
 
     // pointer focus
     std::atomic<uint32_t> pointerFocusedToplevel_{0};
-    wl_resource* pointerFocusedSurface_ = nullptr;
+    // atomic: NAPI 线程 (SendPointerEvent) 用它做 surface 级 enter/leave 判定,
+    // Wayland 线程 (Inject*) 写入 — desktop 模式菜单层与父窗口同 toplevelId,
+    // 仅比较 toplevelId 无法察觉焦点需要在两个 surface 间切换
+    std::atomic<wl_resource*> pointerFocusedSurface_{nullptr};
     std::atomic<uint32_t> pointerEnterSerial_{0};
     std::atomic<uint32_t> serial_{1};
 

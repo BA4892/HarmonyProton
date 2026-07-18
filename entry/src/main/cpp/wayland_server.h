@@ -96,6 +96,20 @@ public:
     int32_t GetWorkAreaHeight();  // 排除任务栏后的可用高度
     // Desktop 模式: 在合成帧中查找包含 (x,y) 的 toplevel (用于输入路由)
     uint32_t FindToplevelAt(int x, int y);
+    // Desktop 模式: (x,y) 处的精确输入目标。
+    // 命中 subsurface 菜单层时返回层自己的 wl_surface + 层桌面原点 —
+    // 菜单可伸出父窗口边界, 事件必须 enter 菜单 surface 并用菜单相对坐标,
+    // 否则经父窗口 surface 的越界坐标会被 winewayland 的 motion clamp
+    // (wayland_pointer.c "bring them within bounds") 夹回窗口内, 菜单收不到。
+    // 未命中层时回退 toplevel / desktop root。返回 false = surface 不可用。
+    struct InputTarget {
+        uint32_t toplevelId = 0;         // 事件归属 toplevel (raise/键盘焦点)
+        wl_resource* surface = nullptr;  // pointer enter 目标
+        int originX = 0, originY = 0;    // surface 的桌面原点 (输入坐标换算基)
+    };
+    bool FindInputTargetAt(int x, int y, InputTarget& out);
+    // surface 指针是否仍存活 (输入注入前的防御校验, 遍历 surfaceResources_)
+    bool IsSurfaceAlive(wl_resource* surface);
     // Desktop 模式: 提到 Z-order 最顶层
     void RaiseToplevel(uint32_t id);
     // 读取 toplevel 桌面坐标 (InputManager 坐标转换用)
