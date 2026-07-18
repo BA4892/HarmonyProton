@@ -78,6 +78,27 @@ struct WineWindow {
         // 为后续 ARGB 异型窗口方案 (子窗口路线) 预留
         .backgroundColor('#00000000')
         .focusable(false)
+        // -- 滚轮事件 (轴事件, API 17+) --
+        // 轴事件不冒泡 (AxisEvent.propagation 需显式激活), 挂外层 Stack 收不到,
+        // 必须挂在命中链顶端的 XComponent 上
+        .onAxisEvent((event?: AxisEvent) => {
+          if (this.toplevelId <= 0 || !event) return;
+          const px = vp2px(event.x);
+          const py = vp2px(event.y);
+          const vert = event.getVerticalAxisValue();
+          const horiz = event.getHorizontalAxisValue();
+          const step = event.scrollStep ?? 0;
+          if (vert !== 0) {
+            hilog.info(DOMAIN, 'CLICK-PIPE', '[ArkTS] SCROLL tl=%{public}d vert=%{public}d step=%{public}d px=(%{public}d,%{public}d)',
+              this.toplevelId, Math.round(vert), step, Math.round(px), Math.round(py));
+            testNapi.sendScrollEvent(this.toplevelId, 0, vert, step, px, py);
+          }
+          if (horiz !== 0) {
+            hilog.info(DOMAIN, 'CLICK-PIPE', '[ArkTS] SCROLL tl=%{public}d horiz=%{public}d step=%{public}d px=(%{public}d,%{public}d)',
+              this.toplevelId, Math.round(horiz), step, Math.round(px), Math.round(py));
+            testNapi.sendScrollEvent(this.toplevelId, 1, horiz, step, px, py);
+          }
+        })
     }
     .width('100%')
     .height('100%')
@@ -123,26 +144,6 @@ struct WineWindow {
       hilog.info(DOMAIN, 'KBD-PIPE', '[ArkTS] KEY ohos=%{public}d->evdev=%{public}d %{public}s',
         this.toplevelId, event.keyCode, evdevCode, pressed ? 'DOWN' : 'UP');
       testNapi.sendKeyEvent(this.toplevelId, evdevCode, pressed);
-    })
-
-    // -- 滚轮事件 (轴事件, API 17+) --
-    .onAxisEvent((event?: AxisEvent) => {
-      if (this.toplevelId <= 0 || !event) return;
-      const px = vp2px(event.x);
-      const py = vp2px(event.y);
-      const vert = event.getVerticalAxisValue();
-      const horiz = event.getHorizontalAxisValue();
-      const step = event.scrollStep ?? 0;
-      if (vert !== 0) {
-        hilog.info(DOMAIN, 'CLICK-PIPE', '[ArkTS] SCROLL tl=%{public}d vert=%{public}f step=%{public}d px=(%{public}d,%{public}d)',
-          this.toplevelId, vert, step, Math.round(px), Math.round(py));
-        testNapi.sendScrollEvent(this.toplevelId, 0, vert, step, px, py);
-      }
-      if (horiz !== 0) {
-        hilog.info(DOMAIN, 'CLICK-PIPE', '[ArkTS] SCROLL tl=%{public}d horiz=%{public}f step=%{public}d px=(%{public}d,%{public}d)',
-          this.toplevelId, horiz, step, Math.round(px), Math.round(py));
-        testNapi.sendScrollEvent(this.toplevelId, 1, horiz, step, px, py);
-      }
     })
 
     .onAreaChange((_o: Area, n: Area) => {

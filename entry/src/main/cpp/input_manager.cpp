@@ -721,12 +721,14 @@ void InputManager::InjectPointerAxis(int axis, wl_fixed_t value) {
     uint32_t t = NowMs();
     for (auto* ptr : ptrs) {
         if (ptr) {
-            // winewayland.drv 只处理 axis_discrete/axis_value120, axis 是空函数
-            wl_pointer_send_axis(ptr, t, axisEnum, value);
+            // winewayland.drv 只处理 axis_discrete/axis_value120, axis 是空函数。
+            // 协议规定 discrete 在配对 axis 之前; steps 直接比较 wl_fixed 原值,
+            // 避免 wl_fixed_to_int 截断把 |值|<1 的正向滚动 (触控板细步) 误判成反向
             if (wl_resource_get_version(ptr) >= WL_POINTER_AXIS_DISCRETE_SINCE_VERSION) {
-                int32_t steps = (wl_fixed_to_int(value) > 0) ? 1 : -1;
+                int32_t steps = (value > 0) ? 1 : -1;
                 wl_pointer_send_axis_discrete(ptr, axisEnum, steps);
             }
+            wl_pointer_send_axis(ptr, t, axisEnum, value);
             wl_pointer_send_frame(ptr);
             nSent++;
         }

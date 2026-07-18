@@ -66,6 +66,22 @@ struct WinePopup {
         // 背景透明: ARGB popup (圆角菜单/异型 tooltip) 需要透过 per-pixel alpha
         .backgroundColor('#00000000')
         .focusable(false)
+        // -- 滚轮事件 (菜单滚动条等) --
+        // 轴事件不冒泡, 必须挂在命中链顶端的 XComponent 上 (同 WineWindow)
+        .onAxisEvent((event?: AxisEvent) => {
+          if (this.popupId <= 0 || !event) return;
+          const px = vp2px(event.x);
+          const py = vp2px(event.y);
+          const vert = event.getVerticalAxisValue();
+          const horiz = event.getHorizontalAxisValue();
+          const step = event.scrollStep ?? 0;
+          if (vert !== 0) {
+            testNapi.sendScrollEvent(this.popupId, 0, vert, step, px, py);
+          }
+          if (horiz !== 0) {
+            testNapi.sendScrollEvent(this.popupId, 1, horiz, step, px, py);
+          }
+        })
     }
     .width('100%')
     .height('100%')
@@ -83,22 +99,6 @@ struct WinePopup {
           this.popupId, event.action, Math.round(px), Math.round(py), btn);
       }
       testNapi.sendPointerEvent(this.popupId, event.action, px, py, btn);
-    })
-
-    // -- 滚轮事件 (菜单滚动条等) --
-    .onAxisEvent((event?: AxisEvent) => {
-      if (this.popupId <= 0 || !event) return;
-      const px = vp2px(event.x);
-      const py = vp2px(event.y);
-      const vert = event.getVerticalAxisValue();
-      const horiz = event.getHorizontalAxisValue();
-      const step = event.scrollStep ?? 0;
-      if (vert !== 0) {
-        testNapi.sendScrollEvent(this.popupId, 0, vert, step, px, py);
-      }
-      if (horiz !== 0) {
-        testNapi.sendScrollEvent(this.popupId, 1, horiz, step, px, py);
-      }
     })
   }
 }
