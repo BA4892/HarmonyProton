@@ -68,6 +68,8 @@ struct DesktopPage {
   private twoFingerAccumY: number = 0;
   private twoFingerAccumX: number = 0;
   private static readonly SCROLL_STEP_PX: number = 40; // 物理像素/滚动步, winewayland.drv 只处理 discrete
+  // 物理鼠标右键: Press 时捕获目标 tl, Release 发给同一 tl (按下捕获语义)
+  private rightBtnTl: number = 0;
 
   build() {
     Stack() {
@@ -266,6 +268,39 @@ struct DesktopPage {
           }
         } catch (e) {
           hilog.error(DOMAIN, 'CLICK-PIPE', '[ArkTS] TOUCH handler exception: %{public}s', JSON.stringify(e));
+        }
+      })
+
+      // ── 物理鼠标右键直通 ──
+      // 仅处理右键 Press/Release: 左键由 onTouch 手势状态机处理 (OHOS 把鼠标
+      // 左键合成 touch 事件, 此处再处理会双发); 右键不合成 touch 事件, 没有
+      // 本处理器则物理鼠标右键完全丢失 (触屏长按合成右键不受影响)。
+      .onMouse((ev: MouseEvent) => {
+        try {
+          if (ev.button !== MouseButton.Right) return;
+          if (ev.action !== MouseAction.Press && ev.action !== MouseAction.Release) return;
+          const px = Math.round(vp2px(ev.x));
+          const py = Math.round(vp2px(ev.y));
+          const btnRight = mapMouseButton(2);
+          if (ev.action === MouseAction.Press) {
+            const tl: number = testNapi.findToplevelAt(px, py) as number;
+            if (tl <= 0) {
+              this.rightBtnTl = 0;
+              hilog.info(DOMAIN, 'CLICK-PIPE', '[ArkTS] MOUSE-RIGHT skipped (no toplevel at %{public}d,%{public}d)', px, py);
+              return;
+            }
+            this.rightBtnTl = tl;
+            testNapi.raiseToplevel(tl);
+            hilog.info(DOMAIN, 'CLICK-PIPE', '[ArkTS] MOUSE-RIGHT press tl=%{public}d px=(%{public}d,%{public}d)', tl, px, py);
+            testNapi.sendPointerEvent(tl, MouseAction.Press, px, py, btnRight);
+          } else {
+            if (this.rightBtnTl <= 0) return;
+            hilog.info(DOMAIN, 'CLICK-PIPE', '[ArkTS] MOUSE-RIGHT release tl=%{public}d px=(%{public}d,%{public}d)', this.rightBtnTl, px, py);
+            testNapi.sendPointerEvent(this.rightBtnTl, MouseAction.Release, px, py, btnRight);
+            this.rightBtnTl = 0;
+          }
+        } catch (e) {
+          hilog.error(DOMAIN, 'CLICK-PIPE', '[ArkTS] MOUSE handler exception: %{public}s', JSON.stringify(e));
         }
       })
 
