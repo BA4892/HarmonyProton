@@ -35,13 +35,13 @@ uint32_t GetWaylandClientPid(wl_client* client)
 // wayland_surface_config_is_compatible 对 fullscreen "任意尺寸兼容" 的注释),
 // xdg-shell 约定由 compositor 负责把 surface 放大铺满输出。
 // 该变换同时用于桌面合成 (正变换) 和输入坐标映射 (逆变换), 两处必须是同一份几何
-struct FsTransform {
+struct FullscreenTransform {
     double scale = 1.0;
     int offX = 0, offY = 0;  // 内容区在 root 帧中的原点 (黑边之后)
     int dstW = 0, dstH = 0;  // 内容区缩放后尺寸
 };
 
-bool ComputeFsTransform(int rootW, int rootH, int winW, int winH, FsTransform& t)
+bool ComputeFullscreenTransform(int rootW, int rootH, int winW, int winH, FullscreenTransform& t)
 {
     if (rootW <= 0 || rootH <= 0 || winW <= 0 || winH <= 0) return false;
     t.scale = std::min(rootW / static_cast<double>(winW), rootH / static_cast<double>(winH));
@@ -1548,18 +1548,18 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
 
         // 全屏 toplevel: z-order 中最顶层的可见全屏窗口 (同一时刻只有一个生效)。
         // 其绘制 = 整幅填黑 + 内容保比例缩放居中; 几何与 FindInputTargetAt
-        // 的输入逆映射共用 ComputeFsTransform, 两边必须是同一套参数
-        uint32_t fsId = 0;
-        FsTransform fsT;
-        bool fsOk = false;
-        int fsPosX = 0, fsPosY = 0;
+        // 的输入逆映射共用 ComputeFullscreenTransform, 两边必须是同一套参数
+        uint32_t fullscreenId = 0;
+        FullscreenTransform transform;
+        bool hasFullscreen = false;
+        int fullscreenX = 0, fullscreenY = 0;
         for (auto zit = toplevelZOrder_.rbegin(); zit != toplevelZOrder_.rend(); ++zit) {
             const auto* zst = FindToplevelLocked(*zit);
             if (!zst || !zst->fullscreen || !IsToplevelVisibleLocked(*zit)) continue;
-            fsId = *zit;
-            fsPosX = zst->x;
-            fsPosY = zst->y;
-            fsOk = ComputeFsTransform(rootW, rootH, zst->w, zst->h, fsT);
+            fullscreenId = *zit;
+            fullscreenX = zst->x;
+            fullscreenY = zst->y;
+            hasFullscreen = ComputeFullscreenTransform(rootW, rootH, zst->w, zst->h, transform);
             break;
         }
 
@@ -1632,7 +1632,7 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
             int posY = cst->y;
             // 全屏窗口: 整幅填黑 (盖住壁纸与下层窗口, 黑边也算在内),
             // 内容保比例缩放居中。z 序在它之后的窗口 (如被 pin 的任务栏) 仍画在其上
-            if (childId == fsId && fsOk) {
+            if (childId == fullscreenId && hasFullscreen) {
                 // 必须填不透明黑 (0xFF000000), 不能图省事 memset 0:
                 // 渲染 context 目前不开 GL_BLEND, alpha=0 恰好无害,
                 // 但这是一处隐式依赖 — 一旦以后给桌面纹理开混合, 黑边就会变透明
@@ -1640,7 +1640,7 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
                             composited.size() / 4, 0xFF000000u);
                 BlitScaled(composited.data(), rootW, rootH,
                            childPx.data(), childW, childW, childH,
-                           fsT.offX, fsT.offY, fsT.dstW, fsT.dstH,
+                           transform.offX, transform.offY, transform.dstW, transform.dstH,
                            cst->shmFormat == 0);
                 continue;
             }
@@ -1694,7 +1694,7 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
             if (layer.w <= 0 || layer.h <= 0) continue;
             // 全屏期间其它窗口的弹出层不绘制 (全屏窗口独占显示,
             // 与 FindInputTargetAt 的输入独占保持一致)
-            if (fsOk && layer.parentToplevel != fsId) continue;
+            if (hasFullscreen && layer.parentToplevel != fullscreenId) continue;
             int layerX = 0, layerY = 0;
             ResolveSubsurfaceLayerPositionLocked(layer, layerX, layerY);
             size_t expectSz = (size_t)layer.w * layer.h * 4;
@@ -1705,16 +1705,16 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
             }
             // 全屏窗口的层随窗口一起缩放: 相对窗口原点 → 缩放 → 加黑边偏移。
             // 不做 damage 增量 (缩放后 damage 需重算, 全屏场景通常整帧变化)
-            if (fsOk && layer.parentToplevel == fsId) {
-                const int dispW = layer.vpDstW > 0 ? std::min(layer.vpDstW, layer.w) : layer.w;
-                const int dispH = layer.vpDstH > 0 ? std::min(layer.vpDstH, layer.h) : layer.h;
-                const int dx = fsT.offX + static_cast<int>(lround((layerX - fsPosX) * fsT.scale));
-                const int dy = fsT.offY + static_cast<int>(lround((layerY - fsPosY) * fsT.scale));
-                const int dw = std::max(1, static_cast<int>(lround(dispW * fsT.scale)));
-                const int dh = std::max(1, static_cast<int>(lround(dispH * fsT.scale)));
+            if (hasFullscreen && layer.parentToplevel == fullscreenId) {
+                const int layerDispW = layer.vpDstW > 0 ? std::min(layer.vpDstW, layer.w) : layer.w;
+                const int layerDispH = layer.vpDstH > 0 ? std::min(layer.vpDstH, layer.h) : layer.h;
+                const int layerDstX = transform.offX + static_cast<int>(lround((layerX - fullscreenX) * transform.scale));
+                const int layerDstY = transform.offY + static_cast<int>(lround((layerY - fullscreenY) * transform.scale));
+                const int layerDstW = std::max(1, static_cast<int>(lround(layerDispW * transform.scale)));
+                const int layerDstH = std::max(1, static_cast<int>(lround(layerDispH * transform.scale)));
                 BlitScaled(composited.data(), rootW, rootH,
-                           layer.pixels.data(), layer.w, dispW, dispH,
-                           dx, dy, dw, dh,
+                           layer.pixels.data(), layer.w, layerDispW, layerDispH,
+                           layerDstX, layerDstY, layerDstW, layerDstH,
                            layer.shmFormat == 0 && !layer.opaque);
                 continue;
             }
@@ -2072,7 +2072,7 @@ bool WaylandServer::FindInputTargetAt(int x, int y, InputTarget& out) {
 
     /*
      * 全屏窗口独占输入: 命中判定走与渲染相同的保比例缩放几何
-     * (ComputeFsTransform, 见 TakeToplevelFrame), 只有该窗口及其
+     * (ComputeFullscreenTransform, 见 TakeToplevelFrame), 只有该窗口及其
      * subsurface 层可交互; 黑边事件归属全屏窗口并标 swallow
      * (调用方只吞 PRESS, MOVE/RELEASE 照常透传)
      */
@@ -2083,37 +2083,37 @@ bool WaylandServer::FindInputTargetAt(int x, int y, InputTarget& out) {
         for (auto zit = toplevelZOrder_.rbegin(); zit != toplevelZOrder_.rend(); ++zit) {
             const auto* zst = FindToplevelLocked(*zit);
             if (!zst || !zst->fullscreen || !IsToplevelVisibleLocked(*zit)) continue;
-            FsTransform fsT;
-            if (!ComputeFsTransform(rootW, rootH, zst->w, zst->h, fsT)) break;
-            const uint32_t fsId = *zit;
+            FullscreenTransform transform;
+            if (!ComputeFullscreenTransform(rootW, rootH, zst->w, zst->h, transform)) break;
+            const uint32_t fullscreenId = *zit;
             // 该窗口的 subsurface 层绘制在窗口内容之上, 先命中 (同一变换)
             for (auto it = subsurfaceLayers_.rbegin(); it != subsurfaceLayers_.rend(); ++it) {
                 if (zeroCopySurfaceKeys_.count(it->surfaceKey)) continue;
-                if (it->parentToplevel != fsId || it->w <= 0 || it->h <= 0) continue;
+                if (it->parentToplevel != fullscreenId || it->w <= 0 || it->h <= 0) continue;
                 int layerX = 0, layerY = 0;
                 ResolveSubsurfaceLayerPositionLocked(*it, layerX, layerY);
-                const int dispW = it->vpDstW > 0 ? std::min(it->vpDstW, it->w) : it->w;
-                const int dispH = it->vpDstH > 0 ? std::min(it->vpDstH, it->h) : it->h;
-                const int lx = fsT.offX + static_cast<int>(lround((layerX - zst->x) * fsT.scale));
-                const int ly = fsT.offY + static_cast<int>(lround((layerY - zst->y) * fsT.scale));
-                const int lw = std::max(1, static_cast<int>(lround(dispW * fsT.scale)));
-                const int lh = std::max(1, static_cast<int>(lround(dispH * fsT.scale)));
-                if (x >= lx && x < lx + lw && y >= ly && y < ly + lh) {
-                    out.toplevelId = fsId;
+                const int layerDispW = it->vpDstW > 0 ? std::min(it->vpDstW, it->w) : it->w;
+                const int layerDispH = it->vpDstH > 0 ? std::min(it->vpDstH, it->h) : it->h;
+                const int layerScrX = transform.offX + static_cast<int>(lround((layerX - zst->x) * transform.scale));
+                const int layerScrY = transform.offY + static_cast<int>(lround((layerY - zst->y) * transform.scale));
+                const int layerScrW = std::max(1, static_cast<int>(lround(layerDispW * transform.scale)));
+                const int layerScrH = std::max(1, static_cast<int>(lround(layerDispH * transform.scale)));
+                if (x >= layerScrX && x < layerScrX + layerScrW && y >= layerScrY && y < layerScrY + layerScrH) {
+                    out.toplevelId = fullscreenId;
                     out.surface = it->surface;
-                    out.originX = lx;
-                    out.originY = ly;
-                    out.scale = static_cast<float>(fsT.scale);
+                    out.originX = layerScrX;
+                    out.originY = layerScrY;
+                    out.scale = static_cast<float>(transform.scale);
                     return out.surface != nullptr;
                 }
             }
-            if (x >= fsT.offX && x < fsT.offX + fsT.dstW &&
-                y >= fsT.offY && y < fsT.offY + fsT.dstH) {
-                out.toplevelId = fsId;
-                out.surface = GetSurfaceForToplevel(fsId);
-                out.originX = fsT.offX;
-                out.originY = fsT.offY;
-                out.scale = static_cast<float>(fsT.scale);
+            if (x >= transform.offX && x < transform.offX + transform.dstW &&
+                y >= transform.offY && y < transform.offY + transform.dstH) {
+                out.toplevelId = fullscreenId;
+                out.surface = GetSurfaceForToplevel(fullscreenId);
+                out.originX = transform.offX;
+                out.originY = transform.offY;
+                out.scale = static_cast<float>(transform.scale);
                 return out.surface != nullptr;
             }
             // 黑边: 事件归属仍是全屏窗口 (返回其 surface/原点/缩放),
@@ -2121,11 +2121,11 @@ bool WaylandServer::FindInputTargetAt(int x, int y, InputTarget& out) {
             // MOVE/RELEASE 必须照常透传: 坐标越界由 winewayland 的 motion
             // clamp 夹回窗口边缘; 若连 RELEASE 一起吞, 内容区按下拖到黑边
             // 松手会丢失 release, pressedButtons_ 按键状态永久卡死
-            out.toplevelId = fsId;
-            out.surface = GetSurfaceForToplevel(fsId);
-            out.originX = fsT.offX;
-            out.originY = fsT.offY;
-            out.scale = static_cast<float>(fsT.scale);
+            out.toplevelId = fullscreenId;
+            out.surface = GetSurfaceForToplevel(fullscreenId);
+            out.originX = transform.offX;
+            out.originY = transform.offY;
+            out.scale = static_cast<float>(transform.scale);
             out.swallow = true;
             return out.surface != nullptr;
         }
