@@ -1563,6 +1563,35 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
             break;
         }
 
+        // 覆盖检测: 存在不透明 subsurface 层覆盖全屏窗口整个内容区时,
+        // children 循环里父帧的缩放可跳过 — 层循环随后会不透明地画满同一矩形,
+        // 父帧没有任何像素可见 (游戏场景: 父帧是过渡期陈旧帧, 实时内容全在层上)
+        bool fullscreenContentCovered = false;
+        if (hasFullscreen) {
+            const auto* fst = FindToplevelLocked(fullscreenId);
+            const int winW = fst ? fst->w : 0;
+            const int winH = fst ? fst->h : 0;
+            for (const auto& layer : subsurfaceLayers_) {
+                if (layer.parentToplevel != fullscreenId) continue;
+                if (zeroCopySurfaceKeys_.count(layer.surfaceKey)) continue;
+                if (layer.w <= 0 || layer.h <= 0) continue;
+                // 半透明层不算覆盖: 透明处会露出父帧, 父帧必须照常缩放
+                if (layer.shmFormat == 0 && !layer.opaque) continue;
+                int layerX = 0, layerY = 0;
+                ResolveSubsurfaceLayerPositionLocked(layer, layerX, layerY);
+                // 与层缩放分支同一套 rel/disp 算法, 保证判定与绘制几何一致
+                const int dispW = layer.vpDstW > 0 ? std::min(layer.vpDstW, layer.w) : layer.w;
+                const int dispH = layer.vpDstH > 0 ? std::min(layer.vpDstH, layer.h) : layer.h;
+                const int relX = layerX - fullscreenX;
+                const int relY = layerY - fullscreenY;
+                if (relX <= 0 && relY <= 0 &&
+                    relX + dispW >= winW && relY + dispH >= winH) {
+                    fullscreenContentCovered = true;
+                    break;
+                }
+            }
+        }
+
         // Rebuild the clean desktop base only when its pixels or composition
         // structure changed. Animated child windows overwrite their complete
         // rectangles, so re-copying the unchanged 4 MB root every frame is
@@ -1630,18 +1659,40 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
             int childH = cst->h;
             int posX = cst->x;
             int posY = cst->y;
-            // 全屏窗口: 整幅填黑 (盖住壁纸与下层窗口, 黑边也算在内),
-            // 内容保比例缩放居中。z 序在它之后的窗口 (如被 pin 的任务栏) 仍画在其上
+            // 全屏窗口: 填黑 + 内容保比例缩放居中。
+            // z 序在它之后的窗口 (如被 pin 的任务栏) 仍画在其上
             if (childId == fullscreenId && hasFullscreen) {
                 // 必须填不透明黑 (0xFF000000), 不能图省事 memset 0:
                 // 渲染 context 目前不开 GL_BLEND, alpha=0 恰好无害,
                 // 但这是一处隐式依赖 — 一旦以后给桌面纹理开混合, 黑边就会变透明
-                std::fill_n(reinterpret_cast<uint32_t*>(composited.data()),
-                            composited.size() / 4, 0xFF000000u);
-                BlitScaled(composited.data(), rootW, rootH,
-                           childPx.data(), childW, childW, childH,
-                           transform.offX, transform.offY, transform.dstW, transform.dstH,
-                           cst->shmFormat == 0);
+                auto fillBlackRect = [&](int fx, int fy, int fw, int fh) {
+                    if (fw <= 0 || fh <= 0) return;
+                    for (int row = fy; row < fy + fh; ++row)
+                        std::fill_n(reinterpret_cast<uint32_t*>(composited.data()) +
+                                    static_cast<size_t>(row) * rootW + fx, fw, 0xFF000000u);
+                };
+                // 内容区随后必然被不透明写满时 (窗口自身 XRGB, 或被不透明层覆盖),
+                // 只需填黑边 (~0.6MB); ARGB 窗口可能有透明洞, 退回整幅填充 (5MB)
+                const bool contentOpaque = (cst->shmFormat != 0) || fullscreenContentCovered;
+                if (contentOpaque) {
+                    fillBlackRect(0, 0, rootW, transform.offY);
+                    fillBlackRect(0, transform.offY + transform.dstH, rootW,
+                                  rootH - transform.offY - transform.dstH);
+                    fillBlackRect(0, transform.offY, transform.offX, transform.dstH);
+                    fillBlackRect(transform.offX + transform.dstW, transform.offY,
+                                  rootW - transform.offX - transform.dstW, transform.dstH);
+                } else {
+                    std::fill_n(reinterpret_cast<uint32_t*>(composited.data()),
+                                composited.size() / 4, 0xFF000000u);
+                }
+                // 内容区被不透明层完全覆盖时跳过父帧缩放:
+                // 层循环随后会不透明地画满同一矩形, 父帧无像素可见
+                if (!fullscreenContentCovered) {
+                    BlitScaled(composited.data(), rootW, rootH,
+                               childPx.data(), childW, childW, childH,
+                               transform.offX, transform.offY, transform.dstW, transform.dstH,
+                               cst->shmFormat == 0);
+                }
                 continue;
             }
             // 计算子窗口在 root framebuffer 中的可见区域
