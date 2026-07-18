@@ -835,11 +835,23 @@ void EglRenderer::RenderLoop() {
             firstFrameLogged = true;
         }
 
-        // 无新帧且已渲染过首帧 → 跳过 GPU 绘制, 静态桌面节省 GPU 功耗
+        // 无新帧且已渲染过首帧 → 跳过 GPU 绘制, 静态桌面节省 GPU 功耗。
+        // 例外: EGL surface 尺寸变了 (最小化还原/窗口 resize) 必须用当前纹理
+        // 重新 letterbox 上屏 — 否则最后一帧可能画在旧尺寸 buffer 上
+        // (ForceToplevelRedraw 的 dirty 与 buffer 异步切换存在竞争窗口),
+        // 静止窗口再无新帧触发重绘, 系统把旧 buffer 拉伸显示导致缩放错误
         if (!haveFrame && rendered) {
-            loopCount++;
-            if (!waitForFrameTick()) break;
-            continue;
+            EGLint curW = 0, curH = 0;
+            eglQuerySurface(display_, surface_, EGL_WIDTH, &curW);
+            eglQuerySurface(display_, surface_, EGL_HEIGHT, &curH);
+            if (curW == width_ && curH == height_) {
+                loopCount++;
+                if (!waitForFrameTick()) break;
+                continue;
+            }
+            OH_LOG_INFO(LOG_APP,
+                        "[MW-RNDR] tl=%{public}u surface %{public}dx%{public}d -> %{public}dx%{public}d with no new frame, re-letterbox",
+                        useToplevel, width_, height_, curW, curH);
         }
 
         // 获取 EGL surface 实际大小
