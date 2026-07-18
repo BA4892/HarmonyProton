@@ -63,12 +63,13 @@ struct WinePopup {
       })
         .width('100%')
         .height('100%')
-        .backgroundColor('#000')
+        // 背景透明: ARGB popup (圆角菜单/异型 tooltip) 需要透过 per-pixel alpha
+        .backgroundColor('#00000000')
         .focusable(false)
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#000')
+    .backgroundColor('#00000000')
     .focusable(false)
 
     // -- 鼠标事件 --

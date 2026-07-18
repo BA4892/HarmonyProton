@@ -11,6 +11,7 @@ interface PopupEventData {
   y?: number;
   w?: number;
   h?: number;
+  argb?: number;
 }
 
 class PopupEntry {
@@ -22,6 +23,7 @@ class PopupEntry {
   offY: number = 0;
   w: number = 0;
   h: number = 0;
+  argb: boolean = false;  // ARGB8888 帧 (圆角菜单/异型 tooltip), 子窗口需透明背景
 }
 
 /**
@@ -132,6 +134,7 @@ export class PopupWindowManager {
     entry.offY = data.y ?? 0;
     entry.w = data.w ?? 0;
     entry.h = data.h ?? 0;
+    entry.argb = data.argb === 1;
     this.creating.add(popupId);
 
     // 让 pages/WinePopup 的 aboutToAppear 同步取到 popupId (FIFO, 与 WineWindow 同模式)
@@ -161,7 +164,8 @@ export class PopupWindowManager {
         subWin.setWindowCornerRadius(0);
       } catch (_) { /* ignore */ }
       try {
-        subWin.setWindowBackgroundColor('#FF000000');
+        // ARGB popup (圆角菜单/异型 tooltip) 用透明背景让 alpha 透过
+        subWin.setWindowBackgroundColor(entry.argb ? '#00000000' : '#FF000000');
       } catch (_) { /* ignore */ }
 
       entry.subWin = subWin;

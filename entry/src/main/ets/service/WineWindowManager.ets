@@ -55,6 +55,8 @@ export class WineWindowManager {
   private maximizeInFlight: Set<number> = new Set();
   // toplevelId -> 最近一次设置的标题 (loadContent 后会重置, 需要重新 apply)
   private lastTitles: Map<number, string> = new Map();
+  // toplevelId -> 是否 ARGB (layered/shaped 异型) 窗口, 仅记录 (后续子窗口方案使用)
+  private lastArgb: Map<number, boolean> = new Map();
   // Wine move_grab 等待 startMoving() — 标记哪些 toplevel 在等待拖拽
   private moveGrabPending: Set<number> = new Set();
 
@@ -186,6 +188,7 @@ export class WineWindowManager {
     this.lastResizeWineDim.delete(toplevelId);
     this.lastPreMaximizeDim.delete(toplevelId);
     this.lastTitles.delete(toplevelId);
+    this.lastArgb.delete(toplevelId);
     this.maximizeInFlight.delete(toplevelId);
     hilog.info(DOMAIN, TAG, '[MW]  unregisterAbility #%{public}d (hadCtx=%{public}s hadWin=%{public}s hadStage=%{public}s hadPend=%{public}s hadStart=%{public}s hadSurf=%{public}s hadResizeTarget=%{public}s hadWineDim=%{public}s hadTitle=%{public}s hadMaxFlight=%{public}s)',
       toplevelId, hadCtx ? 'yes' : 'no', hadWin ? 'yes' : 'no', hadStage ? 'yes' : 'no',
@@ -391,6 +394,7 @@ export class WineWindowManager {
       case 'maximized':
       case 'unmaximized':
       case 'limits':
+      case 'argb':
         if (this.isDesktopMode && id !== this.desktopRootId) return;
         if (this.windows.has(id)) {
           this.applyEvent(id, event, data);
@@ -524,6 +528,25 @@ export class WineWindowManager {
         win.recover().catch((e: Error) => {
           hilog.warn(DOMAIN, TAG, '[MW] unmaximize #%{public}d failed: %{public}s', toplevelId, JSON.stringify(e));
         });
+        break;
+      case 'argb':
+        /*
+         * layered/shaped (异型) 窗口标记, 仅记录状态 (后续子窗口方案使用)。
+         * 已验证 2in1 主窗口无法做到透视:
+         * - XComponent surface 无 alpha 通道 (EGL_ALPHA_SIZE=0, SET_FORMAT 无效)
+         * - 窗口背景色 alpha 被系统钳制 ('#80FF0000' 显示为不透明红)
+         * - setWindowMask 仅限子窗/全局悬浮窗 (主窗口 1300004)
+         * 故不做窗口背景色设置 (无效操作)。
+         */
+        try {
+          const obj: Record<string, number> = JSON.parse(data) as Record<string, number>;
+          const isArgb = obj.argb === 1;
+          this.lastArgb.set(toplevelId, isArgb);
+          hilog.info(DOMAIN, TAG, '[MW] argb state #%{public}d = %{public}s (record only)',
+            toplevelId, isArgb ? 'ARGB' : 'XRGB');
+        } catch (e) {
+          hilog.warn(DOMAIN, TAG, '[MW] applyEvent argb parse error: %{public}s', JSON.stringify(e));
+        }
         break;
     }
   }

@@ -74,12 +74,14 @@ struct WineWindow {
       })
         .width('100%')
         .height('100%')
-        .backgroundColor('#000')
+        // 背景透明: 与 '#000' 等价 (surface 不透明覆盖全部区域),
+        // 为后续 ARGB 异型窗口方案 (子窗口路线) 预留
+        .backgroundColor('#00000000')
         .focusable(false)
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#000')
+    .backgroundColor('#00000000')
     .focusable(true)
     .defaultFocus(true)
 

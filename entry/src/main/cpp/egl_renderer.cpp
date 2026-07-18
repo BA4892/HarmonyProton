@@ -205,7 +205,13 @@ precision mediump float;
 in vec2 vUV;
 out vec4 oColor;
 uniform sampler2D uTex;
-void main() { oColor = vec4(texture(uTex, vUV).bgr, 1.0); }
+uniform float uForceOpaque;
+void main() {
+    vec4 t = texture(uTex, vUV);
+    // uForceOpaque=1: XRGB 帧 (alpha 字节是垃圾, 强制不透明)
+    // uForceOpaque=0: ARGB 帧 (layered/shaped 异型窗口, 透传预乘 alpha)
+    oColor = vec4(t.bgr, uForceOpaque > 0.5 ? 1.0 : t.a);
+}
 )";
 
 static const char* kZeroCopyFS = R"(#version 300 es
@@ -592,6 +598,10 @@ bool EglRenderer::Init(OHNativeWindow* window, int w, int h) {
     EGLint ctxAttrs[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
     context_ = eglCreateContext(display_, cfg, EGL_NO_CONTEXT, ctxAttrs);
 
+    // 异型窗口 (layered/shaped): 确保 native window buffer 带 alpha 通道,
+    // 否则 per-pixel alpha 在 buffer 层就被丢弃 (默认可能是 RGBX)
+    OH_NativeWindow_NativeWindowHandleOpt(window_, SET_FORMAT, NATIVEBUFFER_PIXEL_FMT_RGBA_8888);
+
     // OHOS: EGLNativeWindowType = OHNativeWindow* (cast to unsigned long)
     surface_ = eglCreateWindowSurface(display_, cfg,
                                        reinterpret_cast<EGLNativeWindowType>(window_), nullptr);
@@ -600,10 +610,12 @@ bool EglRenderer::Init(OHNativeWindow* window, int w, int h) {
         return false;
     }
     {
-        EGLint sw = 0, sh = 0;
+        EGLint sw = 0, sh = 0, alphaBits = 0;
         eglQuerySurface(display_, surface_, EGL_WIDTH, &sw);
         eglQuerySurface(display_, surface_, EGL_HEIGHT, &sh);
-        OH_LOG_INFO(LOG_APP, "[EGL] tl=%{public}u eglSurface %{public}dx%{public}d", toplevelId_, sw, sh);
+        eglQuerySurface(display_, surface_, EGL_ALPHA_SIZE, &alphaBits);
+        OH_LOG_INFO(LOG_APP, "[EGL] tl=%{public}u eglSurface %{public}dx%{public}d alphaBits=%{public}d",
+                    toplevelId_, sw, sh, alphaBits);
     }
 
     running_ = true;
@@ -772,6 +784,10 @@ void EglRenderer::RenderLoop() {
         zeroCopyFrame = UpdateZeroCopyFrame(zeroCopyWidth, zeroCopyHeight);
         if (useToplevel != 0) {
             cpuFrame = ws->TakeToplevelFrame(useToplevel, px, fw, fh);
+            if (cpuFrame) {
+                // ARGB8888 帧 (layered/shaped 异型窗口) 透传 alpha; XRGB 强制不透明
+                frameArgb_ = (ws->GetToplevelShmFormat(useToplevel) == 0);
+            }
         } else {
             cpuFrame = ws->TakeFrame(px, fw, fh);
         }
@@ -878,7 +894,10 @@ void EglRenderer::RenderLoop() {
             OH_LOG_INFO(LOG_APP, "[MW-RESIZE] tl=%{public}u surface=%{public}dx%{public}d frame=%{public}dx%{public}d",
                         useToplevel, width_, height_, frameW_, frameH_);
         }
-        glClearColor(0, 0, 0, 1);
+        // ARGB 窗口清透明底 (letterbox 黑边/未覆盖区域也要能透过),
+        // 普通窗口清不透明黑底
+        if (frameArgb_) glClearColor(0, 0, 0, 0);
+        else glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
 
         glBindBuffer(GL_ARRAY_BUFFER, vbo_);
@@ -893,6 +912,7 @@ void EglRenderer::RenderLoop() {
             glUseProgram(program_);
             glBindTexture(GL_TEXTURE_2D, texture_);
             glUniform1i(glGetUniformLocation(program_, "uTex"), 0);
+            glUniform1f(glGetUniformLocation(program_, "uForceOpaque"), frameArgb_ ? 0.0f : 1.0f);
             glDrawArrays(GL_TRIANGLES, 0, 6);
         }
 

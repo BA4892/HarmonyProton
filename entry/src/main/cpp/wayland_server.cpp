@@ -619,6 +619,8 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
         int32_t h = wl_shm_buffer_get_height(shm);
         int32_t stride = wl_shm_buffer_get_stride(shm);
         int32_t rowBytes = w * 4;  // 紧密排列的每行字节数
+        // WL_SHM_FORMAT_ARGB8888=0 (有意义 alpha, layered/shaped 窗口), XRGB8888=1 (无 alpha)
+        const uint32_t shmFormat = wl_shm_buffer_get_format(shm);
 
         wl_shm_buffer_begin_access(shm);
         const uint8_t* src = static_cast<const uint8_t*>(wl_shm_buffer_get_data(shm));
@@ -734,6 +736,21 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
             }
             // 后续 commit: 忽略 geoX/geoY, compositor 位置为权威
             self->toplevelDirty_[sd->toplevelId] = true;
+            // 记录 shm 格式 (ARGB8888=layered/shaped 有意义 alpha), 变化时通知
+            // ArkTS 切换窗口背景 (PC 模式透明背景才能透过 per-pixel alpha)
+            {
+                auto fmtIt = self->toplevelShmFormat_.find(sd->toplevelId);
+                if (fmtIt == self->toplevelShmFormat_.end() || fmtIt->second != shmFormat) {
+                    self->toplevelShmFormat_[sd->toplevelId] = shmFormat;
+                    if (!self->IsDesktopMode()) {
+                        char json[32];
+                        snprintf(json, sizeof(json), "{\"argb\":%d}", shmFormat == 0 ? 1 : 0);
+                        OH_LOG_INFO(LOG_APP, "[MW] toplevel #%{public}u shm format → %{public}s",
+                                    sd->toplevelId, shmFormat == 0 ? "ARGB8888" : "XRGB8888");
+                        self->FireToplevelEvent(sd->toplevelId, "argb", json);
+                    }
+                }
+            }
             // 新 toplevel 加到 Z-order 顶层
             if (self->IsDesktopMode() && sd->toplevelId != self->desktopRootToplevelId_) {
                 auto zit = std::find(self->toplevelZOrder_.begin(), self->toplevelZOrder_.end(), sd->toplevelId);
@@ -831,7 +848,6 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
             if (parentSd && parentSd->hasToplevel) {
                 uint32_t parentId = parentSd->toplevelId;
                 if (self->IsDesktopMode()) {
-                    const uint32_t shmFormat = wl_shm_buffer_get_format(shm);
                     bool opaque = shmFormat != 0;
                     if (!opaque) {
                         opaque = true;
@@ -1020,6 +1036,7 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                                 self->toplevelW_[popupId] = dispW;
                                 self->toplevelH_[popupId] = dispH;
                                 self->toplevelDirty_[popupId] = true;
+                                self->toplevelShmFormat_[popupId] = shmFormat;
                             }
                         }
                         if (popupId == 0) {
@@ -1031,8 +1048,8 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                             }
                             char json[256];
                             snprintf(json, sizeof(json),
-                                     "{\"popupId\":%u,\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d}",
-                                     popupId, offX, offY, dispW, dispH);
+                                     "{\"popupId\":%u,\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"argb\":%d}",
+                                     popupId, offX, offY, dispW, dispH, shmFormat == 0 ? 1 : 0);
                             OH_LOG_INFO(LOG_APP, "[MW-POPUP] show popup=#%{public}u parent=#%{public}u off=(%{public}d,%{public}d) %{public}dx%{public}d (buffer %{public}dx%{public}d src=%{public}d,%{public}d %{public}dx%{public}d dst=%{public}dx%{public}d)",
                                         popupId, parentId, offX, offY, dispW, dispH, sd->w, sd->h,
                                         sd->vpSrcX, sd->vpSrcY, sd->vpSrcW, sd->vpSrcH, sd->vpDstW, sd->vpDstH);
@@ -1335,11 +1352,36 @@ bool WaylandServer::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, in
             if (dstX + copyW > rootW) copyW = rootW - dstX;
             if (dstY + copyH > rootH) copyH = rootH - dstY;
             if (copyW <= 0 || copyH <= 0) continue;
+            // WL_SHM_FORMAT_ARGB8888=0: layered/shaped (异型) 窗口, 有意义 alpha,
+            // 需按预乘 over 混合 (wl_shm alpha 格式均为预乘), 否则透明区域显示黑块
+            const bool childArgb =
+                (toplevelShmFormat_.count(childId) && toplevelShmFormat_[childId] == 0);
             for (int y = 0; y < copyH; y++) {
                 auto* srcRow = &childPx[(srcY + y) * childW * 4];
                 auto* dstRow = &composited[(dstY + y) * rootW * 4];
-                // toplevel 窗口使用 XRGB8888 (alpha 字节=0)，不加 alpha 过滤
-                memcpy(&dstRow[dstX * 4], &srcRow[srcX * 4], copyW * 4);
+                if (!childArgb) {
+                    memcpy(&dstRow[dstX * 4], &srcRow[srcX * 4], copyW * 4);
+                    continue;
+                }
+                for (int x = 0; x < copyW; x++) {
+                    const uint8_t* sp = srcRow + (srcX + x) * 4;
+                    uint8_t* dp = dstRow + (dstX + x) * 4;
+                    uint8_t a = sp[3];
+                    if (a == 0) continue;
+                    if (a == 255) {
+                        memcpy(dp, sp, 4);
+                    } else {
+                        // 预乘 over: dst = src + dst * (1-a)
+                        unsigned inv = 255 - a;
+                        unsigned b = sp[0] + (dp[0] * inv) / 255;
+                        unsigned g = sp[1] + (dp[1] * inv) / 255;
+                        unsigned r = sp[2] + (dp[2] * inv) / 255;
+                        dp[0] = b > 255 ? 255 : b;
+                        dp[1] = g > 255 ? 255 : g;
+                        dp[2] = r > 255 ? 255 : r;
+                        dp[3] = 255;
+                    }
+                }
             }
         }
         const auto childrenComposited = TakeClock::now();
@@ -1599,6 +1641,7 @@ void WaylandServer::OnToplevelDestroyed(uint32_t toplevelId) {
         toplevelWineX_.erase(toplevelId);
         toplevelWineY_.erase(toplevelId);
         toplevelDirty_.erase(toplevelId);
+        toplevelShmFormat_.erase(toplevelId);
         toplevelMinimized_.erase(toplevelId);
         toplevelMinimizeCompX_.erase(toplevelId);
         toplevelMinimizeCompY_.erase(toplevelId);
@@ -1635,6 +1678,7 @@ void WaylandServer::RemovePopupDataLocked(uint32_t popupId) {
     toplevelW_.erase(popupId);
     toplevelH_.erase(popupId);
     toplevelDirty_.erase(popupId);
+    toplevelShmFormat_.erase(popupId);
     {
         std::lock_guard<std::mutex> lk(toplevelSurfaceMutex_);
         toplevelSurfaceMap_.erase(popupId);

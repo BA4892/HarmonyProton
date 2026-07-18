@@ -94,6 +94,13 @@ public:
     int GetToplevelY(uint32_t id) { std::lock_guard<std::mutex> lk(toplevelMutex_); return toplevelY_[id]; }
     int GetToplevelW(uint32_t id) { std::lock_guard<std::mutex> lk(toplevelMutex_); return toplevelW_[id]; }
     int GetToplevelH(uint32_t id) { std::lock_guard<std::mutex> lk(toplevelMutex_); return toplevelH_[id]; }
+    // toplevel/popup 帧的 wl_shm 格式 (0=ARGB8888 有意义 alpha, 1=XRGB8888, 默认 1)
+    // EglRenderer 据此决定 alpha 透传或强制不透明 (XRGB 的 X 字节是垃圾)
+    uint32_t GetToplevelShmFormat(uint32_t id) {
+        std::lock_guard<std::mutex> lk(toplevelMutex_);
+        auto it = toplevelShmFormat_.find(id);
+        return it != toplevelShmFormat_.end() ? it->second : 1;
+    }
     // Desktop 合成模式 (Tablet): 全部 toplevel 合成到一个 root framebuffer
     void SetDesktopMode(bool on) { desktopMode_ = on; }
     bool IsDesktopMode() const { return desktopMode_; }
@@ -188,6 +195,7 @@ private:
     std::unordered_map<uint32_t, int> toplevelX_, toplevelY_;  // compositor 桌面位置 (含 move grab 偏移)
     std::unordered_map<uint32_t, int> toplevelWineX_, toplevelWineY_;  // Wine 坐标系位置 (首次 commit, 不变)
     std::unordered_map<uint32_t, bool> toplevelDirty_;
+    std::unordered_map<uint32_t, uint32_t> toplevelShmFormat_;  // id → wl_shm format (0=ARGB8888)
     std::unordered_map<uint32_t, int> toplevelLastReportedW_, toplevelLastReportedH_;
     std::unordered_map<uint32_t, bool> toplevelMinimized_;  // 桌面合成时跳过最小化窗口
     std::unordered_map<uint32_t, int> toplevelMinimizeCompX_, toplevelMinimizeCompY_;  // 最小化时的 compositor 位置
