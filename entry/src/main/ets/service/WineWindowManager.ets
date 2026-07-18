@@ -3,6 +3,7 @@ import { window, display } from '@kit.ArkUI';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import testNapi from 'libentry.so';
+import { PopupWindowManager } from './PopupWindowManager';
 
 const DOMAIN = 0x0000;
 const TAG = 'WineWM';
@@ -34,6 +35,8 @@ export class WineWindowManager {
   private abilityContexts: Map<number, common.UIAbilityContext> = new Map();
   // toplevelId -> window.Window (用于直接操作 resize/title)
   private windows: Map<number, window.Window> = new Map();
+  // toplevelId -> window.WindowStage (用于创建 popup 子窗口)
+  private windowStages: Map<number, window.WindowStage> = new Map();
   // toplevelId -> 已销毁标记 (用于竞态检测)
   private destroyed: Set<number> = new Set();
   // 正在启动中的 toplevel (防止重复 startAbility)
@@ -145,9 +148,25 @@ export class WineWindowManager {
       toplevelId, this.windows.size, this.pendingStarts.has(toplevelId) ? 'yes' : 'no');
   }
 
+  registerWindowStage(toplevelId: number, stage: window.WindowStage): void {
+    this.windowStages.set(toplevelId, stage);
+    hilog.info(DOMAIN, TAG, '[MW]  registerWindowStage #%{public}d (total=%{public}d)',
+      toplevelId, this.windowStages.size);
+  }
+
+  getWindowStage(toplevelId: number): window.WindowStage | null {
+    return this.windowStages.get(toplevelId) ?? null;
+  }
+
+  // effectiveScale = displayScale × scaleBoost (Wine 逻辑坐标 → 物理像素)
+  getEffectiveScale(): number {
+    return this.displayScale * this.scaleBoost;
+  }
+
   unregisterAbility(toplevelId: number): void {
     const hadCtx = this.abilityContexts.has(toplevelId);
     const hadWin = this.windows.has(toplevelId);
+    const hadStage = this.windowStages.has(toplevelId);
     const hadPend = this.pendingEvents.has(toplevelId);
     const hadStart = this.pendingStarts.has(toplevelId);
     const hadSurf = this.surfaceSizes.has(toplevelId);
@@ -155,8 +174,11 @@ export class WineWindowManager {
     const hadWineDim = this.lastResizeWineDim.has(toplevelId);
     const hadTitle = this.lastTitles.has(toplevelId);
     const hadMaxFlight = this.maximizeInFlight.has(toplevelId);
+    // 级联销毁该窗口的全部 popup 子窗口
+    PopupWindowManager.getInstance().destroyPopupsForToplevel(toplevelId);
     this.abilityContexts.delete(toplevelId);
     this.windows.delete(toplevelId);
+    this.windowStages.delete(toplevelId);
     this.pendingEvents.delete(toplevelId);
     this.pendingStarts.delete(toplevelId);
     this.surfaceSizes.delete(toplevelId);
@@ -165,8 +187,8 @@ export class WineWindowManager {
     this.lastPreMaximizeDim.delete(toplevelId);
     this.lastTitles.delete(toplevelId);
     this.maximizeInFlight.delete(toplevelId);
-    hilog.info(DOMAIN, TAG, '[MW]  unregisterAbility #%{public}d (hadCtx=%{public}s hadWin=%{public}s hadPend=%{public}s hadStart=%{public}s hadSurf=%{public}s hadResizeTarget=%{public}s hadWineDim=%{public}s hadTitle=%{public}s hadMaxFlight=%{public}s)',
-      toplevelId, hadCtx ? 'yes' : 'no', hadWin ? 'yes' : 'no',
+    hilog.info(DOMAIN, TAG, '[MW]  unregisterAbility #%{public}d (hadCtx=%{public}s hadWin=%{public}s hadStage=%{public}s hadPend=%{public}s hadStart=%{public}s hadSurf=%{public}s hadResizeTarget=%{public}s hadWineDim=%{public}s hadTitle=%{public}s hadMaxFlight=%{public}s)',
+      toplevelId, hadCtx ? 'yes' : 'no', hadWin ? 'yes' : 'no', hadStage ? 'yes' : 'no',
       hadPend ? 'yes' : 'no', hadStart ? 'yes' : 'no', hadSurf ? 'yes' : 'no',
       hadResizeTarget ? 'yes' : 'no', hadWineDim ? 'yes' : 'no',
       hadTitle ? 'yes' : 'no', hadMaxFlight ? 'yes' : 'no');
@@ -242,6 +264,13 @@ export class WineWindowManager {
 
   // -- WineWindowAbility 在 onWindowStageCreate 中调用: 应用积压的事件 --
   flushPendingEvents(toplevelId: number): void {
+    // popup 积压事件 (windowStage 就绪后补建)
+    const stage = this.getWindowStage(toplevelId);
+    const win = this.getWindow(toplevelId);
+    if (stage && win) {
+      PopupWindowManager.getInstance().flushPending(toplevelId, stage, win, this.getEffectiveScale());
+    }
+
     const pending = this.pendingEvents.get(toplevelId);
     if (!pending || pending.length === 0) {
       hilog.info(DOMAIN, TAG, '[MW] flushPendingEvents #%{public}d: none', toplevelId);
@@ -370,6 +399,17 @@ export class WineWindowManager {
           if (!q) { q = []; this.pendingEvents.set(id, q); }
           q.push([event, data]);
         }
+        break;
+      case 'popup_show':
+      case 'popup_move':
+      case 'popup_resize':
+      case 'popup_hide':
+        // PC 模式 popup 子窗口 (desktop 模式 C++ 不会发这些事件)
+        if (this.isDesktopMode) return;
+        PopupWindowManager.getInstance().onPopupEvent(
+          id, event, data,
+          this.getWindowStage(id), this.getWindow(id) ?? null,
+          this.getEffectiveScale());
         break;
       default:
         hilog.warn(DOMAIN, TAG, '[MW] unknown event #%{public}d %{public}s', id, event);

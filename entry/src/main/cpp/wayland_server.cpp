@@ -206,6 +206,7 @@ void WaylandServer::compositor_create_surface(wl_client* client, wl_resource* co
     wl_resource_set_implementation(surfRes, &kSurfaceImpl, sd, [](wl_resource* r) {
         auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(r));
         auto* self = GetInstance();
+        uint32_t removedPopup = 0, popupParent = 0;
         {
             std::lock_guard<std::mutex> lk(self->toplevelMutex_);
             const uint64_t surfaceKey = sd ? sd->surfaceKey : 0;
@@ -214,6 +215,10 @@ void WaylandServer::compositor_create_surface(wl_client* client, wl_resource* co
             for (auto it = self->subsurfaceLayers_.begin(); it != self->subsurfaceLayers_.end(); ) {
                 if (it->surface == r) it = self->subsurfaceLayers_.erase(it);
                 else ++it;
+            }
+            // PC popup 记录一并清除 (client 断开时 libwayland 走此路径)
+            if (sd) {
+                popupParent = self->RemovePopupBySurfaceKeyLocked(sd->surfaceKey, removedPopup);
             }
             if (self->desktopRootToplevelId_ > 0)
                 self->toplevelDirty_[self->desktopRootToplevelId_] = true;
@@ -225,6 +230,13 @@ void WaylandServer::compositor_create_surface(wl_client* client, wl_resource* co
             }
             InputManager::GetInstance()->OnSurfaceDestroyed(r);
             self->FireToplevelEvent(sd->toplevelId, "destroyed");
+        }
+        if (removedPopup) {
+            // 防止 pointer focus 悬在已销毁的 popup surface 上 (协议错误会断开 Wine)
+            InputManager::GetInstance()->OnSurfaceDestroyed(r);
+            char json[64];
+            snprintf(json, sizeof(json), "{\"popupId\":%u}", removedPopup);
+            self->FireToplevelEvent(popupParent, "popup_hide", json);
         }
         delete sd;
     });
@@ -291,11 +303,48 @@ void WaylandServer::subsurface_set_position(wl_client*, wl_resource* ssRes,
         if (self->desktopRootToplevelId_ > 0)
             self->toplevelDirty_[self->desktopRootToplevelId_] = true;
     }
+    // PC 模式: 更新已登记 popup 的偏移, 通知 ArkTS 移动子窗口
+    uint32_t movePopupId = 0, moveParent = 0;
+    int32_t moveOffX = 0, moveOffY = 0;
+    {
+        std::lock_guard<std::mutex> lk(self->toplevelMutex_);
+        auto pit = self->popupBySurfaceKey_.find(sd->surfaceKey);
+        if (pit != self->popupBySurfaceKey_.end()) {
+            auto rit = self->popups_.find(pit->second);
+            if (rit != self->popups_.end()) {
+                auto& rec = rit->second;
+                int32_t geoX = 0, geoY = 0;
+                if (sd->parentSurface) {
+                    auto* parentSd = static_cast<SurfaceData*>(wl_resource_get_user_data(sd->parentSurface));
+                    if (parentSd) { geoX = parentSd->geoX; geoY = parentSd->geoY; }
+                }
+                rec.offX = x - geoX;
+                rec.offY = y - geoY;
+                movePopupId = rec.popupId;
+                moveParent = rec.parentToplevel;
+                moveOffX = rec.offX;
+                moveOffY = rec.offY;
+            }
+        }
+    }
+    if (movePopupId) {
+        char json[128];
+        snprintf(json, sizeof(json), "{\"popupId\":%u,\"x\":%d,\"y\":%d}",
+                 movePopupId, moveOffX, moveOffY);
+        self->FireToplevelEvent(moveParent, "popup_move", json);
+    }
     OH_LOG_INFO(LOG_APP, "[MW-SUBSURF] set_position: child=%{public}p parent=%{public}p pos=(%{public}d,%{public}d)",
                 childSurf, sd->parentSurface, x, y);
 }
 
 void WaylandServer::subsurface_place_above(wl_client*, wl_resource* ssRes, wl_resource* sibling) {
+    /*
+     * 风险标注 (P2): place_above/place_below 只维护 desktop 模式的
+     * subsurfaceLayers_ 顺序。PC 模式的 popup 是独立 OHOS 子窗口,
+     * z-order 由窗口系统按创建顺序决定, 此处的重排不会映射到子窗口。
+     * 桌面语义上 popup 恒在父窗口之上 (OHOS 子窗口天然满足),
+     * 多 popup (子菜单链) 交叠顺序极端情况下可能与客户端预期不符。
+     */
     auto* childSurf = static_cast<wl_resource*>(wl_resource_get_user_data(ssRes));
     if (!childSurf || !sibling) return;
     auto* self = GetInstance();
@@ -337,6 +386,35 @@ void WaylandServer::subsurface_place_below(wl_client*, wl_resource* ssRes, wl_re
                 childSurf, sibling);
 }
 
+void WaylandServer::subsurface_destroy(wl_client*, wl_resource* r) {
+    // role 移除: surface 变回普通 surface。按 unmap 处理:
+    // 清 desktop layer / PC popup 记录, 通知 ArkTS 销毁 popup 子窗口。
+    auto* childSurf = static_cast<wl_resource*>(wl_resource_get_user_data(r));
+    if (childSurf) {
+        auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(childSurf));
+        if (sd) {
+            sd->isSubsurface = false;
+            sd->parentSurface = nullptr;
+            auto* self = GetInstance();
+            uint32_t removedPopup = 0, popupParent = 0;
+            {
+                std::lock_guard<std::mutex> lk(self->toplevelMutex_);
+                for (auto it = self->subsurfaceLayers_.begin(); it != self->subsurfaceLayers_.end(); ) {
+                    if (it->surface == childSurf) it = self->subsurfaceLayers_.erase(it);
+                    else ++it;
+                }
+                popupParent = self->RemovePopupBySurfaceKeyLocked(sd->surfaceKey, removedPopup);
+            }
+            if (removedPopup) {
+                char json[64];
+                snprintf(json, sizeof(json), "{\"popupId\":%u}", removedPopup);
+                self->FireToplevelEvent(popupParent, "popup_hide", json);
+            }
+        }
+    }
+    wl_resource_destroy(r);
+}
+
 // -- viewporter 实现 --
 void WaylandServer::viewporter_bind(wl_client* client, void* data, uint32_t version, uint32_t id) {
     OH_LOG_INFO(LOG_APP, "[WL] wp_viewporter bound v=%{public}u", version);
@@ -350,6 +428,26 @@ void WaylandServer::viewporter_get_viewport(wl_client* client, wl_resource*,
     // 把 surface resource 存为 viewport 的 user_data,
     // 这样 viewport_set_destination 就能通过 surface 找到 SurfaceData
     wl_resource_set_implementation(vp, &kViewportImpl, surface, nullptr);
+}
+
+void WaylandServer::viewport_set_source(wl_client*, wl_resource* vpRes,
+                                        wl_fixed_t fx, wl_fixed_t fy, wl_fixed_t fw, wl_fixed_t fh) {
+    auto* surf = static_cast<wl_resource*>(wl_resource_get_user_data(vpRes));
+    if (!surf) return;
+    auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(surf));
+    if (!sd) return;
+    if (wl_fixed_to_int(fw) == -1 && wl_fixed_to_int(fh) == -1) {
+        // unset: 恢复全 buffer (注意参数是 wl_fixed_t, unset 编码为 wl_fixed_from_int(-1))
+        sd->vpSrcX = 0;
+        sd->vpSrcY = 0;
+        sd->vpSrcW = -1;
+        sd->vpSrcH = -1;
+        return;
+    }
+    sd->vpSrcX = wl_fixed_to_int(fx);
+    sd->vpSrcY = wl_fixed_to_int(fy);
+    sd->vpSrcW = wl_fixed_to_int(fw);
+    sd->vpSrcH = wl_fixed_to_int(fh);
 }
 
 void WaylandServer::viewport_set_destination(wl_client*, wl_resource* vpRes, int32_t w, int32_t h) {
@@ -414,13 +512,25 @@ void WaylandServer::surface_destroy(wl_client*, wl_resource* r) {
     // subsurface 销毁: 清除 layer + 标记 root dirty 触发重绘 (移除残留像素)
     if (sd && sd->isSubsurface) {
         auto* self = GetInstance();
-        std::lock_guard<std::mutex> lk(self->toplevelMutex_);
-        for (auto it = self->subsurfaceLayers_.begin(); it != self->subsurfaceLayers_.end(); ) {
-            if (it->surface == r) it = self->subsurfaceLayers_.erase(it);
-            else ++it;
+        uint32_t removedPopup = 0, popupParent = 0;
+        {
+            std::lock_guard<std::mutex> lk(self->toplevelMutex_);
+            for (auto it = self->subsurfaceLayers_.begin(); it != self->subsurfaceLayers_.end(); ) {
+                if (it->surface == r) it = self->subsurfaceLayers_.erase(it);
+                else ++it;
+            }
+            // PC popup 记录一并清除
+            popupParent = self->RemovePopupBySurfaceKeyLocked(sd->surfaceKey, removedPopup);
+            if (self->IsDesktopMode() && self->desktopRootToplevelId_ > 0)
+                self->toplevelDirty_[self->desktopRootToplevelId_] = true;
         }
-        if (self->IsDesktopMode() && self->desktopRootToplevelId_ > 0)
-            self->toplevelDirty_[self->desktopRootToplevelId_] = true;
+        if (removedPopup) {
+            // 防止 pointer focus 悬在已销毁的 popup surface 上 (协议错误会断开 Wine)
+            InputManager::GetInstance()->OnSurfaceDestroyed(r);
+            char json[64];
+            snprintf(json, sizeof(json), "{\"popupId\":%u}", removedPopup);
+            self->FireToplevelEvent(popupParent, "popup_hide", json);
+        }
     }
     wl_resource_destroy(r);
 }
@@ -470,21 +580,33 @@ void WaylandServer::surface_frame(wl_client* client, wl_resource* surfRes, uint3
 
 void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
     auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(surfRes));
-    // NULL buffer → surface 无内容: 清除对应 subsurface layer
+    // NULL buffer → surface 无内容: 清除对应 subsurface layer / PC popup
     if (!sd->pendingBuffer) {
         if (sd->isSubsurface) {
             auto* self = GetInstance();
-            std::lock_guard<std::mutex> lk(self->toplevelMutex_);
-            size_t before = self->subsurfaceLayers_.size();
-            for (auto it = self->subsurfaceLayers_.begin(); it != self->subsurfaceLayers_.end(); ) {
-                if (it->surface == surfRes) it = self->subsurfaceLayers_.erase(it);
-                else ++it;
+            uint32_t removedPopup = 0, popupParent = 0;
+            {
+                std::lock_guard<std::mutex> lk(self->toplevelMutex_);
+                size_t before = self->subsurfaceLayers_.size();
+                for (auto it = self->subsurfaceLayers_.begin(); it != self->subsurfaceLayers_.end(); ) {
+                    if (it->surface == surfRes) it = self->subsurfaceLayers_.erase(it);
+                    else ++it;
+                }
+                if (self->subsurfaceLayers_.size() != before) {
+                    OH_LOG_INFO(LOG_APP, "[MW-SUBSURF] NULL buffer commit → removed layer, layers %{public}zu→%{public}zu",
+                                before, self->subsurfaceLayers_.size());
+                    if (self->IsDesktopMode() && self->desktopRootToplevelId_ > 0)
+                        self->toplevelDirty_[self->desktopRootToplevelId_] = true;
+                }
+                // PC popup: unmap (菜单关闭) → 销毁 ArkTS 子窗口
+                popupParent = self->RemovePopupBySurfaceKeyLocked(sd->surfaceKey, removedPopup);
             }
-            if (self->subsurfaceLayers_.size() != before) {
-                OH_LOG_INFO(LOG_APP, "[MW-SUBSURF] NULL buffer commit → removed layer, layers %{public}zu→%{public}zu",
-                            before, self->subsurfaceLayers_.size());
-                if (self->IsDesktopMode() && self->desktopRootToplevelId_ > 0)
-                    self->toplevelDirty_[self->desktopRootToplevelId_] = true;
+            if (removedPopup) {
+                OH_LOG_INFO(LOG_APP, "[MW-POPUP] hide popup=#%{public}u parent=#%{public}u (NULL buffer commit)",
+                            removedPopup, popupParent);
+                char json[64];
+                snprintf(json, sizeof(json), "{\"popupId\":%u}", removedPopup);
+                self->FireToplevelEvent(popupParent, "popup_hide", json);
             }
         }
         return;
@@ -802,33 +924,132 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                     OH_LOG_INFO(LOG_APP, "[MW-SUBSURF] stored layer %{public}dx%{public}d at (%{public}d,%{public}d) parent=#%{public}u",
                                 layer.w, layer.h, layer.x, layer.y, parentId);
                 } else {
-                    // 多窗口模式: 直接合成到父 toplevel
-                    std::lock_guard<std::mutex> lk(self->toplevelMutex_);
-                    auto it = self->toplevelPixels_.find(parentId);
-                    if (it != self->toplevelPixels_.end()) {
-                        int parentW = self->toplevelW_[parentId];
-                        int parentH = self->toplevelH_[parentId];
-                        int popupX = sd->subsurfaceX - parentSd->geoX;
-                        int popupY = sd->subsurfaceY - parentSd->geoY;
-                        int srcX = (popupX < 0) ? -popupX : 0;
-                        int srcY = (popupY < 0) ? -popupY : 0;
-                        int dstX = (popupX > 0) ? popupX : 0;
-                        int dstY = (popupY > 0) ? popupY : 0;
-                        // wp_viewport: destination 指定实际显示尺寸
-                        int copyW = sd->w - srcX;
-                        int copyH = sd->h - srcY;
-                        if (sd->vpDstW > 0 && sd->vpDstW < copyW) copyW = sd->vpDstW;
-                        if (sd->vpDstH > 0 && sd->vpDstH < copyH) copyH = sd->vpDstH;
-                        if (dstX + copyW > parentW) copyW = parentW - dstX;
-                        if (dstY + copyH > parentH) copyH = parentH - dstY;
-                        if (copyW > 0 && copyH > 0) {
-                            auto& targetBuf = it->second;
-                            for (int y = 0; y < copyH; y++) {
-                                int srcRowStart = ((srcY + y) * sd->w + srcX) * 4;
-                                int dstRowStart = ((dstY + y) * parentW + dstX) * 4;
-                                std::memcpy(&targetBuf[dstRowStart], &sd->pixels[srcRowStart], copyW * 4);
+                    /*
+                     * PC 多窗口模式: popup 登记为伪 toplevel, 由 ArkTS 独立
+                     * OHOS 子窗口渲染。不再 blit 进父 buffer (会被窗口边缘裁剪)。
+                     * 参考 weston/wlroots: subsurface 可越出父 surface 边界,
+                     * compositor 不做父边界裁剪。
+                     *
+                     * wp_viewport: Wine popup 的 shm buffer 常按 2 的幂次对齐
+                     * 填充, 大于真实菜单内容。真实显示尺寸 =
+                     * min(buffer, set_source, set_destination), 从源矩形原点裁剪
+                     * (与 desktop 路径 vpDst clamp / toplevel 的 window_geometry
+                     * 裁剪同语义)。
+                     *
+                     * 风险标注 (P2): 父 toplevel 销毁后 popup 会被级联清理
+                     * (OnToplevelDestroyed), 但若该 popup surface 在父窗口销毁后
+                     * 恰好又 commit 一帧, 会在此重新登记并向已销毁的 parentId 发
+                     * popup_show, ArkTS 侧因窗口不存在而积压 (竞态极小, 仅微量
+                     * 内存)。如需根治可在此处检查 parentId 是否仍存活。
+                     */
+                    int32_t offX = sd->subsurfaceX - parentSd->geoX;
+                    int32_t offY = sd->subsurfaceY - parentSd->geoY;
+                    int dispW = sd->w, dispH = sd->h;
+                    int cropX = 0, cropY = 0;
+                    if (sd->vpSrcW > 0 && sd->vpSrcH > 0) {
+                        cropX = std::max(0, std::min(sd->vpSrcX, sd->w - 1));
+                        cropY = std::max(0, std::min(sd->vpSrcY, sd->h - 1));
+                        if (sd->vpSrcW < dispW) dispW = sd->vpSrcW;
+                        if (sd->vpSrcH < dispH) dispH = sd->vpSrcH;
+                    }
+                    if (sd->vpDstW > 0 && sd->vpDstW < dispW) dispW = sd->vpDstW;
+                    if (sd->vpDstH > 0 && sd->vpDstH < dispH) dispH = sd->vpDstH;
+                    dispW = std::min(dispW, sd->w - cropX);
+                    dispH = std::min(dispH, sd->h - cropY);
+                    // 防御: pixels 须为完整 w*h*4 (subsurface 若设 window_geometry
+                    // 则 sd->w/h 是 content 尺寸而 pixels 是全 buffer, 不成立)
+                    const size_t expectSz = static_cast<size_t>(sd->w) * sd->h * 4;
+                    if (sd->pixels.size() < expectSz) {
+                        OH_LOG_WARN(LOG_APP, "[MW-POPUP] pixels size mismatch: %{public}zu < %{public}zu (w=%{public}d h=%{public}d), skip frame",
+                                    sd->pixels.size(), expectSz, sd->w, sd->h);
+                    } else if (dispW > 0 && dispH > 0) {
+                        uint32_t popupId = 0;
+                        bool isNew = false;
+                        bool sizeChanged = false;
+                        bool posChanged = false;
+                        {
+                            std::lock_guard<std::mutex> lk(self->toplevelMutex_);
+                            auto keyIt = self->popupBySurfaceKey_.find(sd->surfaceKey);
+                            if (keyIt == self->popupBySurfaceKey_.end()) {
+                                popupId = self->NextToplevelId();
+                                isNew = true;
+                                PopupRecord rec;
+                                rec.popupId = popupId;
+                                rec.parentToplevel = parentId;
+                                rec.surface = surfRes;
+                                rec.surfaceKey = sd->surfaceKey;
+                                rec.offX = offX;
+                                rec.offY = offY;
+                                rec.w = dispW;
+                                rec.h = dispH;
+                                self->popups_[popupId] = rec;
+                                self->popupBySurfaceKey_[sd->surfaceKey] = popupId;
+                            } else {
+                                popupId = keyIt->second;
+                                auto rit = self->popups_.find(popupId);
+                                if (rit == self->popups_.end()) {
+                                    // 两表不同步 (不应发生): 清孤儿 key, 跳过本帧, 下帧重建
+                                    self->popupBySurfaceKey_.erase(keyIt);
+                                    popupId = 0;
+                                } else {
+                                    auto& rec = rit->second;
+                                    sizeChanged = (rec.w != dispW || rec.h != dispH);
+                                    posChanged = (rec.offX != offX || rec.offY != offY);
+                                    rec.offX = offX;
+                                    rec.offY = offY;
+                                    rec.w = dispW;
+                                    rec.h = dispH;
+                                }
                             }
-                            self->toplevelDirty_[parentId] = true;
+                            if (popupId > 0) {
+                                auto& buf = self->toplevelPixels_[popupId];
+                                if (cropX == 0 && cropY == 0 && dispW == sd->w && dispH == sd->h) {
+                                    // 无裁剪: 像素双缓冲轮换 (同 desktop layer 做法)
+                                    auto reusablePixels = std::move(buf);
+                                    buf = std::move(sd->pixels);
+                                    sd->pixels = std::move(reusablePixels);
+                                } else {
+                                    // 裁剪出真实内容区域 (紧凑排列)
+                                    buf.resize(static_cast<size_t>(dispW) * dispH * 4);
+                                    for (int y = 0; y < dispH; y++) {
+                                        std::memcpy(buf.data() + static_cast<size_t>(y) * dispW * 4,
+                                                    sd->pixels.data() + (static_cast<size_t>(cropY + y) * sd->w + cropX) * 4,
+                                                    static_cast<size_t>(dispW) * 4);
+                                    }
+                                }
+                                self->toplevelW_[popupId] = dispW;
+                                self->toplevelH_[popupId] = dispH;
+                                self->toplevelDirty_[popupId] = true;
+                            }
+                        }
+                        if (popupId == 0) {
+                            // 记录异常, 跳过本帧 (下帧按新 popup 重建)
+                        } else if (isNew) {
+                            {
+                                std::lock_guard<std::mutex> lk(self->toplevelSurfaceMutex_);
+                                self->toplevelSurfaceMap_[popupId] = surfRes;
+                            }
+                            char json[256];
+                            snprintf(json, sizeof(json),
+                                     "{\"popupId\":%u,\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d}",
+                                     popupId, offX, offY, dispW, dispH);
+                            OH_LOG_INFO(LOG_APP, "[MW-POPUP] show popup=#%{public}u parent=#%{public}u off=(%{public}d,%{public}d) %{public}dx%{public}d (buffer %{public}dx%{public}d src=%{public}d,%{public}d %{public}dx%{public}d dst=%{public}dx%{public}d)",
+                                        popupId, parentId, offX, offY, dispW, dispH, sd->w, sd->h,
+                                        sd->vpSrcX, sd->vpSrcY, sd->vpSrcW, sd->vpSrcH, sd->vpDstW, sd->vpDstH);
+                            self->FireToplevelEvent(parentId, "popup_show", json);
+                        } else {
+                            if (sizeChanged) {
+                                char json[128];
+                                snprintf(json, sizeof(json), "{\"popupId\":%u,\"w\":%d,\"h\":%d}",
+                                         popupId, dispW, dispH);
+                                self->FireToplevelEvent(parentId, "popup_resize", json);
+                            }
+                            if (posChanged) {
+                                char json[128];
+                                snprintf(json, sizeof(json), "{\"popupId\":%u,\"x\":%d,\"y\":%d}",
+                                         popupId, offX, offY);
+                                self->FireToplevelEvent(parentId, "popup_move", json);
+                            }
                         }
                     }
                 }
@@ -1367,27 +1588,74 @@ void WaylandServer::UnregisterToplevelResource(uint32_t toplevelId) {
 }
 
 void WaylandServer::OnToplevelDestroyed(uint32_t toplevelId) {
-    std::lock_guard<std::mutex> lk(toplevelMutex_);
-    toplevelPixels_.erase(toplevelId);
-    toplevelW_.erase(toplevelId);
-    toplevelH_.erase(toplevelId);
-    toplevelX_.erase(toplevelId);
-    toplevelY_.erase(toplevelId);
-    toplevelWineX_.erase(toplevelId);
-    toplevelWineY_.erase(toplevelId);
-    toplevelDirty_.erase(toplevelId);
-    toplevelMinimized_.erase(toplevelId);
-    toplevelMinimizeCompX_.erase(toplevelId);
-    toplevelMinimizeCompY_.erase(toplevelId);
-    toplevelMinimizeTimeMs_.erase(toplevelId);
-    backgroundLayers_.erase(toplevelId);
-    if (pendingDesktopRootToplevelId_ == toplevelId)
-        pendingDesktopRootToplevelId_ = 0;
-    auto zit = std::find(toplevelZOrder_.begin(), toplevelZOrder_.end(), toplevelId);
-    if (zit != toplevelZOrder_.end()) toplevelZOrder_.erase(zit);
-    if (IsDesktopMode() && toplevelId != desktopRootToplevelId_) {
-        if (desktopRootToplevelId_ > 0) toplevelDirty_[desktopRootToplevelId_] = true;
+    std::vector<uint32_t> cascadePopups;
+    {
+        std::lock_guard<std::mutex> lk(toplevelMutex_);
+        toplevelPixels_.erase(toplevelId);
+        toplevelW_.erase(toplevelId);
+        toplevelH_.erase(toplevelId);
+        toplevelX_.erase(toplevelId);
+        toplevelY_.erase(toplevelId);
+        toplevelWineX_.erase(toplevelId);
+        toplevelWineY_.erase(toplevelId);
+        toplevelDirty_.erase(toplevelId);
+        toplevelMinimized_.erase(toplevelId);
+        toplevelMinimizeCompX_.erase(toplevelId);
+        toplevelMinimizeCompY_.erase(toplevelId);
+        toplevelMinimizeTimeMs_.erase(toplevelId);
+        backgroundLayers_.erase(toplevelId);
+        if (pendingDesktopRootToplevelId_ == toplevelId)
+            pendingDesktopRootToplevelId_ = 0;
+        auto zit = std::find(toplevelZOrder_.begin(), toplevelZOrder_.end(), toplevelId);
+        if (zit != toplevelZOrder_.end()) toplevelZOrder_.erase(zit);
+        // 级联清理该 toplevel 的全部 PC popup (帧数据 + 映射)
+        for (auto& [pid, rec] : popups_) {
+            if (rec.parentToplevel == toplevelId) cascadePopups.push_back(pid);
+        }
+        for (uint32_t pid : cascadePopups) RemovePopupDataLocked(pid);
+        if (IsDesktopMode() && toplevelId != desktopRootToplevelId_) {
+            if (desktopRootToplevelId_ > 0) toplevelDirty_[desktopRootToplevelId_] = true;
+        }
     }
+    // 通知 ArkTS 销毁 popup 子窗口 (锁外触发)
+    for (uint32_t pid : cascadePopups) {
+        char json[64];
+        snprintf(json, sizeof(json), "{\"popupId\":%u}", pid);
+        FireToplevelEvent(toplevelId, "popup_hide", json);
+    }
+}
+
+void WaylandServer::RemovePopupDataLocked(uint32_t popupId) {
+    // 调用方须已持有 toplevelMutex_
+    auto it = popups_.find(popupId);
+    if (it == popups_.end()) return;
+    popupBySurfaceKey_.erase(it->second.surfaceKey);
+    popups_.erase(it);
+    toplevelPixels_.erase(popupId);
+    toplevelW_.erase(popupId);
+    toplevelH_.erase(popupId);
+    toplevelDirty_.erase(popupId);
+    {
+        std::lock_guard<std::mutex> lk(toplevelSurfaceMutex_);
+        toplevelSurfaceMap_.erase(popupId);
+    }
+}
+
+uint32_t WaylandServer::RemovePopupBySurfaceKeyLocked(uint64_t surfaceKey, uint32_t& outPopupId) {
+    // 调用方须已持有 toplevelMutex_
+    outPopupId = 0;
+    auto pit = popupBySurfaceKey_.find(surfaceKey);
+    if (pit == popupBySurfaceKey_.end()) return 0;
+    auto rit = popups_.find(pit->second);
+    if (rit == popups_.end()) {
+        // 两表不同步 (不应发生): 清理孤儿 key, 避免静默插入空记录
+        popupBySurfaceKey_.erase(pit);
+        return 0;
+    }
+    outPopupId = pit->second;
+    const uint32_t parent = rit->second.parentToplevel;
+    RemovePopupDataLocked(outPopupId);
+    return parent;
 }
 
 void WaylandServer::SendToplevelClose(uint32_t toplevelId) {

@@ -134,7 +134,7 @@ public:
     static void subcompositor_destroy(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
     static void subcompositor_get_subsurface(wl_client*, wl_resource*, uint32_t, wl_resource*, wl_resource*);
     /* wl_subsurface */
-    static void subsurface_destroy(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
+    static void subsurface_destroy(wl_client*, wl_resource* r);
     static void subsurface_set_position(wl_client*, wl_resource*, int32_t, int32_t);
     static void subsurface_place_above(wl_client*, wl_resource*, wl_resource*);
     static void subsurface_place_below(wl_client*, wl_resource*, wl_resource*);
@@ -146,7 +146,7 @@ public:
     static void viewporter_get_viewport(wl_client*, wl_resource*, uint32_t, wl_resource*);
     /* wp_viewport */
     static void viewport_destroy(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
-    static void viewport_set_source(wl_client*, wl_resource*, wl_fixed_t, wl_fixed_t, wl_fixed_t, wl_fixed_t) {}
+    static void viewport_set_source(wl_client*, wl_resource*, wl_fixed_t, wl_fixed_t, wl_fixed_t, wl_fixed_t);
     static void viewport_set_destination(wl_client*, wl_resource*, int32_t, int32_t);
 
     /* Globals bind */
@@ -231,6 +231,28 @@ private:
     void ResolveSubsurfaceLayerPositionLocked(const SubsurfaceLayer& layer,
                                               int& x, int& y) const;
     std::vector<SubsurfaceLayer> subsurfaceLayers_;
+    /*
+     * PC 多窗口模式 popup (菜单/tooltip/下拉框):
+     * subsurface 不再合成进父 toplevel 像素 (会被窗口边缘裁剪),
+     * 而是登记为伪 toplevel, 由 ArkTS 独立 OHOS 子窗口渲染。
+     * popupId 复用 NextToplevelId() 命名空间, 帧数据存在 toplevelPixels_ 等
+     * 现有结构中, EglRenderer/InputManager 按现有 per-toplevel 路径工作。
+     */
+    struct PopupRecord {
+        uint32_t popupId = 0;
+        uint32_t parentToplevel = 0;
+        wl_resource* surface = nullptr;  // popup 的 wl_surface (pointer enter 目标)
+        uint64_t surfaceKey = 0;
+        int32_t offX = 0, offY = 0;      // 相对父窗口内容原点 (= subsurfaceX/Y - geoX/Y)
+        int w = 0, h = 0;
+    };
+    std::unordered_map<uint64_t, uint32_t> popupBySurfaceKey_;  // surfaceKey → popupId
+    std::unordered_map<uint32_t, PopupRecord> popups_;          // popupId → 记录
+    // 清除 popup 的帧数据与映射 (toplevelMutex_ 已持有, 不发事件)
+    void RemovePopupDataLocked(uint32_t popupId);
+    // 按 surfaceKey 移除 popup 记录 (toplevelMutex_ 已持有)
+    // 返回 parentToplevel 并出参 popupId; 记录不存在返回 0
+    uint32_t RemovePopupBySurfaceKeyLocked(uint64_t surfaceKey, uint32_t& outPopupId);
     std::vector<uint32_t> toplevelZOrder_;  // 前景→背景
     std::unordered_set<uint32_t> backgroundLayers_; // 渲染层, 不接收输入 (被切换掉的旧 root)
     uint64_t desktopRootFrameSerial_ = 0;
@@ -274,6 +296,9 @@ struct SurfaceData {
 
     // wp_viewport destination (实际显示尺寸, -1=未设置/使用 buffer 尺寸)
     int32_t vpDstW = -1, vpDstH = -1;
+    // wp_viewport source rectangle (buffer 内的真实内容区域, -1=未设置/全 buffer)
+    // Wine popup 的 shm buffer 常按 2 的幂次对齐填充, 真实尺寸经 set_source 给出
+    int32_t vpSrcX = 0, vpSrcY = 0, vpSrcW = -1, vpSrcH = -1;
 
     // window states
     // app_id (xdg_toplevel.set_app_id), 用于识别 explorer 桌面
