@@ -204,28 +204,24 @@ assemble_pad() {
     fi
 
     # i386-windows/ (32-bit PE DLL for WoW64)
-    # 只取核心 DLL (~20 个), 其余 600+ 个 (d3dx9/msi/media等) 暂不需要.
-    # 完整列表在 build/wine-i386-pe/dlls/*/i386-windows/*.dll.
-    # 日后需要某个缺失的 DLL 时, 在此处加名即可.
-    if [ -d "$BUILD_DIR/wine-i386-pe" ]; then
-        # 32-bit PE DLL for WoW64: 复制所有运行时 PE 文件
-        mkdir -p "$wine_data/bin/i386-windows"
-        for ext in dll drv exe sys acm ax ocx tlb; do
-            for f in "$BUILD_DIR/wine-i386-pe/dlls/"*/i386-windows/*.$ext; do
-                [ -f "$f" ] && cp "$f" "$wine_data/bin/i386-windows/"
-            done
+    # 主构建 --enable-archs=i386,x86_64 已产出全部 32-bit PE, 直接取自 wine-ohos,
+    # 无需独立的 i686-mingw32 构建.
+    # 注意: wineboot/rpcss/services/conhost 等服务程序只有 x86_64 版,
+    # WoW64 下它们由 Wine 以 64 位进程拉起, 属上游 WoW64 的正常行为.
+    mkdir -p "$wine_data/bin/i386-windows"
+    for ext in dll drv exe sys acm ax ocx tlb; do
+        for f in "$BUILD_DIR/wine-ohos/dlls/"*/i386-windows/*.$ext; do
+            [ -f "$f" ] && cp "$f" "$wine_data/bin/i386-windows/"
         done
-        log "  i386-windows → $(ls "$wine_data/bin/i386-windows" | wc -l) files (ALL)"
+    done
+    log "  i386-windows → $(ls "$wine_data/bin/i386-windows" | wc -l) files (ALL)"
 
-        # 32-bit exe stubs, 放在 bin/i386-windows/.
-        # Wine 通过 WINEARCH 或 exe header 判断 32/64, 自动加载对应 DLL.
-        for exe in "$BUILD_DIR/wine-i386-pe/programs/"*/i386-windows/*.exe; do
-            [ -f "$exe" ] && cp "$exe" "$wine_data/bin/i386-windows/"
-        done
-        log "  i386 exe stubs → $(ls "$wine_data/bin/i386-windows"/*.exe 2>/dev/null | wc -l) files"
-    else
-        warn "  i386-windows: SKIP (build/wine-i386-pe not found)"
-    fi
+    # 32-bit exe stubs, 放在 bin/i386-windows/.
+    # Wine 通过 WINEARCH 或 exe header 判断 32/64, 自动加载对应 DLL.
+    for exe in "$BUILD_DIR/wine-ohos/programs/"*/i386-windows/*.exe; do
+        [ -f "$exe" ] && cp "$exe" "$wine_data/bin/i386-windows/"
+    done
+    log "  i386 exe stubs → $(ls "$wine_data/bin/i386-windows"/*.exe 2>/dev/null | wc -l) files"
 
     # *.exe stubs → rawfile
     for exe in "$BUILD_DIR/wine-ohos/programs/"*/x86_64-windows/*.exe; do
