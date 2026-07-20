@@ -15,6 +15,7 @@ export interface SmokeLaunchRequest {
   runId: string;
   suite: string;
   prefixMode: string;
+  longSeconds: number;
 }
 
 interface SmokeTestSpec {
@@ -179,7 +180,7 @@ function latestReplayShaderDirectory(prefix: string, current: string): string {
 }
 
 export function defaultSmokeRequest(): SmokeLaunchRequest {
-  return { mode: '', runId: '', suite: 'core', prefixMode: 'reuse' };
+  return { mode: '', runId: '', suite: 'core', prefixMode: 'reuse', longSeconds: 3600 };
 }
 
 export function parseSmokeRequest(text: string): SmokeLaunchRequest {
@@ -191,7 +192,9 @@ export function parseSmokeRequest(text: string): SmokeLaunchRequest {
       mode: value.mode === 'smoke' || value.mode === 'game' ? value.mode : '',
       runId: safeId(value.runId, `${Date.now()}`),
       suite: safeId(value.suite, 'core').toLowerCase(),
-      prefixMode: value.prefixMode === 'clean' ? 'clean' : 'reuse'
+      prefixMode: value.prefixMode === 'clean' ? 'clean' : 'reuse',
+      longSeconds: value.longSeconds >= 60 && value.longSeconds <= 3600 ?
+        Math.floor(value.longSeconds) : 3600
     };
   } catch (_) {
     return fallback;
@@ -313,6 +316,7 @@ export class SmokeRunner {
     const includeWineVulkanPresent = this.request.suite === 'wine-vulkan-present' ||
       this.request.suite === 'all';
     const includeDxvk = this.request.suite === 'dxvk' || this.request.suite === 'all';
+    const includeDxvkLong = this.request.suite === 'dxvk-long';
     const includeDxvkReplay = this.request.suite === 'dxvk-replay';
       const includeDxvkLayoutGeneral = this.request.suite === 'dxvk-layout-general';
       const includeDxvkCombined = this.request.suite === 'dxvk-combined';
@@ -375,6 +379,11 @@ export class SmokeRunner {
         executable: 'winehua_d3d11_smoke.exe', seconds: 5, timeoutMs: 180000 });
       tests.push({ id: 'dxvk-cube-x64', architecture: 'x64',
         executable: 'winehua_d3d_switch_cube.exe', seconds: 8, timeoutMs: 180000 });
+    }
+    if (includeDxvkLong) {
+      tests.push({ id: 'dxvk-long-x64', architecture: 'x64',
+        executable: 'winehua_d3d11_smoke.exe', seconds: this.request.longSeconds,
+        timeoutMs: this.request.longSeconds * 1000 + 90000 });
     }
     if (includeDxvkReplay) {
       tests.push({ id: 'dxvk-exact-replay-cs', architecture: 'guest-x64',
@@ -668,7 +677,9 @@ export class SmokeRunner {
       return;
     }
 
-      if ((this.request.suite === 'dxvk' || this.request.suite === 'dxvk-replay' || this.request.suite === 'dxvk-layout-general' || this.request.suite === 'dxvk-combined' || this.request.suite === 'all') &&
+      if ((this.request.suite === 'dxvk' || this.request.suite === 'dxvk-long' ||
+        this.request.suite === 'dxvk-replay' || this.request.suite === 'dxvk-layout-general' ||
+        this.request.suite === 'dxvk-combined' || this.request.suite === 'all') &&
         !validateManagedDxvk()) {
       const summary: SmokeSuiteSummary = {
         schemaVersion: 1, runId: this.request.runId, suite: this.request.suite,

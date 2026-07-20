@@ -87,10 +87,19 @@ Physical-device evidence:
   `phase2-20260721-052157` (clean): PASS.
 * Frame-order archive `frame-order-20260721-051629`: 60/60 valid, zero
   duplicate, zero regression.
+* Consecutive reuse gate `phase2-20260721-052627`: 3/3 suites PASS; all six
+  x86/x64 queries returned 42,488 samples with no fallback.
 
-Latest validated HAP: 397,782,101 bytes, built 2026-07-21 05:12:50 +08:00,
+The dedicated `dxvk-long` suite now measures wall-clock time, writes a
+five-second atomic heartbeat, exposes a fixed-frame visual window, and applies
+the complete D3D11 coverage gate at the end. Its 60-second infrastructure
+self-test `phase2-20260721-054504` passed after 62.161 seconds and 4,484 frames.
+The actual 3,600-second release run remains pending and must not be inferred
+from this shorter self-test.
+
+Latest validated HAP: 397,785,474 bytes, built 2026-07-21 05:42:59 +08:00,
 SHA-256
-`952f56a76330229c594d8657d0d7c82d3554dfaa00e616e1798c4c7918ab53fc`.
+`455e666edbaa7f0118f60cb6784041c2c96eb14aeef69c4e26441b9c3d2b3a1a`.
 
 ### 2026-07-20 performance update
 
@@ -110,9 +119,9 @@ identity/lifetime, mip and array subresources, barriers, BC1 emulation, MSAA,
 compute/UAV, stencil pixel and precise occlusion-query checks.
 
 The normal product cube is physically visible at about 83-84 FPS with no
-fallback or backward frame. Remaining Phase 2 release work is the post-fix
-reuse-times-three gate, 60-minute long run, broader real-game coverage, and the
-remaining BC2-BC7 compatibility matrix. D3D9-to-D3D11 hot switching in one HWND
+fallback or backward frame. Remaining Phase 2 release work is the 60-minute
+DXVK long run, broader real-game coverage, and the remaining BC2-BC7
+compatibility matrix. D3D9-to-D3D11 hot switching in one HWND
 also exposed a separate SurfaceQueue ownership handoff issue; direct D3D11 game
 launch is correct, but that lifecycle case must remain a regression item.
 
@@ -138,8 +147,8 @@ Committed baseline:
 
 | Component | Commit | Meaning |
 | --- | --- | --- |
-| Main repository | 7fe970e before this update | Stable strong-ring baseline |
-| Wine | 21fac73dd92 | Current Wine Vulkan/WoW64 integration |
+| Main repository | 6c15447 before the long-run update | Query-feedback fix |
+| Wine | 4af0d72b67d | Wine Vulkan/WoW64 plus wall-clock D3D11 long smoke |
 | Mesa | b2ecdc82d68 | Strong Venus ring publication barrier |
 | virglrenderer | b141b55650d | Precise Host shadow synchronization |
 | DXVK fork | 0cbbfa7d4c3 | WineHua Legacy 1.10.3 compatibility fixes |
@@ -189,7 +198,7 @@ fully conformant Vulkan feature set.
 
 Archive:
 
-    D:\MyProject\winehua-logs\automation\phase2-20260721-051423
+    D:\MyProject\winehua-logs\automation\phase2-20260721-054809
 
 Result:
 
@@ -200,16 +209,16 @@ Result:
 HAP:
 
     entry/build/default/outputs/default/entry-default-signed.hap
-    build time: 2026-07-21 05:12:50 +08:00
-    size:       397782101 bytes
-    SHA-256:    952f56a76330229c594d8657d0d7c82d3554dfaa00e616e1798c4c7918ab53fc
+    build time: 2026-07-21 05:42:59 +08:00
+    size:       397785474 bytes
+    SHA-256:    455e666edbaa7f0118f60cb6784041c2c96eb14aeef69c4e26441b9c3d2b3a1a
 
 Important evidence:
 
-    phase2-20260721-051423-01-dxvk-reuse/dxvk-legacy-x86.jpeg
-    phase2-20260721-051423-01-dxvk-reuse/dxvk-legacy-x64.jpeg
-    phase2-20260721-051423-01-dxvk-reuse/suite-summary.json
-    phase2-20260721-051423-01-dxvk-reuse/wine-stderr.log
+    phase2-20260721-054809-01-dxvk-reuse/dxvk-legacy-x86.jpeg
+    phase2-20260721-054809-01-dxvk-reuse/dxvk-legacy-x64.jpeg
+    phase2-20260721-054809-01-dxvk-reuse/suite-summary.json
+    phase2-20260721-054809-01-dxvk-reuse/wine-stderr.log
 
 Both official D3D11 smoke binaries reported:
 

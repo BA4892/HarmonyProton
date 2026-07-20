@@ -1,12 +1,14 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('core', 'audio', 'opengl', 'host-vulkan', 'venus', 'venus-sampled', 'venus-sampled-idle', 'capabilities', 'wine-vulkan', 'wine-vulkan-present', 'dxvk', 'dxvk-replay', 'dxvk-layout-general', 'dxvk-combined', 'dxvk-dynamic', 'all', 'long')]
+    [ValidateSet('core', 'audio', 'opengl', 'host-vulkan', 'venus', 'venus-sampled', 'venus-sampled-idle', 'capabilities', 'wine-vulkan', 'wine-vulkan-present', 'dxvk', 'dxvk-long', 'dxvk-replay', 'dxvk-layout-general', 'dxvk-combined', 'dxvk-dynamic', 'all', 'long')]
     [string]$Suite = 'core',
     [ValidateSet('reuse', 'clean')]
     [string]$Prefix = 'reuse',
     [ValidateSet('baseline', 'direct-fence-wait', 'no-remote-sync', 'no-dynamic-flush', 'fence-feedback', 'shadow-none', 'shadow-trace', 'shadow-to-host-explicit', 'shadow-precise', 'shadow-precise-single-ring', 'shadow-precise-sync-submit', 'shadow-precise-strong-ring', 'shadow-precise-direct-fence', 'shadow-precise-retain-shmem')]
     [string]$PerfProfile = 'baseline',
     [int]$Runs = 1,
+    [ValidateRange(60, 3600)]
+    [int]$LongSeconds = 3600,
     [switch]$Gate,
     [switch]$SkipBuild,
     [string]$DeviceId = '',
@@ -261,6 +263,8 @@ function Get-D3D11Coverage {
             computeUavSubmitted = [bool]$m.computeUavSubmitted
             computeUavFunctional = [bool]$m.computeUavFunctional
             computeSampledImageFunctional = [bool]$m.computeSampledImageFunctional
+            longWallClock = ($RunSuite -ne 'dxvk-long' -or
+                [int64]$m.durationMs -ge ([int64]$LongSeconds * 1000 - 2000))
             present60Frames = ([int]$m.presentFrames -ge 60)
             presentResultSuccess = ([int]$m.presentResult -eq 0)
             cpuFullFrameReadbackZero = ([int]$m.cpuReadBytes -eq 0)
@@ -283,6 +287,7 @@ function Get-D3D11Coverage {
                 queueSubmitCount = [int]$m.queueSubmitCount
                 featureProbeReadBytes = [int]$m.featureProbeReadBytes
                 featureProbeGpuCopies = [int]$m.featureProbeGpuCopies
+                durationMs = [int64]$m.durationMs
                 rgba8SampleMatrix = $m.rgba8SampleMatrix
                 descriptorMatrix = $m.descriptorMatrix
                 subresourceMatrix = $m.subresourceMatrix
@@ -510,7 +515,7 @@ function Invoke-OneRun {
     # starting Wayland, wineserver or Wine.
     Invoke-Hdc shell 'power-shell wakeup' | Out-Null
     Invoke-Hdc shell 'hilog -x' | Out-Null
-    $startCommand = "aa start -a $Ability -b $Bundle --ps winehua.mode smoke --ps winehua.run_id $RunId --ps winehua.suite $RunSuite --ps winehua.prefix $RunPrefix --ps winehua.perf_profile $PerfProfile"
+    $startCommand = "aa start -a $Ability -b $Bundle --ps winehua.mode smoke --ps winehua.run_id $RunId --ps winehua.suite $RunSuite --ps winehua.prefix $RunPrefix --ps winehua.perf_profile $PerfProfile --ps winehua.long_seconds $LongSeconds"
     $startOutput = Invoke-Hdc shell $startCommand
     if (($startOutput -join "`n") -match '10106102') {
         # Devices without a credential can be dismissed with one deterministic
@@ -523,7 +528,10 @@ function Invoke-OneRun {
         throw "Want start failed: $($startOutput -join ' ')"
     }
 
-    $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
+    $runTimeoutMinutes = if ($RunSuite -eq 'dxvk-long') {
+        [Math]::Max($TimeoutMinutes, [Math]::Ceiling($LongSeconds / 60.0) + 5)
+    } else { $TimeoutMinutes }
+    $deadline = (Get-Date).AddMinutes($runTimeoutMinutes)
     $captured = @{}
     $summaryText = ''
     while ((Get-Date) -lt $deadline) {
@@ -543,9 +551,11 @@ function Invoke-OneRun {
                 }
             }
         }
-        if ($RunSuite -in @('dxvk', 'dxvk-dynamic', 'all', 'long')) {
+        if ($RunSuite -in @('dxvk', 'dxvk-long', 'dxvk-dynamic', 'all')) {
             $dxvkTests = if ($RunSuite -eq 'dxvk-dynamic') {
                 @('dxvk-dynamic-cb-x86', 'dxvk-dynamic-cb-x64')
+            } elseif ($RunSuite -eq 'dxvk-long') {
+                @('dxvk-long-x64')
             } else {
                 @('dxvk-legacy-x64', 'dxvk-legacy-x86')
             }
@@ -591,9 +601,11 @@ function Invoke-OneRun {
             if (-not $captured.ContainsKey($testId)) { $captured[$testId] = $false }
         }
     }
-    if ($RunSuite -in @('dxvk', 'dxvk-dynamic', 'all', 'long')) {
+    if ($RunSuite -in @('dxvk', 'dxvk-long', 'dxvk-dynamic', 'all')) {
         $dxvkTests = if ($RunSuite -eq 'dxvk-dynamic') {
             @('dxvk-dynamic-cb-x86', 'dxvk-dynamic-cb-x64')
+        } elseif ($RunSuite -eq 'dxvk-long') {
+            @('dxvk-long-x64')
         } else {
             @('dxvk-legacy-x64', 'dxvk-legacy-x86')
         }
@@ -616,7 +628,7 @@ function Invoke-OneRun {
     }
 
     $visualPass = -not ($captured.Values -contains $false)
-    $coverage = if ($RunSuite -in @('dxvk', 'dxvk-dynamic', 'all', 'long')) {
+    $coverage = if ($RunSuite -in @('dxvk', 'dxvk-long', 'dxvk-dynamic', 'all')) {
         Get-D3D11Coverage -Summary $summary -RunSuite $RunSuite
     } else { $null }
     $coveragePass = $null -eq $coverage -or $coverage.status -eq 'PASS'

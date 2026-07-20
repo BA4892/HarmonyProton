@@ -885,24 +885,33 @@ bounded pending frames and SurfaceQueue backlog
 WineD3D/VirGL regression remains stable
 ```
 
+The dedicated DXVK wall-clock gate is:
+
+```powershell
+Invoke-WineHuaAutomation.ps1 -Suite dxvk-long -Prefix reuse `
+  -PerfProfile shadow-precise-strong-ring -LongSeconds 3600 `
+  -SkipBuild -DeviceId <device-id> -TimeoutMinutes 65
+```
+
+Use `-LongSeconds 60` only to validate the automation infrastructure. It does
+not satisfy the release long-run gate. The Host coverage check rejects a result
+whose recorded wall-clock duration is shorter than the requested value.
+
 ## 13. Source and runtime state
 
 ```text
 Repository: /home/maple/Work/WineHua-build
 Branch: feature/render-element-completeness
-Main HEAD at investigation start: a54f82a
+Main baseline before the long-run update: 6c15447
 
-Mesa:         2b1ca2f, clean
-virglrenderer:8e74bdf9, clean
-Wine:         21fac73, clean
-DXVK fork:    winehua/dxvk-legacy-1.10.3, dirty mapped-range changes
+Mesa:         b2ecdc82d68, clean
+virglrenderer:b141b55650d, clean
+Wine:         4af0d72b67d, clean
+DXVK fork:    0cbbfa7d4c3, with two untracked `.orig` backups only
 ```
 
-The main worktree also contains uncommitted product-launch, presentation,
-automation, and cube integration changes. Do not discard or overwrite them.
-The DXVK `.orig` backup files are not source and must not be committed.
-
-The current HAP before the next direct-fence experiment was already built and
-deployed successfully; the latest mapped-range baseline measured about
-4.92 FPS. A new authoritative artifact hash must be recorded after any Mesa or
-virglrenderer change.
+The DXVK `.orig` backup files are not source and must not be committed. The
+latest validated HAP is 397,785,474 bytes with SHA-256
+`455e666edbaa7f0118f60cb6784041c2c96eb14aeef69c4e26441b9c3d2b3a1a`.
+Its 60-second `dxvk-long` infrastructure run passed with 4,484 frames and no
+fallback. The full 3,600-second gate remains pending.

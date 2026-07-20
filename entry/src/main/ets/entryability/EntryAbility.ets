@@ -33,7 +33,8 @@ export default class EntryAbility extends UIAbility {
       mode: mode,
       runId: value('winehua.run_id', `${Date.now()}`),
       suite: suite,
-      prefixMode: value('winehua.prefix', 'reuse')
+      prefixMode: value('winehua.prefix', 'reuse'),
+      longSeconds: Number(value('winehua.long_seconds', '3600'))
     });
     AppStorage.setOrCreate<string>('winehua.smoke.request', request);
     AppStorage.set<string>('winehua.smoke.request', request);
