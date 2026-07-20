@@ -36,6 +36,9 @@ Validated physical-device runs:
   no CS error, about 83.45 FPS.
 * `frame-order-20260721-042507`: 60/60 valid, no duplicate or backward frame,
   no CS error, about 83.57 FPS, 5400+ frames, present failures=0.
+* Final ordinary default launch remained live past frame 21,989 at 83.7 FPS
+  with `regress 0`; the Host log reached present serial 22,069 with no CS
+  error. The cube was intentionally left running on the Pad for inspection.
 * `shadow-precise-sync-submit` failed quickly and proved that asynchronous
   queue submit was not the sole cause. It remains diagnostic-only.
 

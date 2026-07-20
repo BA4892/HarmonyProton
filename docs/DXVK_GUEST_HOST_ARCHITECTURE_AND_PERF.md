@@ -19,7 +19,9 @@ cube 的 Host present 稳定在约 83.6 FPS；每帧 Guest-to-Host 通常只发�
 x86 TSO，不能充分约束此前由原生 AArch64 `memcpy` 完成的共享内存 payload
 写入。加入可控的 sequentially-consistent publish fence 后，两轮实机测试分别
 通过 45/45 和 60/60 帧序采样，0 duplicate、0 regression、0 CS error，后者
-累计超过 5400 帧且 present failures=0。
+累计超过 5400 帧且 present failures=0。最终普通默认启动继续运行到截图帧号
+21,989（83.7 FPS、`regress 0`），Host present serial 超过 22,069，仍无 CS
+error。
 
 当前产品候选档位为：
 
