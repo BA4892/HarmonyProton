@@ -330,12 +330,15 @@ build_virglrenderer() {
     local cross
     local epoxy_pc="$NATIVE_BUILD/libepoxy/install/lib/pkgconfig"
     local python_with_yaml
+    local config_stamp="$build/.winehua-config"
+    local expected_config="venus=1;render-server-mode=thread;render-server-worker=thread;vulkan-dload=1"
 
     rm -f "$NATIVE_LIBS/libvirgl_test_server.so"
 
     if [ -f "$NATIVE_LIBS/libvirglrenderer.so.1" ] && \
        [ -f "$NATIVE_LIBS/libwinehua_vtest_server.so" ] && \
        [ -x "$NATIVE_LIBS/virgl_test_server" ] && \
+       [ "$(cat "$config_stamp" 2>/dev/null || true)" = "$expected_config" ] && \
        ! find "$src" -newer "$NATIVE_LIBS/libwinehua_vtest_server.so" -type f \
            \( -name '*.c' -o -name '*.h' -o -name 'meson.build' \) 2>/dev/null | grep -q .; then
         log "virglrenderer ($NATIVE_ARCH) 已就绪，跳过"
@@ -362,7 +365,10 @@ build_virglrenderer() {
         -Dplatforms=egl \
         -Dexternal-egl-without-gbm=true \
         -Dvtest=true \
-        -Dvenus=false \
+        -Dvenus=true \
+        -Drender-server-mode=thread \
+        -Drender-server-worker=thread \
+        -Dvulkan-dload=true \
         -Dvideo=false \
         -Dtests=false \
         -Dfuzzer=false \
@@ -383,6 +389,10 @@ build_virglrenderer() {
     chmod +x "$NATIVE_LIBS/virgl_test_server" 2>/dev/null || true
     cp "$build/install/lib/libwinehua_vtest_server.so" "$NATIVE_LIBS/" 2>/dev/null || \
         find "$build" -name 'libwinehua_vtest_server.so' -type f -exec cp {} "$NATIVE_LIBS/libwinehua_vtest_server.so" \;
+    if [ -x "$build/install/libexec/virgl_render_server" ]; then
+        cp "$build/install/libexec/virgl_render_server" "$NATIVE_LIBS/"
+    fi
+    printf '%s\n' "$expected_config" > "$config_stamp"
     rm -f "$NATIVE_LIBS/libvirgl_test_server.so"
 
     log "virglrenderer ($NATIVE_ARCH) → $NATIVE_LIBS"

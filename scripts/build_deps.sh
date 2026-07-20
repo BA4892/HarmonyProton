@@ -50,6 +50,18 @@ else
     log "guest_gfx: SKIP (设置 BUILD_GUEST_GFX=1 启用 Mesa/VirGL 图形测试 bundle)"
 fi
 
+# Guest Vulkan runtime: x86_64 Vulkan Loader + Mesa Venus ICD + deterministic
+# offscreen probe.  This deliberately remains separate from Wine Vulkan so B1
+# can diagnose the guest/host transport without Wine or Win32 WSI in the path.
+if [ "${BUILD_GUEST_VULKAN:-0}" = "1" ]; then
+    [ "${BUILD_GUEST_GFX:-0}" = "1" ] || \
+        err "BUILD_GUEST_VULKAN=1 requires BUILD_GUEST_GFX=1 (Mesa Venus ICD)"
+    log "=== 构建 guest_vulkan (x86_64 Loader + Venus ICD + smoke) ==="
+    NATIVE_ARCH="${GUEST_ARCH:-x86_64}" bash "$SCRIPT_DIR/build_ohos_guest_vulkan.sh"
+else
+    log "guest_vulkan: SKIP (设置 BUILD_GUEST_VULKAN=1 启用 Venus Vulkan runtime)"
+fi
+
 # Native compositor 依赖 (wayland-server for HAP) 在 build.sh 中按架构单独调用:
 #   bash scripts/build_native.sh
 

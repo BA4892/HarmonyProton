@@ -15,11 +15,13 @@ ROOT := $(realpath $(dir $(lastword $(MAKEFILE_LIST))))
 NATIVE_ARCH ?= x86_64
 GUEST_ARCH ?= x86_64
 BUILD_GUEST_GFX ?= 1
+BUILD_GUEST_VULKAN ?= 1
 TARGET_SDK_VERSION ?= 6.1.0(23)
 COMPATIBLE_SDK_VERSION ?= 6.1.0(23)
 export NATIVE_ARCH
 export GUEST_ARCH
 export BUILD_GUEST_GFX
+export BUILD_GUEST_VULKAN
 export TARGET_SDK_VERSION
 export COMPATIBLE_SDK_VERSION
 
@@ -27,6 +29,9 @@ CONFIG    := $(NATIVE_ARCH)
 BUILD_DIR := $(ROOT)/build
 STAMPS    := $(BUILD_DIR)/.stamps
 SCRIPTS   := $(ROOT)/scripts
+DXVK_SENTINEL := $(BUILD_DIR)/dxvk/legacy/x64/bin/d3d11.dll
+DXVK_STAMP := $(STAMPS)/dxvk-legacy
+DXVK_SOURCE_INPUTS := $(shell find $(ROOT)/thirdparty/dxvk/src -type f 2>/dev/null; find $(ROOT)/thirdparty/dxvk -maxdepth 1 -type f 2>/dev/null)
 
 # 架构列表 (NATIVE_ARCH=all 时展开为两个)
 ifeq ($(NATIVE_ARCH),all)
@@ -39,6 +44,29 @@ endif
 DEPS_SENTINEL   := $(BUILD_DIR)/sysroot-ext/usr/lib/x86_64-linux-ohos/libfreetype.so.6
 WINE_SENTINEL   := $(BUILD_DIR)/wine-native/tools/winegcc/winegcc
 GUEST_GFX_SENTINEL := $(BUILD_DIR)/guest_gfx/$(GUEST_ARCH)/winehua-guest-gfx.env
+GUEST_VULKAN_SENTINEL := $(BUILD_DIR)/guest_vulkan/$(GUEST_ARCH)/manifest.json
+
+# Guest runtime build scripts can also be invoked directly while iterating on
+# Mesa/Venus. Track their manifests as assemble inputs so a subsequent
+# `make hap` cannot silently reuse an older staged wine-data.zip.
+ASSEMBLE_GUEST_INPUTS :=
+ifeq ($(BUILD_GUEST_GFX),1)
+ASSEMBLE_GUEST_INPUTS += $(wildcard $(GUEST_GFX_SENTINEL))
+endif
+
+# ============================================================
+# dxvk — managed WineHua DXVK Legacy fork (x64 + x86)
+# ============================================================
+.PHONY: dxvk
+dxvk: $(DXVK_STAMP)
+
+$(DXVK_STAMP): $(SCRIPTS)/build_dxvk.sh $(DXVK_SOURCE_INPUTS) | $(STAMPS)
+	@echo "=== dxvk legacy ==="
+	bash $(SCRIPTS)/build_dxvk.sh
+	touch $@
+ifeq ($(BUILD_GUEST_VULKAN),1)
+ASSEMBLE_GUEST_INPUTS += $(wildcard $(GUEST_VULKAN_SENTINEL))
+endif
 
 # ============================================================
 # 默认目标
@@ -65,12 +93,42 @@ $(STAMPS)/arm64-v8a $(STAMPS)/x86_64:
 .PHONY: deps
 deps: $(STAMPS)/deps
 
-$(STAMPS)/deps: $(SCRIPTS)/build_deps.sh $(SCRIPTS)/env.sh FORCE | $(STAMPS)
+$(STAMPS)/deps: $(SCRIPTS)/build_deps.sh $(SCRIPTS)/build_ohos_guest_gfx.sh \
+	$(SCRIPTS)/build_ohos_guest_vulkan.sh $(ROOT)/smoke/guest_vulkan_smoke.c \
+	$(ROOT)/smoke/venus_sampled_image_probe.c \
+	$(ROOT)/smoke/venus_storage_write.comp \
+	$(ROOT)/smoke/venus_storage_read.comp \
+	$(ROOT)/smoke/venus_image_fetch.comp \
+	$(ROOT)/smoke/venus_combined_sample.comp \
+	$(ROOT)/smoke/venus_dxvk_contract_sample.comp \
+	$(ROOT)/smoke/venus_dxvk_contract_unknown_sample.comp \
+	$(ROOT)/smoke/venus_dxvk_contract_spec_sample.comp \
+	$(ROOT)/smoke/venus_dxvk_contract_vector_spec_sample.comp \
+	$(ROOT)/smoke/venus_spirv_replay.c \
+	$(wildcard $(ROOT)/replay_spv/CS_*.remapped.spv) \
+	$(ROOT)/smoke/venus_separated_sample.comp \
+	$(SCRIPTS)/env.sh FORCE | $(STAMPS)
 	@guest_gfx_ready=1; \
 	if [ "$(BUILD_GUEST_GFX)" = "1" ] && [ ! -f "$(GUEST_GFX_SENTINEL)" ]; then \
 	    guest_gfx_ready=0; \
 	fi; \
+	guest_vulkan_ready=1; \
+	if [ "$(BUILD_GUEST_VULKAN)" = "1" ] && [ ! -f "$(GUEST_VULKAN_SENTINEL)" ]; then \
+	    guest_vulkan_ready=0; \
+	fi; \
 	if [ -f $@ ] && [ -f $(DEPS_SENTINEL) ] && [ "$$guest_gfx_ready" = "1" ] && \
+	    [ "$$guest_vulkan_ready" = "1" ] && \
+	    ! [ "$(SCRIPTS)/build_ohos_guest_gfx.sh" -nt $@ ] && \
+	    ! [ "$(SCRIPTS)/build_ohos_guest_vulkan.sh" -nt $@ ] && \
+	    ! [ "$(ROOT)/smoke/guest_vulkan_smoke.c" -nt $@ ] && \
+	    ! [ "$(ROOT)/smoke/venus_sampled_image_probe.c" -nt $@ ] && \
+	    ! [ "$(ROOT)/smoke/venus_storage_write.comp" -nt $@ ] && \
+	    ! [ "$(ROOT)/smoke/venus_storage_read.comp" -nt $@ ] && \
+	    ! [ "$(ROOT)/smoke/venus_image_fetch.comp" -nt $@ ] && \
+	    ! [ "$(ROOT)/smoke/venus_combined_sample.comp" -nt $@ ] && \
+	    ! [ "$(ROOT)/smoke/venus_dxvk_contract_sample.comp" -nt $@ ] && \
+	    ! [ "$(ROOT)/smoke/venus_spirv_replay.c" -nt $@ ] && \
+	    ! [ "$(ROOT)/smoke/venus_separated_sample.comp" -nt $@ ] && \
 	    ! find $(ROOT)/thirdparty/freetype \
 	           $(ROOT)/thirdparty/libffi \
 	           $(ROOT)/thirdparty/wayland \
@@ -177,6 +235,7 @@ $$(STAMPS)/$(1)/native: $(SCRIPTS)/build_native.sh $(SCRIPTS)/env.sh FORCE | $$(
 		    [ -f "$$$$libs_dir/libxkbcommon.so.0" ] && \
 		    [ -f "$$$$libs_dir/libxml2.so.2" ] && \
 		    [ -f "$$$$libs_dir/libwinehua_vtest_server.so" ] && \
+	    ! [ "$(SCRIPTS)/build_native.sh" -nt $$@ ] && \
 	    ! find $(ROOT)/thirdparty/wayland \
 	           $(ROOT)/thirdparty/libffi \
 	           $(ROOT)/thirdparty/libepoxy \
@@ -205,8 +264,9 @@ define assemble_rule
 
 assemble-$(1): $$(STAMPS)/$(1)/assemble
 
-$$(STAMPS)/$(1)/assemble: $(SCRIPTS)/assemble.sh $(SCRIPTS)/env.sh \
-	$$(STAMPS)/deps $$(STAMPS)/wine-$(1) $$(STAMPS)/$(1)/native | $$(STAMPS)/$(1)
+$$(STAMPS)/$(1)/assemble: $(SCRIPTS)/assemble.sh $(SCRIPTS)/env.sh $(DXVK_SENTINEL) $(DXVK_STAMP) \
+	$$(STAMPS)/deps $$(STAMPS)/wine-$(1) $$(STAMPS)/$(1)/native \
+	$$(ASSEMBLE_GUEST_INPUTS) | $$(STAMPS)/$(1)
 	@echo "=== assemble ($(1)) ==="
 	NATIVE_ARCH=$(1) GUEST_ARCH=$(GUEST_ARCH) BUILD_GUEST_GFX=$(BUILD_GUEST_GFX) bash $(SCRIPTS)/assemble.sh
 	@touch $$@

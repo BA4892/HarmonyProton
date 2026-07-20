@@ -15,6 +15,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <chrono>
 
 #undef LOG_TAG
 #define LOG_TAG "WL_NAPI"
@@ -23,6 +24,11 @@
 // -- 全局状态 --
 static std::mutex gProcMutex;
 static std::vector<WineProcessEntry> gProcRegistry;
+
+static uint64_t TimestampMs() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+}
 
 // 前向声明
 static void EnsureMonitorRunning();
@@ -33,11 +39,23 @@ WineProcessEntry* AddProcess(pid_t pid, const std::string& exeFullPath, int stdo
     std::string basename = exeFullPath;
     auto slash = basename.find_last_of('/');
     if (slash != std::string::npos) basename = basename.substr(slash + 1);
+    gProcRegistry.erase(std::remove_if(gProcRegistry.begin(), gProcRegistry.end(),
+        [pid](const WineProcessEntry& entry) { return entry.pid == pid; }), gProcRegistry.end());
+    while (gProcRegistry.size() >= 128) {
+        auto ended = std::find_if(gProcRegistry.begin(), gProcRegistry.end(),
+            [](const WineProcessEntry& entry) { return !entry.running; });
+        if (ended == gProcRegistry.end()) break;
+        gProcRegistry.erase(ended);
+    }
     gProcRegistry.push_back({
         .pid = pid,
         .exeBasename = basename,
         .exeFullPath = exeFullPath,
         .running = true,
+        .startTimestampMs = TimestampMs(),
+        .endTimestampMs = 0,
+        .exitCode = -1,
+        .exitCodeSource = "unknown",
         .stdoutFd = stdoutFd,
         .readerActive = std::make_shared<std::atomic<bool>>(true)
     });
@@ -47,15 +65,18 @@ WineProcessEntry* AddProcess(pid_t pid, const std::string& exeFullPath, int stdo
     return &gProcRegistry.back();
 }
 
-void RemoveProcess(pid_t pid) {
+void RemoveProcess(pid_t pid, int exitCode, const std::string& exitCodeSource) {
     std::lock_guard<std::mutex> lock(gProcMutex);
-    for (auto it = gProcRegistry.begin(); it != gProcRegistry.end(); ++it) {
-        if (it->pid == pid) {
-            OH_LOG_INFO(LOG_APP, "[ProcReg] remove pid=%{public}d name=%{public}s total=%{public}zu→%{public}zu",
-                        pid, it->exeBasename.c_str(), gProcRegistry.size(), gProcRegistry.size() - 1);
-            it->running = false;
-            if (it->stdoutFd >= 0) { close(it->stdoutFd); it->stdoutFd = -1; }
-            gProcRegistry.erase(it);
+    for (auto& entry : gProcRegistry) {
+        if (entry.pid == pid) {
+            OH_LOG_INFO(LOG_APP,
+                        "[ProcReg] complete pid=%{public}d name=%{public}s exit=%{public}d source=%{public}s",
+                        pid, entry.exeBasename.c_str(), exitCode, exitCodeSource.c_str());
+            entry.running = false;
+            entry.endTimestampMs = TimestampMs();
+            entry.exitCode = exitCode;
+            entry.exitCodeSource = exitCodeSource;
+            if (entry.stdoutFd >= 0) { close(entry.stdoutFd); entry.stdoutFd = -1; }
             return;
         }
     }
@@ -194,7 +215,8 @@ void ReaderThread(int fd, pid_t pid, std::shared_ptr<std::atomic<bool>> active) 
     int status;
     waitpid(pid, &status, 0);
     LogProcessExit("wine", pid, status);
-    RemoveProcess(pid);
+    int exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    RemoveProcess(pid, exitCode, "process");
 
     if (gStateTsfn) {
         char msg[64];
@@ -235,4 +257,14 @@ void StartStderrLogger(int fd, const char* tag,
 std::vector<WineProcessEntry> GetProcessListSnapshot() {
     std::lock_guard<std::mutex> lock(gProcMutex);
     return gProcRegistry;
+}
+
+bool QueryProcessSnapshot(pid_t pid, WineProcessEntry* outEntry) {
+    if (!outEntry) return false;
+    std::lock_guard<std::mutex> lock(gProcMutex);
+    auto it = std::find_if(gProcRegistry.begin(), gProcRegistry.end(),
+        [pid](const WineProcessEntry& entry) { return entry.pid == pid; });
+    if (it == gProcRegistry.end()) return false;
+    *outEntry = *it;
+    return true;
 }

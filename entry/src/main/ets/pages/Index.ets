@@ -2,6 +2,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import testNapi from 'libentry.so';
 import { fileIo as fs, fileUri, picker } from '@kit.CoreFileKit';
 import { zlib } from '@kit.BasicServicesKit';
+import { SmokeLaunchRequest, SmokeRunner, defaultSmokeRequest, parseSmokeRequest } from '../service/SmokeRunner';
 
 const DOMAIN = 0x0000;
 const SOCK = '/data/storage/el2/base/files/.wine/wine-wayland';
@@ -15,11 +16,12 @@ const BIN_DIR = WINE_BIN;
 const BOX64 = `${WINE_BIN}/box64`;
 
 const DRIVE_C = '/data/storage/el2/base/files/.wine/drive_c';
+const WINE_SMOKE_PREFIX = `${FILES_BASE}/.wine-smoke`;
+const WINE_AUTOMATION_HOME = `${FILES_BASE}/home`;
 
 function pathExists(path: string): boolean {
   try {
-    fs.accessSync(path);
-    return true;
+    return fs.accessSync(path);
   } catch (_) {
     return false;
   }
@@ -85,6 +87,9 @@ interface ProcessInfo {
 @Entry
 @Component
 struct Index {
+  @StorageLink('winehua.smoke.request') smokeRequestText: string = '';
+  @StorageLink('winehua.d3d.backend') d3dBackendText: string = 'wined3d';
+  @StorageLink('winehua.game.path') gamePathText: string = '';
   @State state: string = 'idle';
   @State prefixReady: boolean = false;
   @State statusText: string = '检测中...';
@@ -96,8 +101,28 @@ struct Index {
   @State initOverlayText: string = '';
   private hasRawfileWineData: boolean = false;
   private zHome: string = '/storage/Users/currentUser/Download';
+  private automationMode: boolean = false;
+  private prefixMode: string = 'reuse';
+  private prefixRoot: string = `${FILES_BASE}/.wine`;
+  private driveC: string = DRIVE_C;
+  private sockPath: string = SOCK;
+  private smokeRequest: SmokeLaunchRequest = defaultSmokeRequest();
+  private smokeStarted: boolean = false;
+  private cleanPrefixPrepared: boolean = false;
+  private d3dBackend: string = 'wined3d';
+  private gameTestMode: boolean = false;
+  private gameStarted: boolean = false;
 
   aboutToAppear(): void {
+    this.smokeRequest = parseSmokeRequest(this.smokeRequestText);
+    this.automationMode = this.smokeRequest.mode === 'smoke';
+    this.gameTestMode = this.smokeRequest.mode === 'game';
+    this.d3dBackend = this.d3dBackendText === 'dxvk_legacy' ? 'dxvk_legacy' : 'wined3d';
+    this.prefixMode = this.smokeRequest.prefixMode;
+    this.prefixRoot = this.prefixMode === 'clean' ? WINE_SMOKE_PREFIX : `${FILES_BASE}/.wine`;
+    this.driveC = `${this.prefixRoot}/drive_c`;
+    this.sockPath = `${this.prefixRoot}/wine-wayland`;
+    this.curDir = this.driveC;
     this.hasRawfileWineData = this.detectRawfileWineData();
 
     testNapi.setStateCallback((s: string) => {
@@ -147,6 +172,32 @@ struct Index {
     }
   }
 
+  private readRawfileText(name: string): string {
+    const rm = getContext(this).resourceManager;
+    try {
+      const rawFd = rm.getRawFdSync(name);
+      try {
+        const data = new ArrayBuffer(rawFd.length);
+        const count = fs.readSync(rawFd.fd, data, { offset: rawFd.offset, length: rawFd.length });
+        const bytes = new Uint8Array(data, 0, count);
+        let text = '';
+        for (let i = 0; i < bytes.length; ++i) text += String.fromCharCode(bytes[i]);
+        return text.trim();
+      } finally {
+        rm.closeRawFdSync(name);
+      }
+    } catch (_) {
+      return '';
+    }
+  }
+
+  private runtimeNeedsRefresh(): boolean {
+    if (!pathExists(`${WINE_ROOT}/share/wine/wine.inf`)) return true;
+    const packaged = this.readRawfileText('wine-runtime-manifest.json');
+    if (!packaged) return false;
+    return packaged !== readTextIfExists(`${WINE_ROOT}/.winehua-runtime-manifest.json`);
+  }
+
   private setInitStatus(text: string, visible: boolean): void {
     this.statusText = text;
     this.initOverlayText = text;
@@ -157,14 +208,13 @@ struct Index {
   // 使用 getRawFdSync 流式读取，避免 249MB 一次加载到内存导致 OOM
   private async extractWineData(): Promise<void> {
     const marker = `${WINE_ROOT}/share/wine/wine.inf`;
+    const packagedManifest = this.readRawfileText('wine-runtime-manifest.json');
     hilog.info(DOMAIN, 'wine', 'extract: check marker=%{public}s', marker);
-    try {
-      if (fs.accessSync(marker)) {
-        hilog.info(DOMAIN, 'wine', 'extract: already done (marker exists)');
-        return;
-      }
-    } catch (_) {}
-    hilog.info(DOMAIN, 'wine', 'extract: marker not found, start extracting');
+    if (!this.runtimeNeedsRefresh()) {
+      hilog.info(DOMAIN, 'wine', 'extract: runtime manifest matches');
+      return;
+    }
+    hilog.info(DOMAIN, 'wine', 'extract: runtime missing or changed, start managed refresh');
 
     const ctx = getContext(this);
     const rm = ctx.resourceManager;
@@ -196,6 +246,9 @@ struct Index {
       fs.closeSync(dst);
       hilog.info(DOMAIN, 'wine', 'extract: stream copy ok, totalWritten=%{public}d', totalWritten);
 
+      // files/wine is a managed runtime.  Refresh it atomically at the
+      // directory level while keeping .wine and .wine-smoke untouched.
+      if (pathExists(WINE_ROOT)) removePathRecursive(WINE_ROOT);
       // 确保目标目录存在
       fs.mkdirSync(WINE_ROOT, true);
       hilog.info(DOMAIN, 'wine', 'extract: calling decompressFile → %{public}s', WINE_ROOT);
@@ -205,6 +258,7 @@ struct Index {
       // 验证
       if (fs.accessSync(marker)) {
         hilog.info(DOMAIN, 'wine', 'extract: verified, marker exists');
+        if (packagedManifest) writeTextFile(`${WINE_ROOT}/.winehua-runtime-manifest.json`, packagedManifest);
       } else {
         hilog.warn(DOMAIN, 'wine', 'extract: marker still missing after decompress!');
       }
@@ -219,11 +273,11 @@ struct Index {
 
   private refreshPrefix = (): void => {
     try {
-      this.prefixReady = testNapi.checkWinePrefix();
+      this.prefixReady = testNapi.checkWinePrefix(this.prefixMode);
       if (this.prefixReady) {
-        this.curDir = DRIVE_C;
+        this.curDir = this.driveC;
         this.dirStack = [];
-        this.listDir(DRIVE_C);
+        this.listDir(this.driveC);
       } else {
         this.entries = [];
       }
@@ -237,12 +291,14 @@ struct Index {
   private waitForPrefix = async (): Promise<void> => {
     for (let i = 0; i < 90; i++) {
       try {
-        if (testNapi.checkWinePrefix()) {
+        if (testNapi.checkWinePrefix(this.prefixMode)) {
           this.prefixReady = true;
           this.initOverlayVisible = false;
-          this.curDir = DRIVE_C;
+          this.curDir = this.driveC;
           this.dirStack = [];
-          this.listDir(DRIVE_C);
+          this.listDir(this.driveC);
+          this.startRequestedSmoke();
+          this.startRequestedGame();
           return;
         }
       } catch (e) { /* prefix 还没初始化完成 */ }
@@ -316,11 +372,33 @@ struct Index {
   }
 
   private doInit = async (): Promise<void> => {
-    // HOME 目录 (Z: 映射目标), 通过 DocumentViewPicker 获取 Download 路径
-    const documentViewPicker = new picker.DocumentViewPicker();
-    let documentSaveResult = await documentViewPicker.save({ pickerMode: picker.DocumentPickerMode.DOWNLOAD });
-    const pickerHome = new fileUri.FileUri(documentSaveResult[0]).path;
-    this.zHome = pickerHome.endsWith('/') ? pickerHome : `${pickerHome}/`;
+    // Automation owns an internal HOME and must never open a Picker.
+    if (this.automationMode) {
+      this.zHome = `${WINE_AUTOMATION_HOME}/`;
+    } else if (this.gameTestMode) {
+      // Game-test mode avoids the picker but keeps the same managed user home
+      // used by the normal desktop session, so Z: points at installed games.
+      this.zHome = '/storage/Users/currentUser/Download/app.hackeris.winehua/';
+    } else {
+      const documentViewPicker = new picker.DocumentViewPicker();
+      let documentSaveResult = await documentViewPicker.save({ pickerMode: picker.DocumentPickerMode.DOWNLOAD });
+      const pickerHome = new fileUri.FileUri(documentSaveResult[0]).path;
+      this.zHome = pickerHome.endsWith('/') ? pickerHome : `${pickerHome}/`;
+    }
+    // HDC shell cannot remove application-owned sandbox files. A clean smoke
+    // prefix must be reset by the App before any server or socket is started.
+    if (this.automationMode && this.prefixMode === 'clean' && !this.cleanPrefixPrepared) {
+      this.setInitStatus('正在创建干净测试环境...', true);
+      const resetOk = testNapi.resetWinePrefix('clean') as boolean;
+      if (!resetOk) {
+        this.setInitStatus('干净测试环境重置失败', false);
+        hilog.error(DOMAIN, 'SmokeRunner', 'App-owned clean prefix reset failed');
+        return;
+      }
+      this.cleanPrefixPrepared = true;
+      this.prefixReady = false;
+      hilog.info(DOMAIN, 'SmokeRunner', 'App-owned clean prefix reset completed');
+    }
     hilog.info(DOMAIN, 'wine', 'auto-init: Z home=%{public}s', this.zHome);
     const gamesDir = `${this.zHome}games`;
     if (!ensureDirectory(gamesDir)) {
@@ -330,8 +408,7 @@ struct Index {
     hilog.info(DOMAIN, 'wine', 'auto-init: games directory=%{public}s', gamesDir);
     // 检查是否需要解压 wine 数据文件
     hilog.info(DOMAIN, 'wine', 'auto-init: check marker=%{public}s', `${WINE_ROOT}/share/wine/wine.inf`);
-    let needExtract = true;
-    try { needExtract = !fs.accessSync(`${WINE_ROOT}/share/wine/wine.inf`); } catch (_) {}
+    let needExtract = this.runtimeNeedsRefresh();
     if (needExtract) {
       this.setInitStatus('解压数据...', true);
       hilog.info(DOMAIN, 'wine', 'auto-init: extracting wine data...');
@@ -339,18 +416,19 @@ struct Index {
     }
     hilog.info(DOMAIN, 'wine', 'auto-init: starting Wine...');
     this.setInitStatus('启动服务...', true);
-    const ok: boolean = testNapi.startServer(SOCK);
+    const ok: boolean = testNapi.startServer(this.sockPath);
     if (!ok) {
       this.setInitStatus('启动服务失败', false);
       return;
     }
-    testNapi.launchClient(BOX64, [], SOCK, `${BIN_DIR}:${WINE_LIB}`, this.zHome);
+    testNapi.launchClient(BOX64, [], this.sockPath, `${BIN_DIR}:${WINE_LIB}`, this.zHome,
+      this.automationMode, this.prefixMode, this.d3dBackend);
   }
 
   private doReset = (): void => {
     this.setInitStatus('正在清空...', true);
     try {
-      testNapi.resetWinePrefix();
+      testNapi.resetWinePrefix(this.prefixMode);
       this.state = 'idle';
       this.prefixReady = false;
       this.processList = [];
@@ -366,12 +444,68 @@ struct Index {
   private doRun = (name: string): void => {
     this.statusText = '启动中...';
     let exePath = this.curDir + '/' + name;
-    testNapi.runWineExe(BIN_DIR, SOCK, `${WINE_BIN}:${WINE_LIB}`, exePath, this.zHome);
+    testNapi.runWineProgram({
+      windowsExePath: exePath,
+      argv: [],
+      environment: {},
+      workingDirectory: this.curDir,
+      prefixMode: this.prefixMode,
+      d3dBackend: this.d3dBackend,
+      presentBackend: 'virgl_compositor',
+      automationMode: false
+    });
   }
 
   private relPath = (): string => {
-    if (this.curDir == DRIVE_C) return 'C:\\';
-    return 'C:\\' + this.curDir.substring(DRIVE_C.length + 1).replace(/\//g, '\\');
+    if (this.curDir == this.driveC) return 'C:\\';
+    return 'C:\\' + this.curDir.substring(this.driveC.length + 1).replace(/\//g, '\\');
+  }
+
+  private startRequestedSmoke = (): void => {
+    if (!this.automationMode || this.smokeStarted) return;
+    this.smokeStarted = true;
+    const runner = new SmokeRunner(this.smokeRequest, (text: string) => {
+      this.statusText = text;
+      this.initOverlayText = text;
+    });
+    runner.run().catch((error: Object) => {
+      this.statusText = 'Smoke: infrastructure failure';
+      hilog.error(DOMAIN, 'SmokeRunner', 'suite failed: %{public}s', JSON.stringify(error));
+    });
+  }
+
+  private startRequestedGame = (): void => {
+    if (!this.gameTestMode || this.gameStarted || this.gamePathText.length === 0) return;
+    this.gameStarted = true;
+    this.statusText = `?? DXVK ??: ${this.gamePathText}`;
+    const gamePath = this.gamePathText;
+    const result = testNapi.runWineProgram({
+      windowsExePath: gamePath,
+      argv: [],
+      environment: {},
+      workingDirectory: '',
+      prefixMode: 'reuse',
+      d3dBackend: this.d3dBackend,
+      presentBackend: 'virgl_compositor',
+      automationMode: false
+    }) as ProcessInfo;
+    hilog.info(DOMAIN, 'GameTest', 'game launch path=%{public}s backend=%{public}s pid=%{public}d status=%{public}s',
+      gamePath, this.d3dBackend, result.pid, result.state);
+  }
+
+  private startDeveloperSmoke = (): void => {
+    this.smokeRequest = {
+      mode: 'smoke', runId: `developer-${Date.now()}`, suite: 'core', prefixMode: 'reuse'
+    };
+    this.automationMode = true;
+    this.gameTestMode = false;
+    this.prefixMode = 'reuse';
+    this.prefixRoot = `${FILES_BASE}/.wine`;
+    this.driveC = `${this.prefixRoot}/drive_c`;
+    this.sockPath = `${this.prefixRoot}/wine-wayland`;
+    this.smokeStarted = false;
+    if (this.prefixReady) this.startRequestedSmoke();
+    else this.doInit();
   }
 
   build() {
@@ -425,6 +559,12 @@ struct Index {
             .onClick(this.doInit)
             .margin({ bottom: 8 })
         }
+
+        Button('开发测试（Core）')
+          .width('100%').backgroundColor('#246')
+          .enabled(this.state != 'wineserver-starting' && this.state != 'wineboot-starting')
+          .onClick(this.startDeveloperSmoke)
+          .margin({ bottom: 8 })
 
         Divider().color('#2a2a2a').width('100%')
 
@@ -507,7 +647,7 @@ struct Index {
         // -- 文件浏览器 --
         if (this.prefixReady) {
           Row() {
-            if (this.curDir != DRIVE_C) {
+            if (this.curDir != this.driveC) {
               Button('← 上级目录')
                 .backgroundColor('#333')
                 .onClick(this.goUp)

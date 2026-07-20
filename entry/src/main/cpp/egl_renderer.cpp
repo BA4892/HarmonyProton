@@ -6,6 +6,7 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 #include <mutex>
 #include <fcntl.h>
@@ -52,8 +53,20 @@ struct RendererPerfWindow {
 
     void PublishDisplayedFps(uint32_t toplevelId, uint64_t nowUs)
     {
-        static constexpr const char* kPath =
-            "/data/storage/el2/base/files/.wine/drive_c/windows/temp/winehua_display_fps.txt";
+        std::string path = "/data/storage/el2/base/files/.wine/drive_c/windows/temp/winehua_display_fps.txt";
+        const winehua::GraphicsBackendState graphicsState =
+            winehua::GraphicsBroker::GetInstance().GetState();
+        static constexpr const char* kGraphicsSuffix = "/graphics";
+        if (graphicsState.runtimeDir.size() > strlen(kGraphicsSuffix) &&
+            graphicsState.runtimeDir.compare(
+                graphicsState.runtimeDir.size() - strlen(kGraphicsSuffix),
+                strlen(kGraphicsSuffix), kGraphicsSuffix) == 0)
+        {
+            path = graphicsState.runtimeDir.substr(
+                0, graphicsState.runtimeDir.size() - strlen(kGraphicsSuffix));
+            path += "/drive_c/windows/temp/winehua_display_fps.txt";
+        }
+        const char* kPath = path.c_str();
         const uint64_t elapsedUs = nowUs - publishStartedUs;
         if (elapsedUs < 1000000) return;
 

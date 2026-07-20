@@ -10,7 +10,9 @@
 #include "wine_env.h"
 #include "wine_process.h"
 #include "wine_launch.h"
+#include "wine_exe.h"
 #include "wine_mmap_test.h"
+#include "host_vulkan_probe.h"
 
 #include <unistd.h>
 #include <signal.h>
@@ -22,10 +24,12 @@
 #include <fcntl.h>
 #include <cstdlib>
 #include <cstdio>
+#include <cerrno>
 #include <cstring>
 #include <string>
 #include <thread>
 #include <atomic>
+#include <algorithm>
 #include <dlfcn.h>
 
 #undef LOG_TAG
@@ -108,8 +112,8 @@ static napi_value StartServer(napi_env env, napi_callback_info info) {
 }
 
 static napi_value LaunchClient(napi_env env, napi_callback_info info) {
-    size_t argc = 5;
-    napi_value args[5] = {};
+    size_t argc = 8;
+    napi_value args[8] = {};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
 
     auto* p = new LaunchParams();
@@ -125,13 +129,29 @@ static napi_value LaunchClient(napi_env env, napi_callback_info info) {
         napi_get_value_string_utf8(env, args[4], buf, sizeof(buf), nullptr);
         p->homeDir = buf;
     }
+    if (argc >= 6) napi_get_value_bool(env, args[5], &p->automationMode);
+    p->prefixDir = WINE_PREFIX;
+    if (argc >= 7) {
+        char prefixMode[32] = {};
+        napi_get_value_string_utf8(env, args[6], prefixMode, sizeof(prefixMode), nullptr);
+        if (!strcmp(prefixMode, "clean")) p->prefixDir = WINE_SMOKE_PREFIX;
+    }
+    if (argc >= 8) {
+        char d3dBackend[64] = {};
+        napi_get_value_string_utf8(env, args[7], d3dBackend, sizeof(d3dBackend), nullptr);
+        if (!strcmp(d3dBackend, "wined3d") || !strncmp(d3dBackend, "dxvk_", 5))
+            p->d3dBackend = d3dBackend;
+    }
     // 向后兼容: 旧调用未传 homeDir 时使用默认路径
     if (p->homeDir.empty()) {
         p->homeDir = "/storage/Users/currentUser/Download";
     }
 
-    OH_LOG_INFO(LOG_APP, "[Launch] exe=%{public}s sock=%{public}s lib=%{public}s home=%{public}s (async)",
-                p->exePath.c_str(), p->sockPath.c_str(), p->libPath.c_str(), p->homeDir.c_str());
+    OH_LOG_INFO(LOG_APP,
+                "[Launch] exe=%{public}s sock=%{public}s lib=%{public}s home=%{public}s prefix=%{public}s automation=%{public}s (async)",
+                p->exePath.c_str(), p->sockPath.c_str(), p->libPath.c_str(), p->homeDir.c_str(),
+                p->prefixDir.c_str(), p->automationMode ? "true" : "false");
+    OH_LOG_INFO(LOG_APP, "[Launch] desktop D3D backend=%{public}s", p->d3dBackend.c_str());
 
     // 保证可执行
     if (access(p->exePath.c_str(), X_OK) != 0) chmod(p->exePath.c_str(), 0755);
@@ -155,43 +175,110 @@ static napi_value LaunchClient(napi_env env, napi_callback_info info) {
     return r;
 }
 
-napi_value RunWineExe(napi_env env, napi_callback_info info);
-
 // -- NAPI: checkWinePrefix -- 检测 .wine 是否已完整初始化 --
 static napi_value CheckWinePrefix(napi_env env, napi_callback_info info) {
-    bool ok = IsWinePrefixInitialized();
-    OH_LOG_INFO(LOG_APP, "[Wine] checkWinePrefix: initialized=%{public}s", ok ? "yes" : "no");
+    size_t argc = 1;
+    napi_value args[1] = {};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    std::string prefix = WINE_PREFIX;
+    if (argc >= 1) {
+        char mode[32] = {};
+        napi_get_value_string_utf8(env, args[0], mode, sizeof(mode), nullptr);
+        if (!strcmp(mode, "clean")) prefix = WINE_SMOKE_PREFIX;
+    }
+    bool ok = IsWinePrefixInitialized(prefix);
+    OH_LOG_INFO(LOG_APP, "[Wine] checkWinePrefix prefix=%{public}s initialized=%{public}s",
+                prefix.c_str(), ok ? "yes" : "no");
     napi_value r;
     napi_get_boolean(env, ok, &r);
     return r;
 }
 
-// -- NAPI: resetWinePrefix -- 一键清空 files/.wine 目录
-static void RmDir(const char* path) {
+// -- NAPI: resetWinePrefix -- 一键清空受管 prefix 目录
+static bool RmDir(const char* path) {
     DIR* d = opendir(path);
-    if (!d) return;
+    if (!d) return errno == ENOENT;
+    bool ok = true;
     dirent* e;
     while ((e = readdir(d))) {
         if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
         std::string full = std::string(path) + "/" + e->d_name;
         struct stat st;
-        if (stat(full.c_str(), &st) == 0) {
-            if (S_ISDIR(st.st_mode)) RmDir(full.c_str());
-            else unlink(full.c_str());
+        if (lstat(full.c_str(), &st) == 0) {
+            if (S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)) {
+                if (!RmDir(full.c_str())) ok = false;
+            } else if (unlink(full.c_str()) != 0) {
+                ok = false;
+                OH_LOG_ERROR(LOG_APP, "[NAPI] unlink %{public}s failed: %{public}s",
+                             full.c_str(), strerror(errno));
+            }
+        } else {
+            ok = false;
+            OH_LOG_ERROR(LOG_APP, "[NAPI] lstat %{public}s failed: %{public}s",
+                         full.c_str(), strerror(errno));
         }
     }
     closedir(d);
-    rmdir(path);
+    if (rmdir(path) != 0 && errno != ENOENT) {
+        ok = false;
+        OH_LOG_ERROR(LOG_APP, "[NAPI] rmdir %{public}s failed: %{public}s",
+                     path, strerror(errno));
+    }
+    return ok;
 }
 
 static napi_value ResetWinePrefix(napi_env env, napi_callback_info info) {
-    OH_LOG_INFO(LOG_APP, "[NAPI] resetWinePrefix called");
-    KillAllProcesses();
+    size_t argc = 1;
+    napi_value args[1] = {};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
     const char* prefix = WINE_PREFIX;
-    RmDir(prefix);
-    mkdir(prefix, 0755);
-    OH_LOG_INFO(LOG_APP, "[NAPI] resetWinePrefix: %{public}s cleared and recreated", prefix);
-    return nullptr;
+    if (argc >= 1) {
+        char mode[32] = {};
+        napi_get_value_string_utf8(env, args[0], mode, sizeof(mode), nullptr);
+        if (!strcmp(mode, "clean")) prefix = WINE_SMOKE_PREFIX;
+    }
+    OH_LOG_INFO(LOG_APP, "[NAPI] resetWinePrefix called prefix=%{public}s", prefix);
+    KillAllProcesses();
+    bool ok = RmDir(prefix);
+    if (mkdir(prefix, 0755) != 0 && errno != EEXIST) {
+        ok = false;
+        OH_LOG_ERROR(LOG_APP, "[NAPI] mkdir %{public}s failed: %{public}s",
+                     prefix, strerror(errno));
+    }
+    OH_LOG_INFO(LOG_APP, "[NAPI] resetWinePrefix: %{public}s %{public}s",
+                prefix, ok ? "cleared and recreated" : "reset failed");
+    napi_value result;
+    napi_get_boolean(env, ok, &result);
+    return result;
+}
+
+static napi_value RunHostVulkanProbe(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2] = {};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    uint64_t surfaceId = 0;
+    bool lossless = false;
+    char runId[128] = {};
+    if (argc < 2 ||
+        napi_get_value_bigint_uint64(env, args[0], &surfaceId, &lossless) != napi_ok || !lossless ||
+        napi_get_value_string_utf8(env, args[1], runId, sizeof(runId), nullptr) != napi_ok) {
+        napi_value result;
+        napi_get_boolean(env, false, &result);
+        return result;
+    }
+    bool started = StartHostVulkanProbe(surfaceId, runId);
+    OH_LOG_INFO(LOG_APP, "[HostVulkan] start surface=%{public}llu run=%{public}s result=%{public}s",
+                static_cast<unsigned long long>(surfaceId), runId, started ? "true" : "false");
+    napi_value result;
+    napi_get_boolean(env, started, &result);
+    return result;
+}
+
+static napi_value StopHostVulkanProbeNapi(napi_env env, napi_callback_info) {
+    StopHostVulkanProbe();
+    napi_value result;
+    napi_get_boolean(env, true, &result);
+    return result;
 }
 
 
@@ -533,6 +620,8 @@ static napi_value SetToplevelVisible(napi_env env, napi_callback_info info) {
 // -- NAPI: getProcessList — 返回运行中进程列表 --
 static napi_value GetProcessList(napi_env env, napi_callback_info info) {
     auto snapshot = GetProcessListSnapshot();
+    snapshot.erase(std::remove_if(snapshot.begin(), snapshot.end(),
+        [](const WineProcessEntry& entry) { return !entry.running; }), snapshot.end());
 
     napi_value arr;
     napi_create_array_with_length(env, snapshot.size(), &arr);
@@ -599,8 +688,14 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"destroyToplevel", nullptr, DestroyToplevel, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendToplevelClose", nullptr, SendToplevelClose, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"runWineExe",     nullptr, RunWineExe,     nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"runWineProgram", nullptr, RunWineProgram, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"runGuestProgram", nullptr, RunGuestProgram, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"queryWineProcess", nullptr, QueryWineProcess, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"terminateWineProcess", nullptr, TerminateWineProcess, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"checkWinePrefix",nullptr, CheckWinePrefix,nullptr, nullptr, nullptr, napi_default, nullptr},
         {"resetWinePrefix",nullptr, ResetWinePrefix,nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"runHostVulkanProbe", nullptr, RunHostVulkanProbe, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"stopHostVulkanProbe", nullptr, StopHostVulkanProbeNapi, nullptr, nullptr, nullptr, napi_default, nullptr},
         // surfaceId 驱动的渲染器管理 (XComponentController 回调)
         {"createRenderer",  nullptr, CreateRenderer,  nullptr, nullptr, nullptr, napi_default, nullptr},
         {"resizeRenderer",  nullptr, ResizeRenderer,  nullptr, nullptr, nullptr, napi_default, nullptr},

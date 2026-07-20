@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+#include "wine_constants.h"
+
 // -- Box64 性能调优 (static inline, 供 napi_init / wine_child 共用) --
 static inline void SetBox64PerfEnv() {
     setenv("BOX64_LOG", "0", 1);
@@ -40,7 +42,15 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
                                       const std::string& libPath,
                                       const std::string& binDir,
                                       int audioBootstrapFd,
-                                      const std::string& homeDir);
+                                      const std::string& homeDir,
+                                      const std::string& prefixDir = WINE_PREFIX);
+
+// Add the managed product D3D backend overlay to a process environment. The
+// overlay is opt-in: normal desktop launches remain WineD3D unless the caller
+// explicitly selects a managed dxvk_* profile.
+void AppendD3dBackendEnv(std::vector<std::string>& env,
+                         const std::string& d3dBackend,
+                         const std::string& binDir);
 
 // -- Audio bootstrap --
 int CreateAudioBootstrapFd(const std::string& runtimeDir);

@@ -237,6 +237,109 @@ assemble_pad() {
         log "  winehua_graphics_smoke.exe → x86_64-windows/"
     fi
 
+    # Versioned, App-managed C:\smoke payload.  Keep it separate from Wine's
+    # DLL search directories so a prefix refresh can update tests without
+    # touching user files or relying on Explorer.
+    local smoke_dir="$wine_data/smoke"
+    mkdir -p "$smoke_dir/x64" "$smoke_dir/x86" "$smoke_dir/assets"
+    local guest_shader_root="$BUILD_DIR/guest_vulkan/$guest_arch/share/winehua"
+    local smoke_shader
+    for smoke_shader in venus_storage_write venus_storage_read venus_image_fetch venus_combined_sample venus_separated_sample; do
+        [ -f "$guest_shader_root/$smoke_shader.spv" ] || err "Wine Vulkan sampled-image shader missing: $guest_shader_root/$smoke_shader.spv"
+        cp "$guest_shader_root/$smoke_shader.spv" "$smoke_dir/assets/$smoke_shader.spv"
+    done
+    local dxvk_root="$DXVK_BUILD_ROOT"
+    [ -f "$dxvk_root/x64/bin/d3d11.dll" ] || err "DXVK Legacy x64 d3d11.dll missing: $dxvk_root/x64/bin/d3d11.dll"
+    [ -f "$dxvk_root/x64/bin/dxgi.dll" ] || err "DXVK Legacy x64 dxgi.dll missing: $dxvk_root/x64/bin/dxgi.dll"
+    [ -f "$dxvk_root/x86/bin/d3d11.dll" ] || err "DXVK Legacy x86 d3d11.dll missing: $dxvk_root/x86/bin/d3d11.dll"
+    [ -f "$dxvk_root/x86/bin/dxgi.dll" ] || err "DXVK Legacy x86 dxgi.dll missing: $dxvk_root/x86/bin/dxgi.dll"
+    mkdir -p "$smoke_dir/dxvk/legacy/x64" "$smoke_dir/dxvk/legacy/x86"
+    cp "$dxvk_root/x64/bin/d3d11.dll" "$smoke_dir/dxvk/legacy/x64/d3d11.dll"
+    cp "$dxvk_root/x64/bin/dxgi.dll" "$smoke_dir/dxvk/legacy/x64/dxgi.dll"
+    cp "$dxvk_root/x86/bin/d3d11.dll" "$smoke_dir/dxvk/legacy/x86/d3d11.dll"
+    cp "$dxvk_root/x86/bin/dxgi.dll" "$smoke_dir/dxvk/legacy/x86/dxgi.dll"
+    # The DXVK binaries are runtime-owned overlays.  Do not place them next
+    # to the smoke executables: that would make the test layout look like a
+    # game distribution and would force real games to carry WineHua-specific
+    # DLLs.  SpawnWineProgram exposes this versioned directory through
+    # WINEDLLPATH only for a selected dxvk_* backend.
+    local smoke_program
+    for smoke_program in winehua_audio_smoke winehua_graphics_smoke winehua_vulkan_smoke winehua_d3d11_smoke; do
+        local smoke64="$BUILD_DIR/wine-ohos/programs/$smoke_program/x86_64-windows/$smoke_program.exe"
+        local smoke32="$BUILD_DIR/wine-i386-pe/programs/$smoke_program/i386-windows/$smoke_program.exe"
+        if [ ! -f "$smoke32" ]; then
+            smoke32="$BUILD_DIR/wine-ohos/programs/$smoke_program/i386-windows/$smoke_program.exe"
+        fi
+        [ -f "$smoke64" ] || err "managed smoke x64 artifact missing: $smoke64"
+        [ -f "$smoke32" ] || err "managed smoke x86 artifact missing: $smoke32"
+        cp "$smoke64" "$smoke_dir/x64/$smoke_program.exe"
+        cp "$smoke32" "$smoke_dir/x86/$smoke_program.exe"
+    done
+    local audio64_sha graphics64_sha vulkan64_sha d3d1164_sha audio32_sha graphics32_sha vulkan32_sha d3d1132_sha
+    local storage_write_sha storage_read_sha image_fetch_sha combined_sample_sha separated_sample_sha
+    audio64_sha="$(sha256sum "$smoke_dir/x64/winehua_audio_smoke.exe" | awk '{print $1}')"
+    graphics64_sha="$(sha256sum "$smoke_dir/x64/winehua_graphics_smoke.exe" | awk '{print $1}')"
+    vulkan64_sha="$(sha256sum "$smoke_dir/x64/winehua_vulkan_smoke.exe" | awk '{print $1}')"
+    d3d1164_sha="$(sha256sum "$smoke_dir/x64/winehua_d3d11_smoke.exe" | awk '{print $1}')"
+    audio32_sha="$(sha256sum "$smoke_dir/x86/winehua_audio_smoke.exe" | awk '{print $1}')"
+    graphics32_sha="$(sha256sum "$smoke_dir/x86/winehua_graphics_smoke.exe" | awk '{print $1}')"
+    vulkan32_sha="$(sha256sum "$smoke_dir/x86/winehua_vulkan_smoke.exe" | awk '{print $1}')"
+    d3d1132_sha="$(sha256sum "$smoke_dir/x86/winehua_d3d11_smoke.exe" | awk '{print $1}')"
+    storage_write_sha="$(sha256sum "$smoke_dir/assets/venus_storage_write.spv" | awk '{print $1}')"
+    storage_read_sha="$(sha256sum "$smoke_dir/assets/venus_storage_read.spv" | awk '{print $1}')"
+    image_fetch_sha="$(sha256sum "$smoke_dir/assets/venus_image_fetch.spv" | awk '{print $1}')"
+    combined_sample_sha="$(sha256sum "$smoke_dir/assets/venus_combined_sample.spv" | awk '{print $1}')"
+    separated_sample_sha="$(sha256sum "$smoke_dir/assets/venus_separated_sample.spv" | awk '{print $1}')"
+    local dxvk_commit
+    dxvk_commit="$(git -c safe.directory="$DXVK_SRC" -C "$DXVK_SRC" rev-parse HEAD 2>/dev/null || echo unknown)"
+    local dxvk64_d3d11_sha dxvk64_dxgi_sha dxvk32_d3d11_sha dxvk32_dxgi_sha
+    dxvk64_d3d11_sha="$(sha256sum "$smoke_dir/dxvk/legacy/x64/d3d11.dll" | awk '{print $1}')"
+    dxvk64_dxgi_sha="$(sha256sum "$smoke_dir/dxvk/legacy/x64/dxgi.dll" | awk '{print $1}')"
+    dxvk32_d3d11_sha="$(sha256sum "$smoke_dir/dxvk/legacy/x86/d3d11.dll" | awk '{print $1}')"
+    dxvk32_dxgi_sha="$(sha256sum "$smoke_dir/dxvk/legacy/x86/dxgi.dll" | awk '{print $1}')"
+    cat > "$smoke_dir/dxvk/manifest.json" <<EOF
+{
+  "schemaVersion": 1,
+  "backend": "dxvk",
+  "profile": "legacy",
+  "version": "1.10.3",
+  "commit": "$dxvk_commit",
+  "requiredCapabilities": {
+    "vulkanApi": "1.1",
+    "bcFormats": false,
+    "descriptorIndexing": false
+  },
+  "runtimes": {
+    "x64": {"d3d11.dll": "$dxvk64_d3d11_sha", "dxgi.dll": "$dxvk64_dxgi_sha"},
+    "x86": {"d3d11.dll": "$dxvk32_d3d11_sha", "dxgi.dll": "$dxvk32_dxgi_sha"}
+  }
+}
+EOF
+    cat > "$smoke_dir/manifest.json" <<EOF
+{
+  "schemaVersion": 1,
+  "suiteVersion": "phase2-vulkan-dxvk-legacy-v1",
+  "enabledSuites": ["core", "audio", "opengl", "wine-vulkan", "dxvk"],
+  "managedRoot": "C:\\\\smoke",
+  "files": {
+    "x64/winehua_audio_smoke.exe": "$audio64_sha",
+    "x64/winehua_graphics_smoke.exe": "$graphics64_sha",
+    "x64/winehua_vulkan_smoke.exe": "$vulkan64_sha",
+    "x64/winehua_d3d11_smoke.exe": "$d3d1164_sha",
+    "x86/winehua_audio_smoke.exe": "$audio32_sha",
+    "x86/winehua_graphics_smoke.exe": "$graphics32_sha",
+    "x86/winehua_vulkan_smoke.exe": "$vulkan32_sha",
+    "x86/winehua_d3d11_smoke.exe": "$d3d1132_sha",
+    "assets/venus_storage_write.spv": "$storage_write_sha",
+    "assets/venus_storage_read.spv": "$storage_read_sha",
+    "assets/venus_image_fetch.spv": "$image_fetch_sha",
+    "assets/venus_combined_sample.spv": "$combined_sample_sha",
+    "assets/venus_separated_sample.spv": "$separated_sample_sha"
+  }
+}
+EOF
+    log "  managed smoke payload → smoke/{x64,x86}"
+
     # fonts
     cp "$WINE_SRC/fonts/"*.ttf "$wine_data/share/wine/fonts/"
     # NLS
@@ -325,6 +428,18 @@ HKLM,%FontSubStr%,"Lucida Console",,"Noto Sans Mono"' "$wine_data/share/wine/win
         log "  guest_gfx: SKIP (build/guest_gfx/$guest_arch/lib not found)"
     fi
 
+    # Guest Linux Vulkan runtime is intentionally outside C:\\smoke: it is an
+    # x86_64 OHOS ELF/Loader/ICD stack launched through Box64 for the B1 gate.
+    if [ -f "$BUILD_DIR/guest_vulkan/$guest_arch/manifest.json" ]; then
+        mkdir -p "$wine_data/bin/guest_vulkan"
+        cp -a "$BUILD_DIR/guest_vulkan/$guest_arch/"* "$wine_data/bin/guest_vulkan/"
+        log "  guest_vulkan ($guest_arch): Loader + Venus ICD + offscreen smoke"
+    elif [ "${BUILD_GUEST_VULKAN:-0}" = "1" ]; then
+        err "BUILD_GUEST_VULKAN=1 but build/guest_vulkan/$guest_arch/manifest.json is missing"
+    else
+        log "  guest_vulkan: SKIP"
+    fi
+
     # -- 3. 打包 zip → rawfile (不带 wine-data/ 前缀) --
     local rawfile_dir="$WINEHUA/entry/src/main/resources/rawfile"
     mkdir -p "$rawfile_dir"
@@ -333,6 +448,16 @@ HKLM,%FontSubStr%,"Lucida Console",,"Noto Sans Mono"' "$wine_data/share/wine/win
     rm -f "$STAGING_DIR/$zip_name"
     zip -r "$STAGING_DIR/$zip_name" . -x '*.git*'
     cp "$STAGING_DIR/$zip_name" "$rawfile_dir/"
+    local payload_sha
+    payload_sha="$(sha256sum "$rawfile_dir/$zip_name" | awk '{print $1}')"
+    cat > "$rawfile_dir/wine-runtime-manifest.json" <<EOF
+{
+  "schemaVersion": 1,
+  "payload": "wine-data.zip",
+  "payloadSha256": "$payload_sha",
+  "smokeSuiteVersion": "phase2-vulkan-b3-v1"
+}
+EOF
     log "  $zip_name → rawfile/ ($(du -h "$rawfile_dir/$zip_name" | cut -f1))"
 
     log "Pad 布局组装完成 ($NATIVE_ARCH)"

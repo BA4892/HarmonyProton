@@ -27,6 +27,12 @@ fi
 mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 
+# Wine uses one generated top-level Makefile. Reconfigure older incremental
+# trees when the managed Vulkan smoke program has not been registered yet.
+if [ -f "Makefile" ] && ! grep -q 'programs/winehua_vulkan_smoke' Makefile; then
+    rm -f Makefile config.status
+fi
+
 if [ "$HOST_OS" = "Darwin" ] && [ -f "Makefile" ]; then
     WAYLAND_SCANNER="$WAYLAND_SCANNER" perl -pi -e \
         's{/usr/local/bin/wayland-scanner}{$ENV{WAYLAND_SCANNER}}g' Makefile config.status

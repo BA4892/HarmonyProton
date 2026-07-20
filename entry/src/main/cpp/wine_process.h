@@ -7,6 +7,7 @@
 #include <atomic>
 #include <mutex>
 #include <initializer_list>
+#include <cstdint>
 
 // -- 进程注册表入口 --
 struct WineProcessEntry {
@@ -14,6 +15,10 @@ struct WineProcessEntry {
     std::string exeBasename;
     std::string exeFullPath;
     bool running;
+    uint64_t startTimestampMs;
+    uint64_t endTimestampMs;
+    int exitCode;
+    std::string exitCodeSource;
     int stdoutFd;
     std::shared_ptr<std::atomic<bool>> readerActive;
 };
@@ -24,11 +29,13 @@ extern std::string gSockPath;
 
 // -- 进程注册表 --
 WineProcessEntry* AddProcess(pid_t pid, const std::string& exeFullPath, int stdoutFd);
-void RemoveProcess(pid_t pid);
+void RemoveProcess(pid_t pid, int exitCode = -1,
+                   const std::string& exitCodeSource = "unknown");
 void KillAllProcesses();
 
 // -- 进程注册表只读访问 (供 NAPI handler) --
 std::vector<WineProcessEntry> GetProcessListSnapshot();
+bool QueryProcessSnapshot(pid_t pid, WineProcessEntry* outEntry);
 
 // -- 辅助函数 --
 void LogProcessExit(const char* tag, pid_t pid, int status);

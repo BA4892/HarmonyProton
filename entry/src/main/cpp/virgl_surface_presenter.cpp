@@ -1,4 +1,5 @@
 #include "virgl_surface_presenter.h"
+#include "venus_surface_presenter.h"
 
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
@@ -7,6 +8,7 @@
 #include <native_window/external_window.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -68,7 +70,8 @@ GLuint CompilePresentShader(GLenum type, const char* source)
 
 class SurfaceQueueTarget {
 public:
-    int Attach(uint64_t surfaceKey, uint64_t framePeriodNs, OHNativeWindow* window)
+    int Attach(uint64_t surfaceKey, uint64_t framePeriodNs,
+               OHNativeWindow* window)
     {
         if (!surfaceKey || !window) return -1;
         std::lock_guard<std::mutex> lock(mutex_);
@@ -426,13 +429,27 @@ void main() { outColor = texture(uTexture, vTexCoord); }
 
 class SurfaceQueuePresenterManager {
 public:
-    int Attach(uint64_t surfaceKey, uint64_t framePeriodNs, OHNativeWindow* window)
+    int Attach(uint64_t surfaceKey, uint64_t framePeriodNs, uint32_t flags,
+               OHNativeWindow* window)
     {
         if (!surfaceKey || !window) return -1;
         std::lock_guard<std::mutex> lock(mutex_);
         auto& entry = surfaces_[surfaceKey];
-        if (!entry.target) entry.target = std::make_unique<SurfaceQueueTarget>();
-        const int result = entry.target->Attach(surfaceKey, framePeriodNs, window);
+        entry.info.flags = (entry.info.flags & ~winehua::virgl_ipc::kSurfaceVulkan) |
+                           (flags & winehua::virgl_ipc::kSurfaceVulkan);
+        int result;
+        if (entry.info.flags & winehua::virgl_ipc::kSurfaceVulkan)
+        {
+            if (!entry.venusTarget)
+                entry.venusTarget = std::make_unique<winehua::VenusSurfaceQueueTarget>();
+            result = entry.venusTarget->Attach(surfaceKey, framePeriodNs, window);
+        }
+        else
+        {
+            if (!entry.virglTarget)
+                entry.virglTarget = std::make_unique<SurfaceQueueTarget>();
+            result = entry.virglTarget->Attach(surfaceKey, framePeriodNs, window);
+        }
         if (result == 0) entry.info.flags |= winehua::virgl_ipc::kSurfaceAttached;
         return result;
     }
@@ -442,7 +459,8 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = surfaces_.find(surfaceKey);
         if (it == surfaces_.end()) return 0;
-        if (it->second.target) it->second.target->Detach(surfaceKey);
+        if (it->second.virglTarget) it->second.virglTarget->Detach(surfaceKey);
+        if (it->second.venusTarget) it->second.venusTarget->Detach(surfaceKey);
         surfaces_.erase(it);
         return 0;
     }
@@ -451,8 +469,12 @@ public:
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = surfaces_.find(surfaceKey);
-        if (it == surfaces_.end() || !it->second.target) return -2;
-        return it->second.target->SetFramePeriod(framePeriodNs);
+        if (it == surfaces_.end()) return -2;
+        if (it->second.info.flags & winehua::virgl_ipc::kSurfaceVulkan)
+            return it->second.venusTarget
+                ? it->second.venusTarget->SetFramePeriod(framePeriodNs) : -2;
+        return it->second.virglTarget
+            ? it->second.virglTarget->SetFramePeriod(framePeriodNs) : -2;
     }
 
     int Present(uint32_t clientPid, uint32_t surfaceId, GLuint texture,
@@ -465,6 +487,7 @@ public:
             (static_cast<uint64_t>(clientPid) << 32) | surfaceId;
         std::lock_guard<std::mutex> lock(mutex_);
         auto& entry = surfaces_[surfaceKey];
+        if (entry.info.flags & winehua::virgl_ipc::kSurfaceVulkan) return -EINVAL;
         entry.info.surfaceKey = surfaceKey;
         entry.info.clientPid = clientPid;
         entry.info.surfaceId = surfaceId;
@@ -472,9 +495,46 @@ public:
         entry.info.height = height;
         entry.info.serial = serial;
         entry.lastPresentUs = NowUs();
-        if (!entry.target) return -2;
-        return entry.target->Present(
+        if (!entry.virglTarget) return -2;
+        return entry.virglTarget->Present(
             texture, width, height, drawable, serial, nextPresentDeadlineNs);
+    }
+
+    int PresentVenus(uint32_t contextId,
+                     uintptr_t instance,
+                     uintptr_t physicalDevice,
+                     uintptr_t device,
+                     uintptr_t queue,
+                     uint64_t image,
+                     uint32_t queueFamily,
+                     uint32_t width,
+                     uint32_t height,
+                     uint32_t format,
+                     uint32_t layout,
+                     uint32_t clientPid,
+                     uint32_t surfaceId,
+                     uint32_t serial,
+                     uint64_t* nextPresentDeadlineNs)
+    {
+        if (!clientPid || !surfaceId) return -EINVAL;
+        const uint64_t surfaceKey =
+            (static_cast<uint64_t>(clientPid) << 32) | surfaceId;
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto& entry = surfaces_[surfaceKey];
+        if (entry.virglTarget) return -EINVAL;
+        entry.info.surfaceKey = surfaceKey;
+        entry.info.clientPid = clientPid;
+        entry.info.surfaceId = surfaceId;
+        entry.info.width = width;
+        entry.info.height = height;
+        entry.info.serial = serial;
+        entry.info.flags |= winehua::virgl_ipc::kSurfaceVulkan;
+        entry.lastPresentUs = NowUs();
+        if (!entry.venusTarget) return -EAGAIN;
+        return entry.venusTarget->Present(
+            contextId, instance, physicalDevice, device, queue, image,
+            queueFamily, width, height, format, layout, serial,
+            nextPresentDeadlineNs);
     }
 
     winehua::virgl_ipc::SurfaceQueryReply Query() const
@@ -500,7 +560,8 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         for (auto& [surfaceKey, entry] : surfaces_)
         {
-            if (entry.target) entry.target->Detach(surfaceKey);
+            if (entry.virglTarget) entry.virglTarget->Detach(surfaceKey);
+            if (entry.venusTarget) entry.venusTarget->Detach(surfaceKey);
         }
         surfaces_.clear();
     }
@@ -508,7 +569,8 @@ public:
 private:
     struct Entry {
         winehua::virgl_ipc::SurfaceInfo info;
-        std::unique_ptr<SurfaceQueueTarget> target;
+        std::unique_ptr<SurfaceQueueTarget> virglTarget;
+        std::unique_ptr<winehua::VenusSurfaceQueueTarget> venusTarget;
         uint64_t lastPresentUs = 0;
     };
 
@@ -523,9 +585,9 @@ SurfaceQueuePresenterManager g_presenters;
 namespace winehua {
 
 int AttachVirglSurfaceTarget(uint64_t surfaceKey, uint64_t framePeriodNs,
-                             OHNativeWindow* window)
+                             uint32_t flags, OHNativeWindow* window)
 {
-    return g_presenters.Attach(surfaceKey, framePeriodNs, window);
+    return g_presenters.Attach(surfaceKey, framePeriodNs, flags, window);
 }
 
 int DetachVirglSurfaceTarget(uint64_t surfaceKey)
@@ -546,6 +608,28 @@ int PresentVirglSurface(uint32_t clientPid, uint32_t surfaceId,
     return g_presenters.Present(
         clientPid, surfaceId, texture, width, height, drawable, serial,
         nextPresentDeadlineNs);
+}
+
+int PresentVenusSurface(uint32_t contextId,
+                        uintptr_t instance,
+                        uintptr_t physicalDevice,
+                        uintptr_t device,
+                        uintptr_t queue,
+                        uint64_t image,
+                        uint32_t queueFamily,
+                        uint32_t width,
+                        uint32_t height,
+                        uint32_t format,
+                        uint32_t layout,
+                        uint32_t clientPid,
+                        uint32_t surfaceId,
+                        uint32_t serial,
+                        uint64_t* nextPresentDeadlineNs)
+{
+    return g_presenters.PresentVenus(
+        contextId, instance, physicalDevice, device, queue, image,
+        queueFamily, width, height, format, layout, clientPid, surfaceId,
+        serial, nextPresentDeadlineNs);
 }
 
 virgl_ipc::SurfaceQueryReply QueryVirglSurfaces()

@@ -59,6 +59,7 @@ public:
     void SetWineRuntimeBinaryDir(const std::string& wineBinDir);
 
     void SetRequestedBackend(GraphicsBackend backend);
+    void SetVulkanPresentMode(bool enabled);
     GraphicsBackendState GetState() const;
 
     void AppendWineEnv(std::vector<std::string>& env) const;
@@ -92,7 +93,7 @@ private:
     static void OnVirglIpcProcessStarted(int errorCode, OHIPCRemoteProxy* remoteProxy);
     bool SendVirglConfigureLocked();
     bool SendVirglTargetLocked(uint64_t surfaceKey, OHNativeWindow* producerWindow,
-                               uint64_t framePeriodNs);
+                               uint64_t framePeriodNs, uint32_t flags);
     bool SendVirglFramePeriodLocked(uint64_t surfaceKey, uint64_t framePeriodNs);
     bool SendVirglDetachLocked(uint64_t surfaceKey);
     void ShutdownVirglIpc();
@@ -121,6 +122,7 @@ private:
     bool virglServerUsesNcp_ = false;
     bool virglServerUsesIpc_ = false;
     std::atomic<bool> virglServerRunning_{false};
+    std::atomic<bool> vulkanPresentMode_{false};
 
     mutable std::mutex virglIpcMutex_;
     std::condition_variable virglIpcCondition_;

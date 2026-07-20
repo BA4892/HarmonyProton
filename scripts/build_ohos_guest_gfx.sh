@@ -15,6 +15,7 @@ SYSROOT_EXT_PC="$SYSROOT_EXT/usr/lib/pkgconfig"
 
 MODE="${GUEST_GFX_MODE:-virpipe}"
 PLATFORM="${WINEHUA_GUEST_GFX_PLATFORM:-wayland}"
+VULKAN_ONLY="${WINEHUA_GUEST_VULKAN_ONLY:-0}"
 SOURCE_ROOT="${WINEHUA_OHOS_MESA_SOURCE_ROOT:-$ROOT/thirdparty/mesa}"
 LIBDRM_SOURCE_ROOT="${WINEHUA_OHOS_LIBDRM_SOURCE_ROOT:-$ROOT/thirdparty/libdrm}"
 WAYLAND_PROTOCOLS_SOURCE_ROOT="${WINEHUA_WAYLAND_PROTOCOLS_SOURCE_ROOT:-}"
@@ -355,6 +356,12 @@ setup_build_env() {
 
 gen_guest_gfx_cross_file() {
     local cross="$BUILD_DIR/guest-gfx-x86_64-cross.txt"
+    local guest_system="linux"
+    if [ "$VULKAN_ONLY" = "1" ]; then
+        # Describe the real target OS so Mesa does not assume Linux KMS/DRM
+        # display WSI.  The compiler target and sysroot are unchanged.
+        guest_system="ohos"
+    fi
     mkdir -p "$BUILD_DIR"
     cat > "$cross" <<XEOF
 [binaries]
@@ -366,14 +373,14 @@ pkg-config = '$PKG_CONFIG_BIN'
 wayland-scanner = '$WAYLAND_SCANNER'
 
 [built-in options]
-c_args = ['--target=$TARGET', '--sysroot=$SYSROOT', '-I$SYSROOT_EXT_INC', '-fno-emulated-tls', '-U__OHOS_FAMILY__', '-DDETECT_OS_OHOS=0']
-cpp_args = ['--target=$TARGET', '--sysroot=$SYSROOT', '-I$SYSROOT_EXT_INC', '-fno-emulated-tls', '-U__OHOS_FAMILY__', '-DDETECT_OS_OHOS=0']
+c_args = ['--target=$TARGET', '--sysroot=$SYSROOT', '-I$SYSROOT_EXT_INC', '-fno-emulated-tls', '-D_GNU_SOURCE', '-U__OHOS_FAMILY__', '-DDETECT_OS_OHOS=0']
+cpp_args = ['--target=$TARGET', '--sysroot=$SYSROOT', '-I$SYSROOT_EXT_INC', '-fno-emulated-tls', '-D_GNU_SOURCE', '-U__OHOS_FAMILY__', '-DDETECT_OS_OHOS=0']
 c_link_args = ['--target=$TARGET', '--sysroot=$SYSROOT', '-fuse-ld=lld', '-L$SYSROOT_EXT_LIB']
 cpp_link_args = ['--target=$TARGET', '--sysroot=$SYSROOT', '-fuse-ld=lld', '-L$SYSROOT_EXT_LIB']
 pkg_config_path = ['$SYSROOT_EXT_PC', '$SYSROOT/usr/lib/pkgconfig']
 
 [host_machine]
-system = 'linux'
+system = '$guest_system'
 cpu_family = 'x86_64'
 cpu = 'x86_64'
 endian = 'little'
@@ -670,6 +677,9 @@ setup_build_env
 
 case "$PLATFORM" in
     wayland) ;;
+    ohos)
+        [ "$VULKAN_ONLY" = "1" ] || err "platform=ohos is reserved for the guest Vulkan-only build"
+        ;;
     *)
         err "unsupported guest_gfx platform: $PLATFORM (expected: wayland)"
         ;;
@@ -705,39 +715,71 @@ ensure_target_libdrm
 ensure_modern_wayland_protocols
 ensure_wayland_pkgconfig_metadata
 ensure_wayland_dev_headers
-MESON_ARGS=(
-    "--cross-file=$CROSS_FILE"
-    "--prefix=$INSTALL_ROOT"
-    "--libdir=lib"
-    "-Dbuildtype=release"
-    "-Dplatforms=wayland"
-    "-Degl-native-platform=wayland"
-    "-Dgallium-drivers=virgl,softpipe"
-    "-Dvulkan-drivers="
-    "-Degl=enabled"
-    "-Dgles1=enabled"
-    "-Dgles2=enabled"
-    "-Dopengl=true"
-    "-Dgbm=disabled"
-    "-Dglx=disabled"
-    "-Dtools="
-    "-Dglvnd=disabled"
-    "-Dshared-glapi=enabled"
-    "-Dshader-cache=disabled"
-    "-Dllvm=disabled"
-    "-Ddraw-use-llvm=false"
-    "-Dexpat=disabled"
-    "-Dxmlconfig=disabled"
-)
+if [ "$VULKAN_ONLY" = "1" ]; then
+    # The OHOS platform marker disables Mesa's KMS/display WSI.  Harmony musl
+    # intentionally omits pthread cancellation, while an offscreen Venus ICD
+    # needs neither VK_KHR_display nor any EGL/Gallium frontend.
+    MESON_ARGS=(
+        "--cross-file=$CROSS_FILE"
+        "--prefix=$INSTALL_ROOT"
+        "--libdir=lib"
+        "-Dbuildtype=release"
+        "-Dplatforms=wayland"
+        "-Degl-native-platform=wayland"
+        "-Dgallium-drivers="
+        "-Dvulkan-drivers=virtio"
+        "-Degl=disabled"
+        "-Dgles1=disabled"
+        "-Dgles2=disabled"
+        "-Dopengl=false"
+        "-Dgbm=disabled"
+        "-Dglx=disabled"
+        "-Dtools="
+        "-Dglvnd=disabled"
+        "-Dshared-glapi=disabled"
+        "-Dshader-cache=disabled"
+        "-Dllvm=disabled"
+        "-Ddraw-use-llvm=false"
+        "-Dexpat=disabled"
+        "-Dxmlconfig=disabled"
+        "-Dvideo-codecs="
+    )
+else
+    MESON_ARGS=(
+        "--cross-file=$CROSS_FILE"
+        "--prefix=$INSTALL_ROOT"
+        "--libdir=lib"
+        "-Dbuildtype=release"
+        "-Dplatforms=wayland"
+        "-Degl-native-platform=wayland"
+        "-Dgallium-drivers=virgl,softpipe"
+        "-Dvulkan-drivers="
+        "-Degl=enabled"
+        "-Dgles1=enabled"
+        "-Dgles2=enabled"
+        "-Dopengl=true"
+        "-Dgbm=disabled"
+        "-Dglx=disabled"
+        "-Dtools="
+        "-Dglvnd=disabled"
+        "-Dshared-glapi=enabled"
+        "-Dshader-cache=disabled"
+        "-Dllvm=disabled"
+        "-Ddraw-use-llvm=false"
+        "-Dexpat=disabled"
+        "-Dxmlconfig=disabled"
+    )
+fi
 
 # OHOS SDK (native, 非完整系统) 缺少 hilog/log.h。
 # 覆盖 __OHOS_FAMILY__ 触发的 DETECT_OS_OHOS, 用标准 Linux 日志路径。
-export CFLAGS="${CFLAGS:-} -U__OHOS_FAMILY__ -DDETECT_OS_OHOS=0"
-export CXXFLAGS="${CXXFLAGS:-} -U__OHOS_FAMILY__ -DDETECT_OS_OHOS=0"
+export CFLAGS="${CFLAGS:-} -D_GNU_SOURCE -U__OHOS_FAMILY__ -DDETECT_OS_OHOS=0"
+export CXXFLAGS="${CXXFLAGS:-} -D_GNU_SOURCE -U__OHOS_FAMILY__ -DDETECT_OS_OHOS=0"
 
 log "=== Build OHOS guest_gfx receiver ($NATIVE_ARCH) ==="
 log "platform: $PLATFORM"
 log "mode: $MODE"
+log "vulkan-only: $VULKAN_ONLY"
 log "source: $SOURCE_ROOT"
 log "build: $BUILD_ROOT"
 log "install: $INSTALL_ROOT"

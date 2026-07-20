@@ -5,7 +5,7 @@
 namespace winehua::virgl_ipc {
 
 constexpr uint32_t kMagic = 0x57484950; // "WHIP"
-constexpr int32_t kProtocolVersion = 2;
+constexpr int32_t kProtocolVersion = 4;
 constexpr uint32_t kMaxSurfaces = 16;
 
 enum RequestCode : uint32_t {
@@ -19,6 +19,7 @@ enum RequestCode : uint32_t {
 
 enum SurfaceFlags : uint32_t {
     kSurfaceAttached = 1u << 0,
+    kSurfaceVulkan = 1u << 1,
 };
 
 struct SurfaceInfo {

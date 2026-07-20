@@ -1,5 +1,6 @@
 export const startServer: (sockPath: string) => boolean;
-export const launchClient: (exePath: string, argv: string[], sockPath: string, libPath: string, homeDir: string) => number;
+export const launchClient: (exePath: string, argv: string[], sockPath: string, libPath: string,
+  homeDir: string, automationMode?: boolean, prefixMode?: string, d3dBackend?: string) => number;
 export const stopClient: () => void;
 export const stopAll: () => void;
 export const setStateCallback: (cb: (state: string) => void) => void;
@@ -9,8 +10,40 @@ export const getCurrentToplevelId: () => number;
 export const destroyToplevel: (id: number) => void;
 export const sendToplevelClose: (id: number) => void;
 export const runWineExe: (binDir: string, sockPath: string, libPath: string, exePath: string, homeDir: string) => void;
-export const checkWinePrefix: () => boolean;
-export const resetWinePrefix: () => void;
+export interface WineProgramOptions {
+  windowsExePath: string;
+  argv: string[];
+  environment: Record<string, string>;
+  workingDirectory: string;
+  prefixMode: string;
+  d3dBackend: string;
+  presentBackend: string;
+  automationMode: boolean;
+}
+export interface WineProcessHandle {
+  found: boolean;
+  pid: number;
+  status: string;
+  startTimestamp: number;
+  endTimestamp: number;
+  exitCode: number | null;
+  exitCodeSource: string;
+}
+export const runWineProgram: (options: WineProgramOptions) => WineProcessHandle;
+export interface GuestProgramOptions {
+  executablePath: string;
+  argv: string[];
+  environment: Record<string, string>;
+  workingDirectory: string;
+  automationMode: boolean;
+}
+export const runGuestProgram: (options: GuestProgramOptions) => WineProcessHandle;
+export const queryWineProcess: (pid: number) => WineProcessHandle;
+export const terminateWineProcess: (pid: number) => boolean;
+export const checkWinePrefix: (prefixMode?: string) => boolean;
+export const resetWinePrefix: (prefixMode?: string) => boolean;
+export const runHostVulkanProbe: (surfaceId: bigint, runId: string) => boolean;
+export const stopHostVulkanProbe: () => boolean;
 export const setOutputSize: (w: number, h: number) => void;
 export const setDisplayScale: (scale: number) => void;
 export const setDesktopMode: (enabled: boolean) => void;

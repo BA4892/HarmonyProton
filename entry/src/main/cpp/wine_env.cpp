@@ -35,7 +35,8 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
                                       const std::string& libPath,
                                       const std::string& binDir,
                                       int audioBootstrapFd,
-                                      const std::string& homeDir) {
+                                      const std::string& homeDir,
+                                      const std::string& prefixDir) {
     std::string shareDir = binDir + "/../share";
     std::string xkbDir = shareDir + "/X11/xkb";
     std::string midiSoundfontPath = binDir + "/../audio/winehua-gm.sf2";
@@ -55,7 +56,7 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
         "XDG_RUNTIME_DIR=" + sockDir,
         "WAYLAND_DISPLAY=" + sockName,
         "HOME=" + homeDir,
-        "WINEPREFIX=" WINE_PREFIX,
+        "WINEPREFIX=" + (prefixDir.empty() ? std::string(WINE_PREFIX) : prefixDir),
         "WINEDATADIR=" + shareDir + "/wine",
         "WINEDLLDIR=" + binDir + "/x86_64-unix",
         "WINEDLLDIR0=" + binDir + "/x86_64-windows",
@@ -94,6 +95,54 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
                 guestReceiverLibDir.empty() ? "(none)" : guestReceiverLibDir.c_str(),
                 runtimeLibPath.c_str());
     return env;
+}
+
+static void UpsertEnvLine(std::vector<std::string>& env, const std::string& line)
+{
+    const size_t sep = line.find('=');
+    if (sep == std::string::npos || sep == 0) return;
+    const std::string key = line.substr(0, sep);
+    for (std::string& existing : env) {
+        if (existing.compare(0, key.size(), key) == 0 &&
+            existing.size() > key.size() && existing[key.size()] == '=') {
+            existing = line;
+            return;
+        }
+    }
+    env.push_back(line);
+}
+
+void AppendD3dBackendEnv(std::vector<std::string>& env,
+                         const std::string& d3dBackend,
+                         const std::string& binDir)
+{
+    if (d3dBackend.rfind("dxvk_", 0) != 0) return;
+
+    std::string profile = d3dBackend.substr(strlen("dxvk_"));
+    if (profile.empty()) profile = "legacy";
+    const std::string overlayRoot = std::string(WINE_RUNTIME_ROOT) +
+        "/smoke/dxvk/" + profile;
+    const std::string overlay64 = overlayRoot + "/x64";
+    const std::string overlay86 = overlayRoot + "/x86";
+    const std::string wineDllPath = overlay64 + ":" + overlay86 + ":" +
+        binDir + "/x86_64-windows:" + binDir + "/i386-windows:" + binDir;
+
+    const std::vector<std::string> managed = {
+        "WINEHUA_D3D_BACKEND=" + d3dBackend,
+        "WINEHUA_DXVK_ROOT=" + overlayRoot,
+        "WINEHUA_DXVK_PROFILE=" + profile,
+        "WINEHUA_DXVK_RELAXED_FEATURES=1",
+        "WINEDLLOVERRIDES=d3d11=n;dxgi=n",
+        "DXVK_WINEHUA_COMMAND_QUERY_RESET=1",
+        "DXVK_WINEHUA_FLUSH_DYNAMIC_MAPPED=1",
+        "VN_WINEHUA_REMOTE_MEMORY_SYNC=1",
+        "DXVK_LOG_LEVEL=info",
+        "DXVK_LOG_PATH=C:\\smoke\\results\\desktop-dxvk",
+        "WINEDLLPATH=" + wineDllPath,
+        "WINEDLLDIR0=" + overlay64,
+        "WINEDLLDIR1=" + overlay86,
+    };
+    for (const std::string& line : managed) UpsertEnvLine(env, line);
 }
 
 static bool ShouldSerializeEntryParamEnv(const std::string& envLine) {

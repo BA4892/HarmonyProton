@@ -169,19 +169,19 @@ static bool append_windows_path_tail(std::string *out, const std::string& tail)
     return !out->empty();
 }
 
-static bool wine_file_parent_to_native(const char *path, const char *homeDir, std::string *out)
+static const char *active_wine_prefix()
 {
-    std::string file = trim_quotes(path);
-    size_t slash = file.find_last_of("\\/");
-    std::string dir;
+    const char *prefix = getenv("WINEPREFIX");
+    return prefix && prefix[0] ? prefix : WINE_PREFIX;
+}
 
-    if (slash == std::string::npos) return false;
-    dir = file.substr(0, slash);
+static bool wine_directory_to_native(const char *path, const char *homeDir, std::string *out)
+{
+    std::string dir = trim_quotes(path);
     if (dir.size() >= 3 && dir[1] == ':' && (dir[2] == '\\' || dir[2] == '/'))
     {
         char drive = (char)tolower((unsigned char)dir[0]);
         std::string tail = dir.substr(3);
-
         if (drive == 'z')
         {
             if (!homeDir || !homeDir[0]) return false;
@@ -191,7 +191,7 @@ static bool wine_file_parent_to_native(const char *path, const char *homeDir, st
         }
         if (drive == 'c')
         {
-            *out = WINE_PREFIX "/drive_c/";
+            *out = std::string(active_wine_prefix()) + "/drive_c/";
             return append_windows_path_tail(out, tail);
         }
         return false;
@@ -202,6 +202,17 @@ static bool wine_file_parent_to_native(const char *path, const char *homeDir, st
         return true;
     }
     return false;
+}
+
+static bool wine_file_parent_to_native(const char *path, const char *homeDir, std::string *out)
+{
+    std::string file = trim_quotes(path);
+    size_t slash = file.find_last_of("\\/");
+    std::string dir;
+
+    if (slash == std::string::npos) return false;
+    dir = file.substr(0, slash);
+    return wine_directory_to_native(dir.c_str(), homeDir, out);
 }
 
 static bool derive_launch_cwd(int argc, char *argv[], const char *homeDir, std::string *out)
@@ -346,6 +357,13 @@ extern "C" void Main(NativeChildProcess_Args args)
     }
     argv[argc] = nullptr;
 
+    bool guestElfMode = argc >= 2 && !strcmp(argv[0], "__winehua_guest_elf__");
+    if (guestElfMode) {
+        for (int i = 0; i < argc; ++i) argv[i] = argv[i + 1];
+        argc--;
+        OH_LOG_INFO(LOG_APP, "[GuestChild] isolated x86_64 ELF=%{public}s", argv[0]);
+    }
+
     // 检查 __winehua_desktop__ 标记: 有 → desktop 模式, 需要传 env 给 wine
     {
         for (int i = 0; i < argc; i++) {
@@ -448,7 +466,7 @@ extern "C" void Main(NativeChildProcess_Args args)
     }
 
     // 确保 WINEPREFIX 目录存在
-    mkdir(WINE_PREFIX, 0755);
+    mkdir(active_wine_prefix(), 0755);
 
     // Wine 期望从 bin 目录运行（相对路径等）
     chdir(binDir);
@@ -456,7 +474,11 @@ extern "C" void Main(NativeChildProcess_Args args)
     // 启动 stderr reader：Wine 内部 write(2)/WINE_ERR → pipe → hilog + 文件
     {
         std::string launchCwd;
-        if (derive_launch_cwd(argc, argv, homeDir, &launchCwd) && chdir(launchCwd.c_str()) == 0)
+        const char *requestedCwd = getenv("WINEHUA_WORKING_DIRECTORY");
+        bool hasCwd = requestedCwd && requestedCwd[0]
+            ? wine_directory_to_native(requestedCwd, homeDir, &launchCwd)
+            : derive_launch_cwd(argc, argv, homeDir, &launchCwd);
+        if (hasCwd && chdir(launchCwd.c_str()) == 0)
             OH_LOG_INFO(LOG_APP, "[WineChild] cwd=%{public}s", launchCwd.c_str());
     }
 
@@ -501,15 +523,19 @@ extern "C" void Main(NativeChildProcess_Args args)
         return;
     }
 
-    // Build argv: ["box64-hmos-inprocess", "/path/to/wine", wine_args...]
-    // argv[0] = box64 marker, argv[1] = x86_64 wine ELF full path, argv[2+] = wine arguments
-    std::string winePath = std::string(binDir) + "/wine";
-    int box64_argc = argc + 2;
+    // Guest probes use the same isolated NCP/Box64 boundary as Wine but run a
+    // concrete x86_64 OHOS ELF.  Keeping this marker out of argv ensures the
+    // probe observes a normal argv[0] and cannot accidentally enter Wine.
+    std::string winePath = guestElfMode ? std::string(argv[0]) : std::string(binDir) + "/wine";
+    int box64_argc = guestElfMode ? argc + 1 : argc + 2;
     const char** box64_argv = new const char*[box64_argc + 1];
     box64_argv[0] = "box64";
     box64_argv[1] = winePath.c_str();
-    for (int i = 0; i < argc; i++)
-        box64_argv[i + 2] = argv[i];
+    if (guestElfMode) {
+        for (int i = 1; i < argc; i++) box64_argv[i + 1] = argv[i];
+    } else {
+        for (int i = 0; i < argc; i++) box64_argv[i + 2] = argv[i];
+    }
     box64_argv[box64_argc] = nullptr;
 
     OH_LOG_INFO(LOG_APP, "[WineChild] calling box64_hmos_main argc=%{public}d wine=%{public}s",
@@ -524,6 +550,12 @@ extern "C" void Main(NativeChildProcess_Args args)
     // 进程即将退出, OS 会回收一切, 无需手动卸载。
     free(buf);
 #else
+    if (guestElfMode) {
+        execve(argv[0], argv, environ);
+        OH_LOG_ERROR(LOG_APP, "[GuestChild] execve failed: %{public}s", strerror(errno));
+        free(buf);
+        return;
+    }
     // x86_64 Pad: dlopen ntdll.so → __wine_main (原生系统 linker 加载)
     OH_LOG_INFO(LOG_APP, "[WineChild] dlopen ntdll.so...");
     void* ntdll = dlopen("ntdll.so", RTLD_NOW);
@@ -567,11 +599,27 @@ extern "C" void WineserverMain(NativeChildProcess_Args args)
     char* binDir = strtok(nullptr, "|");
     if (!binDir) { free(buf); return; }
 
+    // Collect argv and per-session environment overrides.  In particular this
+    // keeps a clean smoke prefix isolated from the user's normal prefix.
+    int argc2 = 0;
+    char* argv2[8];
+    char* t;
+    std::vector<std::string> envOverrides;
+    while ((t = strtok(nullptr, "|")))
+    {
+        if (!strncmp(t, "__env=", 6))
+            envOverrides.emplace_back(t + 6);
+        else if (argc2 < 7)
+            argv2[argc2++] = t;
+    }
+    argv2[argc2] = nullptr;
+
     OH_LOG_INFO(LOG_APP, "[WineChild] ws step1: setting env...");
     setenv("WINEPREFIX", WINE_PREFIX, 1);
     setenv("WINEDEBUG", "-all", 1);
-    OH_LOG_INFO(LOG_APP, "[WineChild] ws step2: mkdir...");
-    mkdir(WINE_PREFIX, 0755);
+    apply_entry_param_env_overrides(envOverrides);
+    OH_LOG_INFO(LOG_APP, "[WineChild] ws step2: mkdir prefix=%{public}s...", active_wine_prefix());
+    mkdir(active_wine_prefix(), 0755);
     OH_LOG_INFO(LOG_APP, "[WineChild] ws step3: chdir(%{public}s)...", binDir);
     chdir(binDir);
 
@@ -586,12 +634,6 @@ extern "C" void WineserverMain(NativeChildProcess_Args args)
     pthread_detach(tid);
 
     // 收集 argv: "wineserver" "-f" ...
-    int argc2 = 0;
-    char* argv2[8];
-    char* t;
-    while ((t = strtok(nullptr, "|")) && argc2 < 7)
-        argv2[argc2++] = t;
-    argv2[argc2] = nullptr;
     if (argc2 == 0) {
         argv2[0] = (char*)"wineserver";
         argv2[1] = (char*)"-f";

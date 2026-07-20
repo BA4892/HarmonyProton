@@ -27,6 +27,7 @@ export class WineWindowManager {
 
   // -- Desktop 模式 (Tablet) --
   private isDesktopMode: boolean = false;
+  private automationMode: boolean = false;
   private desktopRootId: number = 0;
   private desktopAbilityRunning: boolean = false;
 
@@ -82,6 +83,15 @@ export class WineWindowManager {
     });
   }
 
+  setAutomationMode(enabled: boolean): void {
+    this.automationMode = enabled;
+    this.isDesktopMode = deviceInfo.deviceType === 'tablet' && !enabled;
+    testNapi.setDesktopMode(this.isDesktopMode);
+    hilog.info(DOMAIN, TAG,
+      '[MW] automation mode=%{public}s desktop mode=%{public}s',
+      enabled ? 'true' : 'false', this.isDesktopMode ? 'true' : 'false');
+  }
+
   async init(windowStage: window.WindowStage, abilityContext: common.UIAbilityContext): Promise<void> {
     this.windowStage = windowStage;
     this.mainWindow = windowStage.getMainWindowSync();
@@ -91,11 +101,12 @@ export class WineWindowManager {
       this.mainWindow ? 'ok' : 'NULL', this.uiAbilityContext ? 'ok' : 'NULL');
 
     // Tablet 检测: 桌面合成模式
-    this.isDesktopMode = deviceInfo.deviceType === 'tablet';
+    this.isDesktopMode = deviceInfo.deviceType === 'tablet' && !this.automationMode;
     if (this.isDesktopMode) {
       testNapi.setDesktopMode(true);
       hilog.info(DOMAIN, TAG, '[MW] Tablet → DESKTOP MODE (single XComponent)');
     } else {
+      testNapi.setDesktopMode(false);
       hilog.info(DOMAIN, TAG, '[MW] deviceType=%{public}s → MANAGED MODE', deviceInfo.deviceType);
     }
 

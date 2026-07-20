@@ -36,6 +36,14 @@ using WinehuaVtestPresentCallback = int (*)(
     uint64_t* nextPresentDeadlineNs, void* userData);
 using WinehuaVtestSetPresentCallback = void (*)(
     WinehuaVtestPresentCallback callback, void* userData);
+using WinehuaVtestVulkanPresentCallback = int (*)(
+    uint32_t contextId, uintptr_t instance, uintptr_t physicalDevice,
+    uintptr_t device, uintptr_t queue, uint64_t image, uint32_t queueFamily,
+    uint32_t width, uint32_t height, uint32_t format, uint32_t layout,
+    uint32_t clientPid, uint32_t surfaceId, uint32_t serial,
+    uint32_t presentFlags, uint64_t* nextPresentDeadlineNs, void* userData);
+using WinehuaVtestSetVulkanPresentCallback = void (*)(
+    WinehuaVtestVulkanPresentCallback callback, void* userData);
 enum class IpcChildMode {
     None,
     VtestServer,
@@ -116,9 +124,11 @@ int OnVirglIpcRequest(uint32_t code, const OHIPCParcel* data,
     {
         int64_t surfaceKey = 0;
         int64_t framePeriodNs = 0;
+        int32_t flags = 0;
         OHNativeWindow* window = nullptr;
         if (OH_IPCParcel_ReadInt64(data, &surfaceKey) != OH_IPC_SUCCESS || surfaceKey <= 0 ||
             OH_IPCParcel_ReadInt64(data, &framePeriodNs) != OH_IPC_SUCCESS || framePeriodNs <= 0 ||
+            OH_IPCParcel_ReadInt32(data, &flags) != OH_IPC_SUCCESS || flags < 0 ||
             OH_NativeWindow_ReadFromParcel(const_cast<OHIPCParcel*>(data), &window) != 0 || !window)
         {
             if (window) OH_NativeWindow_DestroyNativeWindow(window);
@@ -128,7 +138,8 @@ int OnVirglIpcRequest(uint32_t code, const OHIPCParcel* data,
         {
             result = winehua::AttachVirglSurfaceTarget(
                 static_cast<uint64_t>(surfaceKey),
-                static_cast<uint64_t>(framePeriodNs), window);
+                static_cast<uint64_t>(framePeriodNs),
+                static_cast<uint32_t>(flags), window);
             if (result != 0) OH_NativeWindow_DestroyNativeWindow(window);
         }
     }
@@ -175,6 +186,8 @@ bool IsAllowedHostEnv(const std::string& key)
            key == "VIRGL_DISABLE_NATIVE_FENCE_FD" ||
            key == "WINEHUA_VIRGL_SYNC_MODE" ||
            key == "WINEHUA_VIRGL_LOG_PATH" ||
+           key == "WINEHUA_VKR_TRACE_SAMPLED" ||
+           key == "WINEHUA_VKR_FREEZE_BOOL_SPEC" ||
            key == "EGL_PLATFORM";
 }
 
@@ -255,6 +268,40 @@ int OnVtestPresent(uint32_t texId, uint32_t width, uint32_t height,
     return presentResult;
 }
 
+int OnVtestVulkanPresent(uint32_t contextId,
+                         uintptr_t instance,
+                         uintptr_t physicalDevice,
+                         uintptr_t device,
+                         uintptr_t queue,
+                         uint64_t image,
+                         uint32_t queueFamily,
+                         uint32_t width,
+                         uint32_t height,
+                         uint32_t format,
+                         uint32_t layout,
+                         uint32_t clientPid,
+                         uint32_t surfaceId,
+                         uint32_t serial,
+                         uint32_t presentFlags,
+                         uint64_t* nextPresentDeadlineNs,
+                         void*)
+{
+    OH_LOG_INFO(LOG_APP,
+                "[VENUS-PRESENT][NCP] callback enter ctx=%{public}u serial=%{public}u "
+                "surface=%{public}u size=%{public}ux%{public}u",
+                contextId, serial, surfaceId, width, height);
+    if (nextPresentDeadlineNs) *nextPresentDeadlineNs = 0;
+    if (presentFlags) return -1;
+    const int result = winehua::PresentVenusSurface(
+        contextId, instance, physicalDevice, device, queue, image,
+        queueFamily, width, height, format, layout, clientPid, surfaceId,
+        serial, nextPresentDeadlineNs);
+    OH_LOG_INFO(LOG_APP,
+                "[VENUS-PRESENT][NCP] callback leave ctx=%{public}u serial=%{public}u result=%{public}d",
+                contextId, serial, result);
+    return result;
+}
+
 } // namespace
 
 extern "C" __attribute__((visibility("default"))) void Main(NativeChildProcess_Args args);
@@ -288,6 +335,7 @@ extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainPr
             "|__env=VTEST_SYNC_GL_FINISH=1" +
             "|__env=WINEHUA_VIRGL_SYNC_MODE=" + config.syncMode +
             "|__env=WINEHUA_VIRGL_LOG_PATH=" + config.logPath +
+            "|__env=WINEHUA_VKR_TRACE_SAMPLED=1" +
             "|__env=EGL_PLATFORM=surfaceless";
         if (config.syncMode == "egl-thread")
             entryParams += "|__env=VIRGL_DISABLE_NATIVE_FENCE_FD=1";
@@ -320,6 +368,7 @@ extern "C" __attribute__((visibility("default"))) void Main(NativeChildProcess_A
     void* handle;
     WinehuaVtestMain vtestMain;
     WinehuaVtestSetPresentCallback setPresentCallback;
+    WinehuaVtestSetVulkanPresentCallback setVulkanPresentCallback;
 
     OH_LOG_INFO(LOG_APP, "[virgl-child] Main enter pid=%{public}d params=%{public}s",
                 getpid(), entryParams);
@@ -375,16 +424,27 @@ extern "C" __attribute__((visibility("default"))) void Main(NativeChildProcess_A
         OH_LOG_WARN(LOG_APP, "[virgl-child] present callback registration missing: %{public}s",
                     dlerror());
 
+    setVulkanPresentCallback = reinterpret_cast<WinehuaVtestSetVulkanPresentCallback>(
+        dlsym(handle, "winehua_vtest_set_vulkan_present_callback"));
+    if (setVulkanPresentCallback)
+        setVulkanPresentCallback(OnVtestVulkanPresent, nullptr);
+    else
+        OH_LOG_WARN(LOG_APP,
+                    "[virgl-child] Vulkan present callback registration missing: %{public}s",
+                    dlerror());
+
     char arg0[] = "virgl_test_server";
     char arg1[] = "--no-fork";
     char arg2[] = "--multi-clients";
     char arg3[] = "--use-egl-surfaceless";
     char arg4[] = "--use-gles";
-    char arg5[] = "--socket-path";
-    char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5, socketPath, nullptr};
-    int rc = vtestMain(7, argv);
+    char arg5[] = "--venus";
+    char arg6[] = "--socket-path";
+    char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, socketPath, nullptr};
+    int rc = vtestMain(8, argv);
 
     OH_LOG_WARN(LOG_APP, "[virgl-child] vtest exited rc=%{public}d", rc);
+    if (setVulkanPresentCallback) setVulkanPresentCallback(nullptr, nullptr);
     if (setPresentCallback) setPresentCallback(nullptr, nullptr);
     dlclose(handle);
     free(buffer);
