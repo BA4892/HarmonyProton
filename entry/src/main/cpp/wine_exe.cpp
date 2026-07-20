@@ -378,10 +378,10 @@ static pid_t SpawnGuestProgram(const GuestProgramOptions& options)
     UpsertEnv(&envStrs, "VK_ICD_FILENAMES=" + icd);
     UpsertEnv(&envStrs, "VN_DEBUG=vtest");
     // OHOS Host Vulkan memory uses an explicit SHM shadow when the driver
-    // cannot export dma-buf/opaque-fd memory.  GPU fence feedback writes only
-    // the Host mapping, so query the real Host fence and synchronize the
-    // shadow after it signals instead of polling a stale Guest feedback slot.
-    UpsertEnv(&envStrs, "VN_PERF=no_fence_feedback");
+    // cannot export dma-buf/opaque-fd memory. GPU fence and query feedback
+    // writes only the Host mapping, so query the real Host objects instead
+    // of polling stale Guest feedback slots.
+    UpsertEnv(&envStrs, "VN_PERF=no_fence_feedback,no_query_feedback");
     UpsertEnv(&envStrs, "WINEHUA_HOST_ARCH=" + std::string(
 #ifdef __aarch64__
         "aarch64"

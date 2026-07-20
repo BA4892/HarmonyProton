@@ -406,9 +406,10 @@ struct Index {
       environment['VKR_WINEHUA_SHADOW_FROM_HOST'] = 'precise';
       environment['VKR_WINEHUA_SHADOW_TRACE'] = '0';
       if (this.perfProfileText === 'shadow-precise-single-ring')
-        environment['VN_PERF'] = 'no_fence_feedback,no_multi_ring';
+        environment['VN_PERF'] = 'no_fence_feedback,no_query_feedback,no_multi_ring';
       if (this.perfProfileText === 'shadow-precise-sync-submit')
-        environment['VN_PERF'] = 'no_fence_feedback,no_async_queue_submit';
+        environment['VN_PERF'] =
+          'no_fence_feedback,no_query_feedback,no_async_queue_submit';
       if (this.perfProfileText === 'shadow-precise-strong-ring')
         environment['VN_WINEHUA_STRONG_RING_BARRIER'] = '1';
       if (this.perfProfileText === 'shadow-precise-direct-fence')

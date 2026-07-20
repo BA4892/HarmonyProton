@@ -50,6 +50,48 @@ release completion.
 Latest validated HAP: 397,782,249 bytes, SHA-256
 `e2f150f49fce32d7f5f76452de05a12186d4ac3c857d6f268ffd64614e14d6e5`.
 
+### 2026-07-21 occlusion-query feedback update
+
+The last full D3D11 smoke failure was not a zero-valued occlusion result. Both
+x86 and x64 remained `VK_NOT_READY` for the full two-second timeout. Stencil
+pixel readback was already correct, which separated stencil rendering from
+query availability.
+
+Venus query feedback writes result and availability words with a Host GPU copy
+and then reads them directly from the Guest mapped feedback buffer. WineHua's
+OHOS vtest path uses separate Guest SHM and Host Vulkan mappings. The Host write
+therefore did not update the Guest availability word, which stayed zero
+forever. This is the same architectural constraint that requires fence
+feedback to be disabled.
+
+The product quirk now uses:
+
+```text
+VN_PERF=no_fence_feedback,no_query_feedback
+```
+
+This keeps command-buffer query reset and routes `vkGetQueryPoolResults`
+through the synchronous Host RPC. It does not remove query synchronization or
+fake a result. Copying the internal feedback allocation back on every poll was
+rejected because it would add Host-to-Guest memcpy, non-coherent range
+alignment concerns, and new feedback-buffer lifetime coupling.
+
+Physical-device evidence:
+
+* A/B archive `phase2-20260721-050642`: full DXVK suite PASS.
+* Formal product archive `phase2-20260721-051423`: x86/x64 PASS, no fallback,
+  and both precise occlusion queries returned 42,488 samples.
+* Query trace for both architectures is `reset -> begin -> end -> VK_SUCCESS`.
+* Clean-prefix DXVK archive `phase2-20260721-051812`: PASS.
+* Core/VirGL archives `phase2-20260721-052035` (reuse) and
+  `phase2-20260721-052157` (clean): PASS.
+* Frame-order archive `frame-order-20260721-051629`: 60/60 valid, zero
+  duplicate, zero regression.
+
+Latest validated HAP: 397,782,101 bytes, built 2026-07-21 05:12:50 +08:00,
+SHA-256
+`952f56a76330229c594d8657d0d7c82d3554dfaa00e616e1798c4c7918ab53fc`.
+
 ### 2026-07-20 performance update
 
 有效 A/B 已确认：full 约 4.9-5.1 FPS；shadow-none 31.4 FPS 但存在向回转/抖动，不能产品化；Guest->Host explicit 为 5.4 FPS。explicit 模式已经把后续 64 MiB/submit 降到通常 0 B，仅保留真实的数百字节到约 90 KiB dirty range，因此剩余主瓶颈明确为 Host->Guest 128-192 MiB/fence refresh。
@@ -62,26 +104,27 @@ Latest validated HAP: 397,747,812 bytes, SHA-256 638e168b256b3b3da1104fd04f7d867
 ## 0. Current conclusion
 
 DXVK Legacy 1.10.3 is no longer blocked on D3D11 device creation, sampled-image
-descriptors, or the automated D3D11 feature smoke. The x86 and x64 automated
-paths create Feature Level 11.0 devices, render the deterministic scene, and
-present visible output through Venus BrokerPresent.
+descriptors, occlusion queries, or BrokerPresent. The x86 and x64 automated
+paths create Feature Level 11.0 devices and pass texture sampling, descriptor
+identity/lifetime, mip and array subresources, barriers, BC1 emulation, MSAA,
+compute/UAV, stencil pixel and precise occlusion-query checks.
 
-The current blocker is narrower:
+The normal product cube is physically visible at about 83-84 FPS with no
+fallback or backward frame. Remaining Phase 2 release work is the post-fix
+reuse-times-three gate, 60-minute long run, broader real-game coverage, and the
+remaining BC2-BC7 compatibility matrix. D3D9-to-D3D11 hot switching in one HWND
+also exposed a separate SurfaceQueue ownership handoff issue; direct D3D11 game
+launch is correct, but that lifecycle case must remain a regression item.
 
-    SmokeRunner automation path: visible D3D11 frame PASS
-    Normal game/product path:    DXVK renders and presents, but the visible
-                                 Wine client area remains white
-
-Do not describe Phase 2 as complete until a normal game launch produces a
-physically visible D3D11 frame and the result is protected by an automated
-visual gate. HRESULT success, queue-submit success, frame counters, and JSON
-PASS are not sufficient by themselves.
+Do not describe Phase 2 as complete until those gates pass. HRESULT success,
+queue-submit success, a single cube, and JSON PASS are not sufficient by
+themselves.
 
 ## 1. Canonical environment and source state
 
     WSL distro:       Ubuntu, WSL2
     Repository:       /home/maple/Work/WineHua-build
-    Windows junction: D:\MyProject\winehua-repo
+    Windows access:    \\wsl$\Ubuntu\home\maple\Work\WineHua-build
     Branch:           feature/render-element-completeness
     Docker container: winehua-master-ext4
     Container source: /data/src/winehua
@@ -95,17 +138,17 @@ Committed baseline:
 
 | Component | Commit | Meaning |
 | --- | --- | --- |
-| Main repository | 3da7b64 | Phase 2 Vulkan and DXVK automation baseline |
+| Main repository | 7fe970e before this update | Stable strong-ring baseline |
 | Wine | 21fac73dd92 | Current Wine Vulkan/WoW64 integration |
-| Mesa | 2b1ca2f | Current guest Venus implementation |
-| virglrenderer | 8e74bdf9 | Current host Venus/render-server implementation |
-| DXVK fork | 49f6d9f | WineHua Legacy 1.10.3 compatibility fixes |
+| Mesa | b2ecdc82d68 | Strong Venus ring publication barrier |
+| virglrenderer | b141b55650d | Precise Host shadow synchronization |
+| DXVK fork | 0cbbfa7d4c3 | WineHua Legacy 1.10.3 compatibility fixes |
 
 Before this memo commit, the main code branch was one commit ahead of its
 remote. Re-check live status before every build. The DXVK fork is:
 
     directory: thirdparty/dxvk
-    branch:    winehua/dxvk-legacy-1.10.3
+    branch:    feature/render-element-completeness
     base:      v1.10.3
 
 Do not commit these two untracked backup files:
@@ -146,7 +189,7 @@ fully conformant Vulkan feature set.
 
 Archive:
 
-    D:\MyProject\winehua-logs\automation\phase2-20260720-133512
+    D:\MyProject\winehua-logs\automation\phase2-20260721-051423
 
 Result:
 
@@ -157,16 +200,16 @@ Result:
 HAP:
 
     entry/build/default/outputs/default/entry-default-signed.hap
-    build time: 2026-07-20 13:33:09 +08:00
-    size:       397748413 bytes
-    SHA-256:    071bb0ef6ea041e67a647b103f3682b3d339c25422940a150b4c6d4f305d0e73
+    build time: 2026-07-21 05:12:50 +08:00
+    size:       397782101 bytes
+    SHA-256:    952f56a76330229c594d8657d0d7c82d3554dfaa00e616e1798c4c7918ab53fc
 
 Important evidence:
 
-    phase2-20260720-133512-01-dxvk-reuse/dxvk-legacy-x86.jpeg
-    phase2-20260720-133512-01-dxvk-reuse/dxvk-legacy-x64.jpeg
-    phase2-20260720-133512-01-dxvk-reuse/suite-summary.json
-    phase2-20260720-133512-01-dxvk-reuse/hilog.txt
+    phase2-20260721-051423-01-dxvk-reuse/dxvk-legacy-x86.jpeg
+    phase2-20260721-051423-01-dxvk-reuse/dxvk-legacy-x64.jpeg
+    phase2-20260721-051423-01-dxvk-reuse/suite-summary.json
+    phase2-20260721-051423-01-dxvk-reuse/wine-stderr.log
 
 Both official D3D11 smoke binaries reported:
 
@@ -176,6 +219,7 @@ Both official D3D11 smoke binaries reported:
     present frames:                  60
     CPU full-frame readback/upload:  0
     per-frame vkDeviceWaitIdle:      0
+    precise occlusion samples:       42488
 
 The automated screenshots contain the expected color classes and geometry.
 This proves that the underlying D3D11 -> DXVK -> Wine Vulkan -> Venus ->

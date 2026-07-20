@@ -573,6 +573,28 @@ Guest device-only vkWaitForFences
 Imported sync-fd payloads must retain the existing local `sync_wait` behavior.
 Multiple-fence wait-any/wait-all and finite timeout semantics must be preserved.
 
+### Query feedback uses the same shadow-memory rule
+
+Venus normally injects a GPU copy after `vkCmdEndQuery` and stores the query
+result plus availability in an internal mapped feedback buffer. Its
+`vkGetQueryPoolResults` fast path reads that Guest mapping without a renderer
+round trip. On WineHua, the GPU copy updates the Host Vulkan mapping while the
+Guest SHM availability word remains stale.
+
+The verified compatibility policy is therefore:
+
+```text
+VN_PERF=no_fence_feedback,no_query_feedback
+```
+
+DXVK still records `vkCmdResetQueryPool`, `vkCmdBeginQuery`, and
+`vkCmdEndQuery`. Only result retrieval changes to the synchronous renderer
+call. On the physical Pad, the same precise D3D11 occlusion query returned
+42,488 samples for x86 and x64; the prior feedback path remained
+`VK_NOT_READY` for two seconds. Do not replace this with unconditional
+feedback-buffer readback: that adds Host-to-Guest copies to every query poll
+and needs explicit range alignment and lifetime proof.
+
 ## 6. Present path: no full-frame CPU readback
 
 The DXVK swapchain invokes the private Guest entry `vn_winehua_present` with:

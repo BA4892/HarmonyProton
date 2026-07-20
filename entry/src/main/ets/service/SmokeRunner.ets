@@ -553,7 +553,10 @@ export class SmokeRunner {
         'VK_DRIVER_FILES': guestVulkanIcd,
         'VK_ICD_FILENAMES': guestVulkanIcd,
         'VN_DEBUG': 'vtest',
-        'VN_PERF': 'no_fence_feedback',
+        /* Host GPU feedback lands in the Host side of WineHua's explicit
+         * shadow mapping. Use the synchronous Host query path so a stale
+         * Guest availability word cannot hide a valid query result. */
+        'VN_PERF': 'no_fence_feedback,no_query_feedback',
         /* Keep DLL load evidence for fallback detection without tracing every
          * Vulkan call. A caller can still override WINEDEBUG for a focused
          * diagnostic run through runWineProgram. */
@@ -567,6 +570,7 @@ export class SmokeRunner {
         smokeEnvironment['DXVK_LOG_LEVEL'] = 'info';
         smokeEnvironment['DXVK_LOG_PATH'] = `C:\\smoke\\results\\${this.request.runId}`;
         smokeEnvironment['DXVK_WINEHUA_TRACE_SAMPLED'] = '1';
+        smokeEnvironment['DXVK_WINEHUA_TRACE_QUERY'] = '1';
         smokeEnvironment['DXVK_WINEHUA_COMMAND_QUERY_RESET'] = '1';
         smokeEnvironment['WINEHUA_D3D11_STENCIL_QUERY'] = '1';
         /* Capture the exact DXBC-derived SPIR-V used by this run. Disable
@@ -585,9 +589,11 @@ export class SmokeRunner {
           smokeEnvironment['DXVK_WINEHUA_FLUSH_DYNAMIC_MAPPED'] = '1';
           smokeEnvironment['VN_WINEHUA_REMOTE_MEMORY_SYNC'] = '1';
           if (this.perfProfile === 'shadow-precise-single-ring')
-            smokeEnvironment['VN_PERF'] = 'no_fence_feedback,no_multi_ring';
+            smokeEnvironment['VN_PERF'] =
+              'no_fence_feedback,no_query_feedback,no_multi_ring';
           if (this.perfProfile === 'shadow-precise-sync-submit')
-            smokeEnvironment['VN_PERF'] = 'no_fence_feedback,no_async_queue_submit';
+            smokeEnvironment['VN_PERF'] =
+              'no_fence_feedback,no_query_feedback,no_async_queue_submit';
           if (this.perfProfile === 'shadow-precise-strong-ring')
             smokeEnvironment['VN_WINEHUA_STRONG_RING_BARRIER'] = '1';
           if (this.perfProfile === 'shadow-precise-direct-fence')

@@ -154,7 +154,10 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
         "VK_DRIVER_FILES=" + guestVulkanIcd,
         "VK_ICD_FILENAMES=" + guestVulkanIcd,
         "VN_DEBUG=vtest",
-        "VN_PERF=no_fence_feedback",
+        /* Host GPU writes to Venus feedback buffers are not automatically
+         * visible through WineHua's explicit Guest/Host shadow mapping.
+         * Query the real Host objects instead of polling stale Guest words. */
+        "VN_PERF=no_fence_feedback,no_query_feedback",
         "WINEDLLOVERRIDES=d3d11=n;dxgi=n",
         "DXVK_WINEHUA_COMMAND_QUERY_RESET=1",
         "DXVK_WINEHUA_FLUSH_DYNAMIC_MAPPED=1",
