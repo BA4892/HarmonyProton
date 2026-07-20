@@ -10,6 +10,7 @@
 #   清理:     make clean
 
 ROOT := $(realpath $(dir $(lastword $(MAKEFILE_LIST))))
+.DEFAULT_GOAL := all
 
 # ── 配置 ──
 NATIVE_ARCH ?= x86_64
@@ -265,6 +266,7 @@ define assemble_rule
 assemble-$(1): $$(STAMPS)/$(1)/assemble
 
 $$(STAMPS)/$(1)/assemble: $(SCRIPTS)/assemble.sh $(SCRIPTS)/env.sh $(DXVK_SENTINEL) $(DXVK_STAMP) \
+	$(ROOT)/smoke/winehua_d3d_switch_cube.c \
 	$$(STAMPS)/deps $$(STAMPS)/wine-$(1) $$(STAMPS)/$(1)/native \
 	$$(ASSEMBLE_GUEST_INPUTS) | $$(STAMPS)/$(1)
 	@echo "=== assemble ($(1)) ==="

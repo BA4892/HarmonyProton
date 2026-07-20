@@ -254,6 +254,7 @@ static void PrepareDesktopSessionGraphicsEnv(const LaunchParams& params)
     auto& gb = winehua::GraphicsBroker::GetInstance();
     gb.SetWineRuntimeBinaryDir(params.winehuaBin);
     gb.SetRequestedBackend(winehua::GraphicsBackend::Virgl);
+    gb.SetVulkanPresentMode(params.d3dBackend.rfind("dxvk_", 0) == 0);
     gb.EnsureStarted(params.sockDir);
 
     winehua::GraphicsBackendState state = gb.GetState();
@@ -446,8 +447,10 @@ void LaunchThreadFunc(LaunchParams* p) {
     OH_LOG_INFO(LOG_APP, "[Launch-Async] XKB_CONFIG_ROOT=%{public}s",
                 (p->winehuaBin + "/../share/X11/xkb").c_str());
 
-    winehua::GraphicsBroker::GetInstance().SetWineRuntimeBinaryDir(p->winehuaBin);
-    winehua::GraphicsBroker::GetInstance().EnsureStarted(p->sockDir);
+    auto& graphicsBroker = winehua::GraphicsBroker::GetInstance();
+    graphicsBroker.SetWineRuntimeBinaryDir(p->winehuaBin);
+    graphicsBroker.SetVulkanPresentMode(p->d3dBackend.rfind("dxvk_", 0) == 0);
+    graphicsBroker.EnsureStarted(p->sockDir);
 
     int audioBootstrapFd = CreateAudioBootstrapFd(p->sockDir);
     p->envStrs = BuildWineEnv(p->sockDir, p->sockName, p->libPath, p->winehuaBin,

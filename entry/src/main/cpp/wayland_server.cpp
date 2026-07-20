@@ -203,6 +203,11 @@ void WaylandServer::compositor_create_surface(wl_client* client, wl_resource* co
     sd->clientPid = GetWaylandClientPid(client);
     sd->protocolId = id;
     sd->surfaceKey = MakeSurfaceKey(sd->clientPid, id);
+    OH_LOG_INFO(LOG_APP,
+                "[MW-ZC] surface created pid=%{public}u surface=%{public}u "
+                "key=%{public}llu resource=%{public}p",
+                sd->clientPid, sd->protocolId,
+                static_cast<unsigned long long>(sd->surfaceKey), surfRes);
     wl_resource_set_implementation(surfRes, &kSurfaceImpl, sd, [](wl_resource* r) {
         auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(r));
         auto* self = GetInstance();
@@ -211,6 +216,7 @@ void WaylandServer::compositor_create_surface(wl_client* client, wl_resource* co
             const uint64_t surfaceKey = sd ? sd->surfaceKey : 0;
             self->surfaceResources_.erase(surfaceKey);
             self->zeroCopySurfaceKeys_.erase(surfaceKey);
+            self->zeroCopyProtocolGeometryLogged_.erase(surfaceKey);
             for (auto it = self->subsurfaceLayers_.begin(); it != self->subsurfaceLayers_.end(); ) {
                 if (it->surface == r) it = self->subsurfaceLayers_.erase(it);
                 else ++it;
@@ -879,6 +885,7 @@ void WaylandServer::ResolveSubsurfaceLayerPositionLocked(
 }
 
 bool WaylandServer::GetZeroCopyLayerInfo(uint64_t surfaceKey, uint32_t rendererToplevelId,
+                                         int fallbackWidth, int fallbackHeight,
                                          ZeroCopyLayerInfo& info)
 {
     std::lock_guard<std::mutex> lk(toplevelMutex_);
@@ -912,9 +919,56 @@ bool WaylandServer::GetZeroCopyLayerInfo(uint64_t surfaceKey, uint32_t rendererT
                 info.height = layer.vpDstH > 0 ? layer.vpDstH : layer.h;
                 info.shmCommitSerial = layer.shmCommitSerial;
                 info.desktopCoordinates = true;
+                info.protocolOnly = false;
                 return info.width > 0 && info.height > 0;
             }
-            return false;
+
+            /*
+             * A Vulkan private-present surface can be a Wayland subsurface
+             * without ever committing a wl_shm buffer. The present protocol
+             * supplies the image dimensions, while Wayland still supplies
+             * the parent and offset.
+             */
+            int sx = sd->subsurfaceX;
+            int sy = sd->subsurfaceY;
+            if (toplevelMinimized_.count(info.parentToplevel)) {
+                if (sx > 16000) sx -= 32000;
+                if (sy > 16000) sy -= 32000;
+            }
+            const int compX = toplevelX_.count(info.parentToplevel)
+                ? toplevelX_.at(info.parentToplevel) : 0;
+            const int compY = toplevelY_.count(info.parentToplevel)
+                ? toplevelY_.at(info.parentToplevel) : 0;
+            const int wineX = toplevelWineX_.count(info.parentToplevel)
+                ? toplevelWineX_.at(info.parentToplevel) : 0;
+            const int wineY = toplevelWineY_.count(info.parentToplevel)
+                ? toplevelWineY_.at(info.parentToplevel) : 0;
+            const int compW = toplevelW_.count(info.parentToplevel)
+                ? toplevelW_.at(info.parentToplevel) : 0;
+            const int compH = toplevelH_.count(info.parentToplevel)
+                ? toplevelH_.at(info.parentToplevel) : 0;
+            const bool insideWin = sx >= 0 && sx < compW && sy >= 0 && sy < compH;
+            info.x = (insideWin ? compX : wineX) + sx;
+            info.y = (insideWin ? compY : wineY) + sy;
+            info.width = sd->vpDstW > 0 ? sd->vpDstW : sd->w;
+            info.height = sd->vpDstH > 0 ? sd->vpDstH : sd->h;
+            if (info.width <= 0) info.width = fallbackWidth;
+            if (info.height <= 0) info.height = fallbackHeight;
+            info.shmCommitSerial = sd->shmCommitSerial.load(std::memory_order_acquire);
+            info.desktopCoordinates = true;
+            info.protocolOnly = true;
+            if (zeroCopyProtocolGeometryLogged_.insert(surfaceKey).second) {
+                OH_LOG_INFO(LOG_APP,
+                            "[MW-ZC] protocol-only geometry key=%{public}llu "
+                            "pid=%{public}u surface=%{public}u parent=%{public}u "
+                            "offset=%{public}d,%{public}d layer=%{public}dx%{public}d "
+                            "fallback=%{public}dx%{public}d",
+                            static_cast<unsigned long long>(surfaceKey),
+                            info.clientPid, info.surfaceId, info.parentToplevel,
+                            sx, sy, info.width, info.height,
+                            fallbackWidth, fallbackHeight);
+            }
+            return info.width > 0 && info.height > 0;
         }
 
         if (rendererToplevelId != info.parentToplevel) return false;
@@ -928,6 +982,8 @@ bool WaylandServer::GetZeroCopyLayerInfo(uint64_t surfaceKey, uint32_t rendererT
     info.parentToplevel = sd->toplevelId;
     info.width = sd->w;
     info.height = sd->h;
+    if (info.width <= 0) info.width = fallbackWidth;
+    if (info.height <= 0) info.height = fallbackHeight;
     info.shmCommitSerial = sd->shmCommitSerial.load(std::memory_order_acquire);
     if (desktopMode_)
     {

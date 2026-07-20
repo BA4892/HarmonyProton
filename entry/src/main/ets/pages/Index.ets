@@ -2,7 +2,8 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import testNapi from 'libentry.so';
 import { fileIo as fs, fileUri, picker } from '@kit.CoreFileKit';
 import { zlib } from '@kit.BasicServicesKit';
-import { SmokeLaunchRequest, SmokeRunner, defaultSmokeRequest, parseSmokeRequest } from '../service/SmokeRunner';
+import { SmokeLaunchRequest, SmokeRunner, defaultSmokeRequest, parseSmokeRequest,
+  syncManagedSmoke } from '../service/SmokeRunner';
 
 const DOMAIN = 0x0000;
 const SOCK = '/data/storage/el2/base/files/.wine/wine-wayland';
@@ -90,6 +91,7 @@ struct Index {
   @StorageLink('winehua.smoke.request') smokeRequestText: string = '';
   @StorageLink('winehua.d3d.backend') d3dBackendText: string = 'wined3d';
   @StorageLink('winehua.game.path') gamePathText: string = '';
+  @StorageLink('winehua.perf.profile') perfProfileText: string = 'baseline';
   @State state: string = 'idle';
   @State prefixReady: boolean = false;
   @State statusText: string = '检测中...';
@@ -356,6 +358,71 @@ struct Index {
     return name.toLowerCase().endsWith('.exe');
   }
 
+  private windowsParentDirectory(path: string): string {
+    const separator = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'));
+    return separator > 2 ? path.substring(0, separator) : 'C:\\';
+  }
+
+  private d3dLaunchEnvironment(): Record<string, string> {
+    if (this.d3dBackend !== 'dxvk_legacy') return {};
+    ensureDirectory(`${this.driveC}/smoke/results/desktop-dxvk`);
+    const environment: Record<string, string> = {
+      'DXVK_LOG_LEVEL': 'info',
+      'DXVK_LOG_PATH': 'C:\\smoke\\results\\desktop-dxvk',
+      'WINEDEBUG': '-all',
+      /* Venus uses a shared-memory command ring between the x86_64 guest and
+       * the ARM64 renderer.  Box64's aggressive weak-barrier mode can violate
+       * the x86 ordering expected by the ring and eventually corrupt a random
+       * Vulkan command. Keep this scoped to DXVK/Venus processes. */
+      'BOX64_DYNAREC_WEAKBARRIER': '0',
+      'WINEHUA_PERF_PROFILE': this.perfProfileText
+    };
+    if (this.perfProfileText === 'direct-fence-wait')
+      environment['VN_WINEHUA_DIRECT_FENCE_WAIT'] = '1';
+    else if (this.perfProfileText === 'no-remote-sync')
+      environment['VN_WINEHUA_REMOTE_MEMORY_SYNC'] = '0';
+    else if (this.perfProfileText === 'no-dynamic-flush')
+      environment['DXVK_WINEHUA_FLUSH_DYNAMIC_MAPPED'] = '0';
+    else if (this.perfProfileText === 'fence-feedback')
+      environment['VN_PERF'] = '';
+    else if (this.perfProfileText === 'shadow-none') {
+      environment['VKR_WINEHUA_SHADOW_FROM_HOST'] = 'none';
+      environment['VKR_WINEHUA_SHADOW_TRACE'] = '0';
+    } else if (this.perfProfileText === 'shadow-trace') {
+      environment['VKR_WINEHUA_SHADOW_FROM_HOST'] = 'full';
+      environment['VKR_WINEHUA_SHADOW_TRACE'] = '1';
+    } else if (this.perfProfileText === 'shadow-to-host-explicit') {
+      environment['VKR_WINEHUA_SHADOW_FROM_HOST'] = 'to-host-explicit';
+      environment['VKR_WINEHUA_SHADOW_TRACE'] = '0';
+    } else if (this.perfProfileText === 'shadow-precise' ||
+      this.perfProfileText === 'shadow-precise-single-ring' ||
+      this.perfProfileText === 'shadow-precise-sync-submit' ||
+      this.perfProfileText === 'shadow-precise-strong-ring' ||
+      this.perfProfileText === 'shadow-precise-direct-fence' ||
+      this.perfProfileText === 'shadow-precise-retain-shmem') {
+      environment['DXVK_WINEHUA_PRECISE_SHADOW'] = '1';
+      environment['DXVK_WINEHUA_FLUSH_DYNAMIC_MAPPED'] = '1';
+      environment['VN_WINEHUA_REMOTE_MEMORY_SYNC'] = '1';
+      environment['VKR_WINEHUA_SHADOW_FROM_HOST'] = 'precise';
+      environment['VKR_WINEHUA_SHADOW_TRACE'] = '0';
+      if (this.perfProfileText === 'shadow-precise-single-ring')
+        environment['VN_PERF'] = 'no_fence_feedback,no_multi_ring';
+      if (this.perfProfileText === 'shadow-precise-sync-submit')
+        environment['VN_PERF'] = 'no_fence_feedback,no_async_queue_submit';
+      if (this.perfProfileText === 'shadow-precise-strong-ring')
+        environment['VN_WINEHUA_STRONG_RING_BARRIER'] = '1';
+      if (this.perfProfileText === 'shadow-precise-direct-fence')
+        environment['VN_WINEHUA_DIRECT_FENCE_WAIT'] = '1';
+      if (this.perfProfileText === 'shadow-precise-retain-shmem')
+        environment['VN_WINEHUA_DEFER_SHMEM_UNREF'] = '1';
+    }
+    return environment;
+  }
+
+  private d3dPresentBackend(): string {
+    return this.d3dBackend === 'dxvk_legacy' ? 'venus_broker_present' : 'virgl_compositor';
+  }
+
   private enterDir = (name: string): void => {
     let newPath = this.curDir + '/' + name;
     this.dirStack.push(this.curDir);
@@ -414,8 +481,17 @@ struct Index {
       hilog.info(DOMAIN, 'wine', 'auto-init: extracting wine data...');
       await this.extractWineData();
     }
+    /* C:\smoke lives inside the persistent Wine prefix, not inside the
+     * replaceable files/wine runtime. Refresh only this manifest-owned tree so
+     * overwrite installs cannot keep running stale test binaries. */
+    if (!syncManagedSmoke(this.prefixMode)) {
+      this.setInitStatus('测试程序同步失败', false);
+      hilog.error(DOMAIN, 'wine', 'auto-init: managed C:\\smoke synchronization failed');
+      return;
+    }
     hilog.info(DOMAIN, 'wine', 'auto-init: starting Wine...');
     this.setInitStatus('启动服务...', true);
+    testNapi.setHostShadowProfile(this.perfProfileText);
     const ok: boolean = testNapi.startServer(this.sockPath);
     if (!ok) {
       this.setInitStatus('启动服务失败', false);
@@ -447,11 +523,11 @@ struct Index {
     testNapi.runWineProgram({
       windowsExePath: exePath,
       argv: [],
-      environment: {},
+      environment: this.d3dLaunchEnvironment(),
       workingDirectory: this.curDir,
       prefixMode: this.prefixMode,
       d3dBackend: this.d3dBackend,
-      presentBackend: 'virgl_compositor',
+      presentBackend: this.d3dPresentBackend(),
       automationMode: false
     });
   }
@@ -467,7 +543,7 @@ struct Index {
     const runner = new SmokeRunner(this.smokeRequest, (text: string) => {
       this.statusText = text;
       this.initOverlayText = text;
-    });
+    }, this.perfProfileText);
     runner.run().catch((error: Object) => {
       this.statusText = 'Smoke: infrastructure failure';
       hilog.error(DOMAIN, 'SmokeRunner', 'suite failed: %{public}s', JSON.stringify(error));
@@ -477,20 +553,21 @@ struct Index {
   private startRequestedGame = (): void => {
     if (!this.gameTestMode || this.gameStarted || this.gamePathText.length === 0) return;
     this.gameStarted = true;
-    this.statusText = `?? DXVK ??: ${this.gamePathText}`;
+    this.statusText = `Launching ${this.d3dBackend}: ${this.gamePathText}`;
     const gamePath = this.gamePathText;
     const result = testNapi.runWineProgram({
       windowsExePath: gamePath,
       argv: [],
-      environment: {},
-      workingDirectory: '',
+      environment: this.d3dLaunchEnvironment(),
+      workingDirectory: this.windowsParentDirectory(gamePath),
       prefixMode: 'reuse',
       d3dBackend: this.d3dBackend,
-      presentBackend: 'virgl_compositor',
+      presentBackend: this.d3dPresentBackend(),
       automationMode: false
     }) as ProcessInfo;
-    hilog.info(DOMAIN, 'GameTest', 'game launch path=%{public}s backend=%{public}s pid=%{public}d status=%{public}s',
-      gamePath, this.d3dBackend, result.pid, result.state);
+    hilog.info(DOMAIN, 'GameTest',
+      'game launch path=%{public}s backend=%{public}s perf=%{public}s pid=%{public}d status=%{public}s',
+      gamePath, this.d3dBackend, this.perfProfileText, result.pid, result.state);
   }
 
   private startDeveloperSmoke = (): void => {

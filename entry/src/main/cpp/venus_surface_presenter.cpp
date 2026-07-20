@@ -10,6 +10,8 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <vector>
 
@@ -41,6 +43,12 @@ uint64_t PacingPeriodNs(uint64_t displayPeriodNs)
 {
     return displayPeriodNs > kDispatchLeadNs ? displayPeriodNs - kDispatchLeadNs
                                              : displayPeriodNs;
+}
+
+bool TraceFrameOrder()
+{
+    const char* mode = std::getenv("VKR_WINEHUA_SHADOW_FROM_HOST");
+    return mode && (!std::strcmp(mode, "none") || !std::strcmp(mode, "precise"));
 }
 
 VkPipelineStageFlags SourceStage(VkImageLayout layout)
@@ -104,8 +112,18 @@ struct VenusSurfaceQueueTarget::Impl {
         framePeriodNs_ = PacingPeriodNs(displayPeriodNs_);
         lastPresentNs_ = 0;
         framesPresented_ = 0;
+        lastSerial_ = 0;
+        serialRegressions_ = 0;
         failures_ = 0;
         throttled_ = 0;
+        firstPresentedNs_ = 0;
+        totalPresentUs_ = 0;
+        maxPresentUs_ = 0;
+        totalWaitFenceUs_ = 0;
+        totalAcquireUs_ = 0;
+        totalSubmitUs_ = 0;
+        totalQueuePresentUs_ = 0;
+        totalReleaseWaitUs_ = 0;
         OH_LOG_INFO(LOG_APP,
                     "[VENUS-PRESENT][NCP] target attached key=%{public}llu "
                     "window=%{public}p display_period_us=%{public}llu",
@@ -150,10 +168,7 @@ struct VenusSurfaceQueueTarget::Impl {
                 uint64_t* nextPresentDeadlineNs)
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        OH_LOG_INFO(LOG_APP,
-                    "[VENUS-PRESENT][NCP] present enter ctx=%{public}u serial=%{public}u "
-                    "image=%{public}llu size=%{public}ux%{public}u",
-                    contextId, serial, static_cast<unsigned long long>(image), width, height);
+        const uint64_t presentStartNs = NowNs();
         if (nextPresentDeadlineNs) *nextPresentDeadlineNs = 0;
         if (!window_) {
             OH_LOG_ERROR(LOG_APP, "[VENUS-PRESENT][NCP] present no window");
@@ -177,25 +192,24 @@ struct VenusSurfaceQueueTarget::Impl {
         const VkFormat sourceFormat = static_cast<VkFormat>(format);
         const VkImageLayout sourceLayout = static_cast<VkImageLayout>(layout);
         int initError = 0;
-        OH_LOG_INFO(LOG_APP, "[VENUS-PRESENT][NCP] ensure begin ctx=%{public}u serial=%{public}u",
-                    contextId, serial);
         if (!EnsureVulkanLocked(hostInstance, hostPhysical, hostDevice, hostQueue,
                                 queueFamily, width, height, sourceFormat, initError)) {
             ++failures_;
             return initError ? initError : -EIO;
         }
-        OH_LOG_INFO(LOG_APP, "[VENUS-PRESENT][NCP] ensure end ctx=%{public}u serial=%{public}u",
-                    contextId, serial);
-
         Frame& frame = frames_[frameIndex_++ % frames_.size()];
+        uint64_t stageStartNs = NowNs();
         VkResult result = vkWaitForFences(
             device_, 1, &frame.complete, VK_TRUE, displayPeriodNs_ * 4);
+        const uint64_t waitFenceUs = (NowNs() - stageStartNs) / 1000;
         if (result == VK_TIMEOUT) return 1;
         if (result != VK_SUCCESS) return FailLocked("wait fence", result, serial);
 
         uint32_t imageIndex = 0;
+        stageStartNs = NowNs();
         result = vkAcquireNextImageKHR(device_, swapchain_, displayPeriodNs_ * 2,
                                        frame.acquired, VK_NULL_HANDLE, &imageIndex);
+        const uint64_t acquireUs = (NowNs() - stageStartNs) / 1000;
         if (result == VK_TIMEOUT || result == VK_NOT_READY) {
             ++throttled_;
             return 1;
@@ -332,10 +346,9 @@ struct VenusSurfaceQueueTarget::Impl {
         submit.pCommandBuffers = &frame.command;
         submit.signalSemaphoreCount = 1;
         submit.pSignalSemaphores = &renderFinished_[imageIndex];
-        OH_LOG_INFO(LOG_APP, "[VENUS-PRESENT][NCP] queue submit begin serial=%{public}u", serial);
+        stageStartNs = NowNs();
         result = vkQueueSubmit(queue_, 1, &submit, frame.complete);
-        OH_LOG_INFO(LOG_APP, "[VENUS-PRESENT][NCP] queue submit end serial=%{public}u result=%{public}d",
-                    serial, static_cast<int32_t>(result));
+        const uint64_t submitUs = (NowNs() - stageStartNs) / 1000;
         if (result != VK_SUCCESS) return FailLocked("queue submit", result, serial);
 
         VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
@@ -344,13 +357,14 @@ struct VenusSurfaceQueueTarget::Impl {
         present.swapchainCount = 1;
         present.pSwapchains = &swapchain_;
         present.pImageIndices = &imageIndex;
-        OH_LOG_INFO(LOG_APP, "[VENUS-PRESENT][NCP] queue present begin serial=%{public}u", serial);
+        stageStartNs = NowNs();
         result = vkQueuePresentKHR(queue_, &present);
-        OH_LOG_INFO(LOG_APP, "[VENUS-PRESENT][NCP] queue present end serial=%{public}u result=%{public}d",
-                    serial, static_cast<int32_t>(result));
+        const uint64_t queuePresentUs = (NowNs() - stageStartNs) / 1000;
 
+        stageStartNs = NowNs();
         const VkResult fenceResult = vkWaitForFences(
             device_, 1, &frame.complete, VK_TRUE, displayPeriodNs_ * 4);
+        const uint64_t releaseWaitUs = (NowNs() - stageStartNs) / 1000;
         if (fenceResult != VK_SUCCESS)
             return FailLocked("source release fence", fenceResult, serial);
         targetInitialized_[imageIndex] = true;
@@ -364,17 +378,60 @@ struct VenusSurfaceQueueTarget::Impl {
 
         lastPresentNs_ = timestamp;
         ++framesPresented_;
+        if (lastSerial_ && serial <= lastSerial_) ++serialRegressions_;
+        lastSerial_ = serial;
+        const uint64_t frameEndNs = NowNs();
+        const uint64_t presentUs = (frameEndNs - presentStartNs) / 1000;
+        if (!firstPresentedNs_) firstPresentedNs_ = frameEndNs;
+        totalPresentUs_ += presentUs;
+        maxPresentUs_ = std::max(maxPresentUs_, presentUs);
+        totalWaitFenceUs_ += waitFenceUs;
+        totalAcquireUs_ += acquireUs;
+        totalSubmitUs_ += submitUs;
+        totalQueuePresentUs_ += queuePresentUs;
+        totalReleaseWaitUs_ += releaseWaitUs;
         if (nextPresentDeadlineNs)
             *nextPresentDeadlineNs = lastPresentNs_ + framePeriodNs_;
+        if (TraceFrameOrder() && framesPresented_ <= 600) {
+            OH_LOG_INFO(LOG_APP,
+                        "[VENUS-ORDER][NCP] frame=%{public}llu serial=%{public}u "
+                        "serial_regress=%{public}llu source=0x%{public}llx "
+                        "target_index=%{public}u target=0x%{public}llx "
+                        "timestamp=%{public}llu",
+                        static_cast<unsigned long long>(framesPresented_), serial,
+                        static_cast<unsigned long long>(serialRegressions_),
+                        static_cast<unsigned long long>(image), imageIndex,
+                        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(
+                            swapchainImages_[imageIndex])),
+                        static_cast<unsigned long long>(timestamp));
+        }
         if (framesPresented_ == 1 || !(framesPresented_ % 120)) {
+            const uint64_t elapsedNs = frameEndNs - firstPresentedNs_;
+            const uint64_t fpsX100 = elapsedNs && framesPresented_ > 1
+                ? ((framesPresented_ - 1) * 100ULL * 1000000000ULL) / elapsedNs
+                : 0;
             OH_LOG_INFO(LOG_APP,
                         "[VENUS-PRESENT][NCP] frames=%{public}llu ctx=%{public}u "
                         "key=%{public}llu serial=%{public}u size=%{public}ux%{public}u "
                         "target=%{public}ux%{public}u format=%{public}u "
-                        "gpu_copy=1 failures=%{public}llu throttled=%{public}llu",
+                        "fps=%{public}llu.%{public}02llu gpu_copy=1 "
+                        "present_us_avg=%{public}llu max=%{public}llu "
+                        "wait_fence_avg=%{public}llu acquire_avg=%{public}llu "
+                        "submit_avg=%{public}llu queue_present_avg=%{public}llu "
+                        "release_wait_avg=%{public}llu failures=%{public}llu "
+                        "throttled=%{public}llu",
                         static_cast<unsigned long long>(framesPresented_), contextId,
                         static_cast<unsigned long long>(surfaceKey_), serial,
                         width, height, extent_.width, extent_.height, format,
+                        static_cast<unsigned long long>(fpsX100 / 100),
+                        static_cast<unsigned long long>(fpsX100 % 100),
+                        static_cast<unsigned long long>(totalPresentUs_ / framesPresented_),
+                        static_cast<unsigned long long>(maxPresentUs_),
+                        static_cast<unsigned long long>(totalWaitFenceUs_ / framesPresented_),
+                        static_cast<unsigned long long>(totalAcquireUs_ / framesPresented_),
+                        static_cast<unsigned long long>(totalSubmitUs_ / framesPresented_),
+                        static_cast<unsigned long long>(totalQueuePresentUs_ / framesPresented_),
+                        static_cast<unsigned long long>(totalReleaseWaitUs_ / framesPresented_),
                         static_cast<unsigned long long>(failures_),
                         static_cast<unsigned long long>(throttled_));
         }
@@ -672,8 +729,18 @@ private:
     uint64_t framePeriodNs_ = kDefaultFramePeriodNs;
     uint64_t lastPresentNs_ = 0;
     uint64_t framesPresented_ = 0;
+    uint32_t lastSerial_ = 0;
+    uint64_t serialRegressions_ = 0;
     uint64_t failures_ = 0;
     uint64_t throttled_ = 0;
+    uint64_t firstPresentedNs_ = 0;
+    uint64_t totalPresentUs_ = 0;
+    uint64_t maxPresentUs_ = 0;
+    uint64_t totalWaitFenceUs_ = 0;
+    uint64_t totalAcquireUs_ = 0;
+    uint64_t totalSubmitUs_ = 0;
+    uint64_t totalQueuePresentUs_ = 0;
+    uint64_t totalReleaseWaitUs_ = 0;
 };
 
 VenusSurfaceQueueTarget::VenusSurfaceQueueTarget()

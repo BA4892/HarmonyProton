@@ -1,11 +1,60 @@
 # WineHua Phase 2 DXVK Status Memo
 
-> Last updated: 2026-07-20
+> Last updated: 2026-07-21
 >
 > Purpose: this is the durable handoff for resuming the DXVK investigation.
 > Read this file before changing DXVK, Venus present, SmokeRunner, or game launch
 > code. Update it whenever a conclusion, gate result, commit, HAP, or primary
 > blocker changes.
+
+> **Current performance addendum:** the normal product D3D11 cube is visible
+> and the release-candidate `shadow-precise-strong-ring` path sustains about
+> 83.6 FPS. The white-window and 4.92 FPS diagnoses below are historical.
+> Read
+> [DXVK_GUEST_HOST_ARCHITECTURE_AND_PERF.md](DXVK_GUEST_HOST_ARCHITECTURE_AND_PERF.md)
+> before changing Mesa Venus, virglrenderer shadow memory, fence feedback, or
+> BrokerPresent. That document contains the current architecture, measurements,
+> ranked hypotheses, and next experiments.
+
+### 2026-07-21 frame-order and ring-publication update
+
+The previous 30 FPS observation was the diagnostic `shadow-none` profile. It
+also showed backward cube motion and is not product-correct. `shadow-precise`
+removed full Host-to-Guest refresh and reached 82-90 FPS, but random Venus
+command-stream decoder failures terminated the client after seconds to tens of
+seconds.
+
+The current fix adds an opt-in sequentially-consistent fence before the x86_64
+Guest publishes the Venus ring tail. This is required at the Box64 boundary:
+an x86 release store is normally a plain store relying on TSO, while the ring
+payload can be copied by native AArch64 code. `BOX64_DYNAREC_WEAKBARRIER=0`
+alone did not prevent stale or partially visible command payloads.
+
+Validated physical-device runs:
+
+* `frame-order-20260721-042200`: 45/45 valid, no duplicate or backward frame,
+  no CS error, about 83.45 FPS.
+* `frame-order-20260721-042507`: 60/60 valid, no duplicate or backward frame,
+  no CS error, about 83.57 FPS, 5400+ frames, present failures=0.
+* `shadow-precise-sync-submit` failed quickly and proved that asynchronous
+  queue submit was not the sole cause. It remains diagnostic-only.
+
+DXVK game and frame-order launch defaults now select
+`shadow-precise-strong-ring`; WineD3D/VirGL behavior is unchanged. The 60-minute
+long-run and broader real-game gate are still pending, so Phase 2 is not yet a
+release completion.
+
+Latest validated HAP: 397,782,249 bytes, SHA-256
+`e2f150f49fce32d7f5f76452de05a12186d4ac3c857d6f268ffd64614e14d6e5`.
+
+### 2026-07-20 performance update
+
+有效 A/B 已确认：full 约 4.9-5.1 FPS；shadow-none 31.4 FPS 但存在向回转/抖动，不能产品化；Guest->Host explicit 为 5.4 FPS。explicit 模式已经把后续 64 MiB/submit 降到通常 0 B，仅保留真实的数百字节到约 90 KiB dirty range，因此剩余主瓶颈明确为 Host->Guest 128-192 MiB/fence refresh。
+
+默认仍是 full，VirGL 回退路径未改变。下一项 P0 是 Host GPU-write range tracking 与回转 frame-order trace，而不是 DirectPresent、Modern DXVK 或进一步减少 submit。
+
+Latest validated HAP: 397,747,812 bytes, SHA-256 638e168b256b3b3da1104fd04f7d867bbec7fb245627c1cb83f665f21c09a872.
+
 
 ## 0. Current conclusion
 

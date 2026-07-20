@@ -111,6 +111,39 @@ static napi_value StartServer(napi_env env, napi_callback_info info) {
     return r;
 }
 
+static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    char profile[64] = "baseline";
+    if (argc >= 1)
+        napi_get_value_string_utf8(env, args[0], profile, sizeof(profile), nullptr);
+
+    const bool skip = !strcmp(profile, "shadow-none");
+    const bool trace = !strcmp(profile, "shadow-trace");
+    const bool explicitToHost = !strcmp(profile, "shadow-to-host-explicit");
+    const bool deferShmemUnref = !strcmp(profile, "shadow-precise-retain-shmem");
+    const bool precise = !strcmp(profile, "shadow-precise") ||
+        !strcmp(profile, "shadow-precise-single-ring") ||
+        !strcmp(profile, "shadow-precise-sync-submit") ||
+        !strcmp(profile, "shadow-precise-strong-ring") ||
+        !strcmp(profile, "shadow-precise-direct-fence") ||
+        deferShmemUnref;
+    const char* mode = precise ? "precise" : skip ? "none" :
+        (explicitToHost ? "to-host-explicit" : "full");
+    setenv("VKR_WINEHUA_SHADOW_FROM_HOST", mode, 1);
+    setenv("VKR_WINEHUA_SHADOW_TRACE", trace ? "1" : "0", 1);
+    setenv("VN_WINEHUA_DEFER_SHMEM_UNREF", deferShmemUnref ? "1" : "0", 1);
+    OH_LOG_INFO(LOG_APP,
+                "[NAPI] host shadow profile=%{public}s mode=%{public}s "
+                "trace=%{public}s defer_shmem_unref=%{public}s",
+                profile, mode, trace ? "1" : "0", deferShmemUnref ? "1" : "0");
+
+    napi_value result;
+    napi_get_boolean(env, true, &result);
+    return result;
+}
+
 static napi_value LaunchClient(napi_env env, napi_callback_info info) {
     size_t argc = 8;
     napi_value args[8] = {};
@@ -678,6 +711,7 @@ static napi_value Init(napi_env env, napi_value exports) {
 
     napi_property_descriptor desc[] = {
         {"startServer",    nullptr, StartServer,    nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setHostShadowProfile", nullptr, SetHostShadowProfile, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"launchClient",   nullptr, LaunchClient,   nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stopClient",     nullptr, StopClient,     nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stopAll",        nullptr, StopAll,        nullptr, nullptr, nullptr, napi_default, nullptr},

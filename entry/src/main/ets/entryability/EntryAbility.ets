@@ -19,6 +19,13 @@ export default class EntryAbility extends UIAbility {
     const requestedD3d = value('winehua.d3d_backend', 'wined3d');
     const d3dBackend = requestedD3d === 'dxvk_legacy' ? 'dxvk_legacy' : 'wined3d';
     const gamePath = value('winehua.game_path', '');
+    const requestedPerfProfile = value('winehua.perf_profile',
+      d3dBackend === 'dxvk_legacy' ? 'shadow-precise-strong-ring' : 'baseline');
+    const perfProfile = ['direct-fence-wait', 'no-remote-sync', 'no-dynamic-flush', 'fence-feedback',
+      'shadow-none', 'shadow-trace', 'shadow-to-host-explicit', 'shadow-precise',
+      'shadow-precise-single-ring', 'shadow-precise-sync-submit', 'shadow-precise-strong-ring',
+      'shadow-precise-direct-fence', 'shadow-precise-retain-shmem']
+      .indexOf(requestedPerfProfile) >= 0 ? requestedPerfProfile : 'baseline';
     this.contentPage = mode === 'smoke' && suite === 'host-vulkan' ?
       'pages/HostVulkanSmoke' : 'pages/Index';
     WineWindowManager.getInstance().setAutomationMode(mode === 'smoke');
@@ -34,6 +41,8 @@ export default class EntryAbility extends UIAbility {
     AppStorage.set<string>('winehua.d3d.backend', d3dBackend);
     AppStorage.setOrCreate<string>('winehua.game.path', gamePath);
     AppStorage.set<string>('winehua.game.path', gamePath);
+    AppStorage.setOrCreate<string>('winehua.perf.profile', perfProfile);
+    AppStorage.set<string>('winehua.perf.profile', perfProfile);
     hilog.info(DOMAIN, 'SmokeRunner', 'launch mode=%{public}s request=%{public}s', mode, request);
   }
 

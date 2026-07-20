@@ -435,6 +435,7 @@ public:
         if (!surfaceKey || !window) return -1;
         std::lock_guard<std::mutex> lock(mutex_);
         auto& entry = surfaces_[surfaceKey];
+        entry.missingTargetLogged = false;
         entry.info.flags = (entry.info.flags & ~winehua::virgl_ipc::kSurfaceVulkan) |
                            (flags & winehua::virgl_ipc::kSurfaceVulkan);
         int result;
@@ -530,7 +531,17 @@ public:
         entry.info.serial = serial;
         entry.info.flags |= winehua::virgl_ipc::kSurfaceVulkan;
         entry.lastPresentUs = NowUs();
-        if (!entry.venusTarget) return -EAGAIN;
+        if (!entry.venusTarget) {
+            if (!entry.missingTargetLogged) {
+                entry.missingTargetLogged = true;
+                OH_LOG_WARN(LOG_APP,
+                            "[VENUS-PRESENT][NCP] target missing key=%{public}llu "
+                            "ctx=%{public}u pid=%{public}u surface=%{public}u",
+                            static_cast<unsigned long long>(surfaceKey),
+                            contextId, clientPid, surfaceId);
+            }
+            return -EAGAIN;
+        }
         return entry.venusTarget->Present(
             contextId, instance, physicalDevice, device, queue, image,
             queueFamily, width, height, format, layout, serial,
@@ -572,6 +583,7 @@ private:
         std::unique_ptr<SurfaceQueueTarget> virglTarget;
         std::unique_ptr<winehua::VenusSurfaceQueueTarget> venusTarget;
         uint64_t lastPresentUs = 0;
+        bool missingTargetLogged = false;
     };
 
     mutable std::mutex mutex_;

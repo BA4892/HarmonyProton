@@ -300,6 +300,10 @@ bool GraphicsBroker::SendVirglConfigureLocked()
         writeResult = OH_IPCParcel_WriteString(request, virglIpcSyncMode_.c_str());
     if (writeResult == OH_IPC_SUCCESS)
         writeResult = OH_IPCParcel_WriteString(request, virglIpcLogPath_.c_str());
+    if (writeResult == OH_IPC_SUCCESS)
+        writeResult = OH_IPCParcel_WriteString(request, virglIpcShadowMode_.c_str());
+    if (writeResult == OH_IPC_SUCCESS)
+        writeResult = OH_IPCParcel_WriteString(request, virglIpcShadowTrace_.c_str());
 
     int32_t childResult = -1;
     int32_t sendResult = writeResult;
@@ -1014,6 +1018,12 @@ void GraphicsBroker::StartVirglSocketServerLocked()
             syncMode = "egl-thread";
         }
         const std::string virglLogPath = "/data/storage/el2/base/cache/winehua_virgl_host.log";
+        const char* requestedShadowMode = getenv("VKR_WINEHUA_SHADOW_FROM_HOST");
+        const char* requestedShadowTrace = getenv("VKR_WINEHUA_SHADOW_TRACE");
+        const std::string shadowMode = requestedShadowMode && requestedShadowMode[0]
+            ? requestedShadowMode : "full";
+        const std::string shadowTrace = requestedShadowTrace && requestedShadowTrace[0]
+            ? requestedShadowTrace : "0";
         {
             std::lock_guard<std::mutex> ipcLock(virglIpcMutex_);
             virglIpcHelperPath_ = virglVtestLibraryPath_;
@@ -1021,6 +1031,8 @@ void GraphicsBroker::StartVirglSocketServerLocked()
             virglIpcLibraryPath_ = ldLibraryPath;
             virglIpcSyncMode_ = syncMode;
             virglIpcLogPath_ = virglLogPath;
+            virglIpcShadowMode_ = shadowMode;
+            virglIpcShadowTrace_ = shadowTrace;
             virglIpcAcceptCallback_ = true;
             virglIpcCallbackComplete_ = false;
             virglIpcConfigured_ = false;

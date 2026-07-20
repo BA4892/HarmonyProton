@@ -25,6 +25,7 @@ public:
         int height = 0;
         uint64_t shmCommitSerial = 0;
         bool desktopCoordinates = false;
+        bool protocolOnly = false;
     };
 
     using StateCb = std::function<void(const char*)>;
@@ -44,6 +45,7 @@ public:
     // 取指定 toplevel 的最新帧
     bool TakeToplevelFrame(uint32_t toplevelId, std::vector<uint8_t>& outPixels, int& w, int& h);
     bool GetZeroCopyLayerInfo(uint64_t surfaceKey, uint32_t rendererToplevelId,
+                              int fallbackWidth, int fallbackHeight,
                               ZeroCopyLayerInfo& info);
     void SetSurfaceZeroCopy(uint64_t surfaceKey, bool enabled);
 
@@ -184,6 +186,7 @@ private:
     std::unordered_map<uint32_t, std::vector<uint8_t>> toplevelPixels_;
     std::unordered_map<uint64_t, wl_resource*> surfaceResources_;
     std::unordered_set<uint64_t> zeroCopySurfaceKeys_;
+    std::unordered_set<uint64_t> zeroCopyProtocolGeometryLogged_;
     std::unordered_map<uint32_t, int> toplevelW_, toplevelH_;
     std::unordered_map<uint32_t, int> toplevelX_, toplevelY_;  // compositor 桌面位置 (含 move grab 偏移)
     std::unordered_map<uint32_t, int> toplevelWineX_, toplevelWineY_;  // Wine 坐标系位置 (首次 commit, 不变)

@@ -136,6 +136,8 @@ private:
     std::string virglIpcLibraryPath_;
     std::string virglIpcSyncMode_;
     std::string virglIpcLogPath_;
+    std::string virglIpcShadowMode_;
+    std::string virglIpcShadowTrace_;
     std::unordered_set<uint64_t> zeroCopyAttachedSurfaces_;
 };
 

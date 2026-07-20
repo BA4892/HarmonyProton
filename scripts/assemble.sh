@@ -242,6 +242,13 @@ assemble_pad() {
     # touching user files or relying on Explorer.
     local smoke_dir="$wine_data/smoke"
     mkdir -p "$smoke_dir/x64" "$smoke_dir/x86" "$smoke_dir/assets"
+    local cube_source="$WINEHUA/smoke/winehua_d3d_switch_cube.c"
+    x86_64-w64-mingw32-gcc -O2 -s -mwindows -o \
+        "$smoke_dir/x64/winehua_d3d_switch_cube.exe" "$cube_source" \
+        -ld3d9 -ld3d11 -ldxgi -ld3dcompiler -luuid -lshell32 -luser32 -lgdi32 -lm
+    i686-w64-mingw32-gcc -O2 -s -mwindows -o \
+        "$smoke_dir/x86/winehua_d3d_switch_cube.exe" "$cube_source" \
+        -ld3d9 -ld3d11 -ldxgi -ld3dcompiler -luuid -lshell32 -luser32 -lgdi32 -lm
     local guest_shader_root="$BUILD_DIR/guest_vulkan/$guest_arch/share/winehua"
     local smoke_shader
     for smoke_shader in venus_storage_write venus_storage_read venus_image_fetch venus_combined_sample venus_separated_sample; do
@@ -275,16 +282,19 @@ assemble_pad() {
         cp "$smoke64" "$smoke_dir/x64/$smoke_program.exe"
         cp "$smoke32" "$smoke_dir/x86/$smoke_program.exe"
     done
-    local audio64_sha graphics64_sha vulkan64_sha d3d1164_sha audio32_sha graphics32_sha vulkan32_sha d3d1132_sha
+    local audio64_sha graphics64_sha vulkan64_sha d3d1164_sha cube64_sha
+    local audio32_sha graphics32_sha vulkan32_sha d3d1132_sha cube32_sha
     local storage_write_sha storage_read_sha image_fetch_sha combined_sample_sha separated_sample_sha
     audio64_sha="$(sha256sum "$smoke_dir/x64/winehua_audio_smoke.exe" | awk '{print $1}')"
     graphics64_sha="$(sha256sum "$smoke_dir/x64/winehua_graphics_smoke.exe" | awk '{print $1}')"
     vulkan64_sha="$(sha256sum "$smoke_dir/x64/winehua_vulkan_smoke.exe" | awk '{print $1}')"
     d3d1164_sha="$(sha256sum "$smoke_dir/x64/winehua_d3d11_smoke.exe" | awk '{print $1}')"
+    cube64_sha="$(sha256sum "$smoke_dir/x64/winehua_d3d_switch_cube.exe" | awk '{print $1}')"
     audio32_sha="$(sha256sum "$smoke_dir/x86/winehua_audio_smoke.exe" | awk '{print $1}')"
     graphics32_sha="$(sha256sum "$smoke_dir/x86/winehua_graphics_smoke.exe" | awk '{print $1}')"
     vulkan32_sha="$(sha256sum "$smoke_dir/x86/winehua_vulkan_smoke.exe" | awk '{print $1}')"
     d3d1132_sha="$(sha256sum "$smoke_dir/x86/winehua_d3d11_smoke.exe" | awk '{print $1}')"
+    cube32_sha="$(sha256sum "$smoke_dir/x86/winehua_d3d_switch_cube.exe" | awk '{print $1}')"
     storage_write_sha="$(sha256sum "$smoke_dir/assets/venus_storage_write.spv" | awk '{print $1}')"
     storage_read_sha="$(sha256sum "$smoke_dir/assets/venus_storage_read.spv" | awk '{print $1}')"
     image_fetch_sha="$(sha256sum "$smoke_dir/assets/venus_image_fetch.spv" | awk '{print $1}')"
@@ -318,7 +328,7 @@ EOF
     cat > "$smoke_dir/manifest.json" <<EOF
 {
   "schemaVersion": 1,
-  "suiteVersion": "phase2-vulkan-dxvk-legacy-v1",
+  "suiteVersion": "phase2-vulkan-dxvk-legacy-v2",
   "enabledSuites": ["core", "audio", "opengl", "wine-vulkan", "dxvk"],
   "managedRoot": "C:\\\\smoke",
   "files": {
@@ -326,10 +336,12 @@ EOF
     "x64/winehua_graphics_smoke.exe": "$graphics64_sha",
     "x64/winehua_vulkan_smoke.exe": "$vulkan64_sha",
     "x64/winehua_d3d11_smoke.exe": "$d3d1164_sha",
+    "x64/winehua_d3d_switch_cube.exe": "$cube64_sha",
     "x86/winehua_audio_smoke.exe": "$audio32_sha",
     "x86/winehua_graphics_smoke.exe": "$graphics32_sha",
     "x86/winehua_vulkan_smoke.exe": "$vulkan32_sha",
     "x86/winehua_d3d11_smoke.exe": "$d3d1132_sha",
+    "x86/winehua_d3d_switch_cube.exe": "$cube32_sha",
     "assets/venus_storage_write.spv": "$storage_write_sha",
     "assets/venus_storage_read.spv": "$storage_read_sha",
     "assets/venus_image_fetch.spv": "$image_fetch_sha",

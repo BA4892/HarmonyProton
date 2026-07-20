@@ -4,6 +4,8 @@ param(
     [string]$Suite = 'core',
     [ValidateSet('reuse', 'clean')]
     [string]$Prefix = 'reuse',
+    [ValidateSet('baseline', 'direct-fence-wait', 'no-remote-sync', 'no-dynamic-flush', 'fence-feedback', 'shadow-none', 'shadow-trace', 'shadow-to-host-explicit', 'shadow-precise', 'shadow-precise-single-ring', 'shadow-precise-sync-submit', 'shadow-precise-strong-ring', 'shadow-precise-direct-fence', 'shadow-precise-retain-shmem')]
+    [string]$PerfProfile = 'baseline',
     [int]$Runs = 1,
     [switch]$Gate,
     [switch]$SkipBuild,
@@ -208,6 +210,10 @@ function Get-D3D11Coverage {
     $entries = @()
     foreach ($test in @($Summary.tests)) {
         $m = $test.metrics
+        # Visual examples (for example dxvk-cube-x64) prove device creation
+        # and presentation but intentionally do not duplicate the exhaustive
+        # feature metrics emitted by winehua_d3d11_smoke.
+        if ($null -eq $m -or $null -eq $m.rgba8SampleMatrix) { continue }
         $checks = [ordered]@{
             featureLevel11 = ($m.featureLevel -eq '11.0')
             shaderModel5 = [bool]$m.shaderModel5
@@ -285,7 +291,8 @@ function Get-D3D11Coverage {
             }
         }
     }
-    $requiredPass = (@($entries | Where-Object { -not $_.requiredPass }).Count -eq 0)
+    $requiredPass = ($entries.Count -gt 0 -and
+        @($entries | Where-Object { -not $_.requiredPass }).Count -eq 0)
     return [ordered]@{
         schemaVersion = 1
         suite = $RunSuite
@@ -503,7 +510,7 @@ function Invoke-OneRun {
     # starting Wayland, wineserver or Wine.
     Invoke-Hdc shell 'power-shell wakeup' | Out-Null
     Invoke-Hdc shell 'hilog -x' | Out-Null
-    $startCommand = "aa start -a $Ability -b $Bundle --ps winehua.mode smoke --ps winehua.run_id $RunId --ps winehua.suite $RunSuite --ps winehua.prefix $RunPrefix"
+    $startCommand = "aa start -a $Ability -b $Bundle --ps winehua.mode smoke --ps winehua.run_id $RunId --ps winehua.suite $RunSuite --ps winehua.prefix $RunPrefix --ps winehua.perf_profile $PerfProfile"
     $startOutput = Invoke-Hdc shell $startCommand
     if (($startOutput -join "`n") -match '10106102') {
         # Devices without a credential can be dismissed with one deterministic

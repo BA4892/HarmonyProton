@@ -124,6 +124,13 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
         "/smoke/dxvk/" + profile;
     const std::string overlay64 = overlayRoot + "/x64";
     const std::string overlay86 = overlayRoot + "/x86";
+    const std::string guestVulkanRoot = binDir + "/guest_vulkan";
+    const std::string guestVulkanLib = guestVulkanRoot + "/lib";
+    const std::string guestVulkanIcd = guestVulkanRoot +
+        "/share/vulkan/icd.d/venus_icd.x86_64.json";
+    const std::string box64LibraryPath = guestVulkanLib + ":" +
+        binDir + "/guest_gfx/lib:" + binDir + ":" +
+        binDir + "/x86_64-unix:" + std::string(WINE_RUNTIME_ROOT) + "/lib/x86_64";
     const std::string wineDllPath = overlay64 + ":" + overlay86 + ":" +
         binDir + "/x86_64-windows:" + binDir + "/i386-windows:" + binDir;
 
@@ -131,13 +138,27 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
         "WINEHUA_D3D_BACKEND=" + d3dBackend,
         "WINEHUA_DXVK_ROOT=" + overlayRoot,
         "WINEHUA_DXVK_PROFILE=" + profile,
+        "WINEHUA_DXVK_VERSION=1.10.3",
         "WINEHUA_DXVK_RELAXED_FEATURES=1",
+        "WINEHUA_VULKAN_RUNTIME=1",
+        "WINEHUA_VULKAN_LOADER_ARCH=x86_64",
+        "WINEHUA_VENUS_ICD_ARCH=x86_64",
+        "USE_LIBBOX64=1",
+        "BOX64_LD_LIBRARY_PATH=" + box64LibraryPath,
+        "BOX64_EMULATED_LIBS=libvulkan.so:libvulkan.so.1:"
+            "libEGL.so:libEGL.so.1:libGLESv2.so:libGLESv2.so.2:"
+            "libGLESv1_CM.so:libGLESv1_CM.so.1:libGL.so:libGL.so.1:"
+            "libwayland-client.so:libwayland-client.so.0:libwayland-server.so:"
+            "libwayland-server.so.0:libwayland-egl.so:libwayland-egl.so.1:"
+            "libdrm.so:libdrm.so.2:libffi.so:libffi.so.8",
+        "VK_DRIVER_FILES=" + guestVulkanIcd,
+        "VK_ICD_FILENAMES=" + guestVulkanIcd,
+        "VN_DEBUG=vtest",
+        "VN_PERF=no_fence_feedback",
         "WINEDLLOVERRIDES=d3d11=n;dxgi=n",
         "DXVK_WINEHUA_COMMAND_QUERY_RESET=1",
         "DXVK_WINEHUA_FLUSH_DYNAMIC_MAPPED=1",
         "VN_WINEHUA_REMOTE_MEMORY_SYNC=1",
-        "DXVK_LOG_LEVEL=info",
-        "DXVK_LOG_PATH=C:\\smoke\\results\\desktop-dxvk",
         "WINEDLLPATH=" + wineDllPath,
         "WINEDLLDIR0=" + overlay64,
         "WINEDLLDIR1=" + overlay86,

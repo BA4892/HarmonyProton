@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -32,6 +33,12 @@ static uint64_t PerfNowUs()
 {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
         PerfClock::now().time_since_epoch()).count());
+}
+
+static bool TraceFrameOrder()
+{
+    const char* mode = std::getenv("VKR_WINEHUA_SHADOW_FROM_HOST");
+    return mode && std::strcmp(mode, "none") == 0;
 }
 
 struct RendererPerfWindow {
@@ -287,7 +294,9 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
     if (zeroCopyRegistered_)
     {
         WaylandServer::ZeroCopyLayerInfo layer;
-        if (!server->GetZeroCopyLayerInfo(zeroCopySurfaceKey_, rendererToplevelId, layer))
+        if (!server->GetZeroCopyLayerInfo(
+                zeroCopySurfaceKey_, rendererToplevelId,
+                zeroCopySourceW_, zeroCopySourceH_, layer))
         {
             ReleaseZeroCopyBinding();
         }
@@ -338,7 +347,10 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
     {
         if (!surface.surfaceKey || surface.attached) continue;
         WaylandServer::ZeroCopyLayerInfo layer;
-        if (!server->GetZeroCopyLayerInfo(surface.surfaceKey, rendererToplevelId, layer)) continue;
+        if (!server->GetZeroCopyLayerInfo(
+                surface.surfaceKey, rendererToplevelId,
+                static_cast<int>(surface.width), static_cast<int>(surface.height), layer))
+            continue;
 
         glGenTextures(1, &zeroCopyTexture_);
         glBindTexture(GL_TEXTURE_EXTERNAL_OES, zeroCopyTexture_);
@@ -404,13 +416,15 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
         OH_LOG_INFO(LOG_APP,
                     "[VIRGL-ZC][MAIN] consumer attached tl=%{public}u key=%{public}llu "
                     "pid=%{public}u surface=%{public}u source=%{public}dx%{public}d "
-                    "layer=%{public}dx%{public}d+%{public}d,%{public}d queue=%{public}d "
+                    "layer=%{public}dx%{public}d+%{public}d,%{public}d "
+                    "parent=%{public}u geometry=%{public}s queue=%{public}d "
                     "size_ret=%{public}d usage_ret=%{public}d drop_ret=%{public}d",
                     rendererToplevelId,
                     static_cast<unsigned long long>(zeroCopySurfaceKey_),
                     zeroCopyClientPid_, zeroCopySurfaceId_,
                     zeroCopySourceW_, zeroCopySourceH_, zeroCopyLayerW_, zeroCopyLayerH_,
-                    zeroCopyLayerX_, zeroCopyLayerY_, queueSize,
+                    zeroCopyLayerX_, zeroCopyLayerY_, layer.parentToplevel,
+                    layer.protocolOnly ? "protocol" : "shm", queueSize,
                     sizeResult, usageResult, dropResult);
         return true;
     }
@@ -444,7 +458,9 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
             WaylandServer* server = WaylandServer::GetInstance();
             if (server->IsDesktopMode())
                 rendererToplevelId = server->GetDesktopRootToplevelId();
-            if (server->GetZeroCopyLayerInfo(zeroCopySurfaceKey_, rendererToplevelId, layer))
+            if (server->GetZeroCopyLayerInfo(
+                    zeroCopySurfaceKey_, rendererToplevelId,
+                    zeroCopySourceW_, zeroCopySourceH_, layer))
                 zeroCopyFallbackShmSerial_ = layer.shmCommitSerial;
             winehua::GraphicsBroker::GetInstance().SetZeroCopySurfaceReady(
                 zeroCopySurfaceKey_, false);
@@ -486,7 +502,9 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
     uint32_t rendererToplevelId = toplevelId_;
     WaylandServer* server = WaylandServer::GetInstance();
     if (server->IsDesktopMode()) rendererToplevelId = server->GetDesktopRootToplevelId();
-    if (!server->GetZeroCopyLayerInfo(zeroCopySurfaceKey_, rendererToplevelId, layer))
+    if (!server->GetZeroCopyLayerInfo(
+            zeroCopySurfaceKey_, rendererToplevelId,
+            zeroCopySourceW_, zeroCopySourceH_, layer))
     {
         ReleaseZeroCopyBinding();
         return false;
@@ -518,6 +536,14 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
                     static_cast<unsigned long long>(zeroCopySurfaceKey_));
     }
     ++zeroCopyFrames_;
+    if (TraceFrameOrder() && zeroCopyFrames_ <= 600)
+        OH_LOG_INFO(LOG_APP,
+                    "[VENUS-ORDER][MAIN] frame=%{public}llu signals=%{public}llu "
+                    "timestamp=%{public}lld timestamp_regress=%{public}llu",
+                    static_cast<unsigned long long>(zeroCopyFrames_),
+                    static_cast<unsigned long long>(zeroCopyFrameSignals_.load()),
+                    static_cast<long long>(imageTimestamp),
+                    static_cast<unsigned long long>(zeroCopyTimestampRegressions_));
     if (zeroCopyFrames_ == 1 || zeroCopyFrames_ % 120 == 0)
         OH_LOG_INFO(LOG_APP,
                     "[VIRGL-ZC][MAIN] frame=%{public}llu tl=%{public}u key=%{public}llu "

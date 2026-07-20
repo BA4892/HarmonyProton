@@ -287,12 +287,14 @@ static pid_t SpawnWineProgram(const ProgramOptions& options)
 
     std::vector<std::string> envStrs = BuildWineEnv(
         sockDir, sockName, libPath, binDir, -1, homeDir, prefixDir);
+    /* Product defaults first, then per-run settings. Smoke and game launches
+     * must be able to select their own log directory and diagnostics. */
+    AppendD3dBackendEnv(envStrs, options.d3dBackend, binDir);
     for (const std::string& line : options.environment) UpsertEnv(&envStrs, line);
     UpsertEnv(&envStrs, "WINEHUA_D3D_BACKEND=" + options.d3dBackend);
     UpsertEnv(&envStrs, "WINEHUA_PRESENT_BACKEND=" + options.presentBackend);
     UpsertEnv(&envStrs, std::string("WINEHUA_AUTOMATION=") + (options.automationMode ? "1" : "0"));
     /* DXVK is a managed WineHua runtime overlay, never a game-provided DLL. */
-    AppendD3dBackendEnv(envStrs, options.d3dBackend, binDir);
     if (options.d3dBackend.rfind("dxvk_", 0) == 0)
         OH_LOG_INFO(LOG_APP, "[WineProgram] managed D3D backend=%{public}s",
                     options.d3dBackend.c_str());

@@ -213,8 +213,10 @@ export function syncManagedSmoke(prefixMode: string): boolean {
   const required = [
     'x64/winehua_audio_smoke.exe', 'x64/winehua_graphics_smoke.exe',
     'x64/winehua_vulkan_smoke.exe', 'x64/winehua_d3d11_smoke.exe',
+    'x64/winehua_d3d_switch_cube.exe',
     'x86/winehua_audio_smoke.exe', 'x86/winehua_graphics_smoke.exe',
     'x86/winehua_vulkan_smoke.exe', 'x86/winehua_d3d11_smoke.exe',
+    'x86/winehua_d3d_switch_cube.exe',
     'assets/venus_storage_write.spv', 'assets/venus_storage_read.spv',
     'assets/venus_image_fetch.spv', 'assets/venus_combined_sample.spv',
     'assets/venus_separated_sample.spv',
@@ -281,12 +283,15 @@ function sleep(milliseconds: number): Promise<void> {
 export class SmokeRunner {
   private request: SmokeLaunchRequest;
   private onStatus: (text: string) => void;
+  private perfProfile: string;
   private prefix: string;
   private resultDirectory: string;
 
-  constructor(request: SmokeLaunchRequest, onStatus: (text: string) => void) {
+  constructor(request: SmokeLaunchRequest, onStatus: (text: string) => void,
+              perfProfile: string = 'baseline') {
     this.request = request;
     this.onStatus = onStatus;
+    this.perfProfile = perfProfile;
     this.prefix = prefixRoot(request.prefixMode);
     this.resultDirectory = `${this.prefix}/drive_c/smoke/results/${request.runId}`;
   }
@@ -368,6 +373,8 @@ export class SmokeRunner {
         executable: 'winehua_d3d11_smoke.exe', seconds: 5, timeoutMs: 180000 });
       tests.push({ id: 'dxvk-legacy-x64', architecture: 'x64',
         executable: 'winehua_d3d11_smoke.exe', seconds: 5, timeoutMs: 180000 });
+      tests.push({ id: 'dxvk-cube-x64', architecture: 'x64',
+        executable: 'winehua_d3d_switch_cube.exe', seconds: 8, timeoutMs: 180000 });
     }
     if (includeDxvkReplay) {
       tests.push({ id: 'dxvk-exact-replay-cs', architecture: 'guest-x64',
@@ -518,7 +525,8 @@ export class SmokeRunner {
     const windowsResult = `C:\\smoke\\results\\${this.request.runId}\\${spec.id}.json`;
     const isWineVulkan = spec.executable === 'winehua_vulkan_smoke.exe';
     const isWineVulkanPresent = isWineVulkan && spec.id.indexOf('present') >= 0;
-    const isDxvk = spec.executable === 'winehua_d3d11_smoke.exe';
+    const isDxvk = spec.executable === 'winehua_d3d11_smoke.exe' ||
+      spec.executable === 'winehua_d3d_switch_cube.exe';
     let process: ProcessInfo;
     if (isWineVulkan || isDxvk) {
       const guestVulkanLibrary = `${GUEST_VULKAN_ROOT}/lib`;
@@ -546,9 +554,13 @@ export class SmokeRunner {
         'VK_ICD_FILENAMES': guestVulkanIcd,
         'VN_DEBUG': 'vtest',
         'VN_PERF': 'no_fence_feedback',
-        'WINEDEBUG': '+loaddll,+module,+vulkan'
+        /* Keep DLL load evidence for fallback detection without tracing every
+         * Vulkan call. A caller can still override WINEDEBUG for a focused
+         * diagnostic run through runWineProgram. */
+        'WINEDEBUG': '+loaddll,+module'
       };
       if (isDxvk) {
+        smokeEnvironment['BOX64_DYNAREC_WEAKBARRIER'] = '0';
         smokeEnvironment['WINEHUA_DXVK_VERSION'] = '1.10.3';
         smokeEnvironment['WINEHUA_DXVK_RELAXED_FEATURES'] = '1';
         smokeEnvironment['WINEDLLOVERRIDES'] = 'd3d11=n;dxgi=n';
@@ -563,6 +575,26 @@ export class SmokeRunner {
         smokeEnvironment['DXVK_SHADER_DUMP_PATH'] = `C:\\smoke\\results\\${this.request.runId}`;
         smokeEnvironment['DXVK_WINEHUA_DUMP_REMAPPED_SPIRV'] = '1';
         smokeEnvironment['DXVK_STATE_CACHE'] = '0';
+        if (this.perfProfile === 'shadow-precise' ||
+          this.perfProfile === 'shadow-precise-single-ring' ||
+          this.perfProfile === 'shadow-precise-sync-submit' ||
+          this.perfProfile === 'shadow-precise-strong-ring' ||
+          this.perfProfile === 'shadow-precise-direct-fence' ||
+          this.perfProfile === 'shadow-precise-retain-shmem') {
+          smokeEnvironment['DXVK_WINEHUA_PRECISE_SHADOW'] = '1';
+          smokeEnvironment['DXVK_WINEHUA_FLUSH_DYNAMIC_MAPPED'] = '1';
+          smokeEnvironment['VN_WINEHUA_REMOTE_MEMORY_SYNC'] = '1';
+          if (this.perfProfile === 'shadow-precise-single-ring')
+            smokeEnvironment['VN_PERF'] = 'no_fence_feedback,no_multi_ring';
+          if (this.perfProfile === 'shadow-precise-sync-submit')
+            smokeEnvironment['VN_PERF'] = 'no_fence_feedback,no_async_queue_submit';
+          if (this.perfProfile === 'shadow-precise-strong-ring')
+            smokeEnvironment['VN_WINEHUA_STRONG_RING_BARRIER'] = '1';
+          if (this.perfProfile === 'shadow-precise-direct-fence')
+            smokeEnvironment['VN_WINEHUA_DIRECT_FENCE_WAIT'] = '1';
+          if (this.perfProfile === 'shadow-precise-retain-shmem')
+            smokeEnvironment['VN_WINEHUA_DEFER_SHMEM_UNREF'] = '1';
+        }
         if (this.request.suite === 'dxvk-layout-general')
           smokeEnvironment['DXVK_WINEHUA_FORCE_SAMPLED_GENERAL'] = '1';
       }
