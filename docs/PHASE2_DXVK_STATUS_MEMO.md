@@ -12,19 +12,24 @@
 The off-axis CubeArray qualification is now complete on the physical device.
 The D3D11 smoke writes distinct D24 values into the upper-right texel of every
 cube face, then uses non-center directions, ordinary SampleLevel, explicit
-SampleCmpLevelZero, and implicit SampleCmp against the same TextureCubeArray
-resource.
+SampleCmpLevelZero, implicit SampleCmp, and a four-tap GatherCmp against the
+same TextureCubeArray resource.
 
 Result: x86 and x64 both PASS with mismatches=0. The 12 expected values are
 0xffffffdf for the high-depth faces and 0xff000020 for the low-depth faces.
 This validates face selection, U/V orientation, cube index mapping, mixed
-descriptor access, and the Maleoon 2D-array alternate-view path. The native
-CubeArray Dref path remains disabled on Maleoon because it hangs the Venus
+descriptor access, comparison-gather execution, and the Maleoon 2D-array
+alternate-view path. The native CubeArray Dref path remains disabled on Maleoon because it hangs the Venus
 ring.
 
-Evidence archive: D:\MyProject\winehua-logs\automation\phase2-20260723-022534
-HAP SHA-256: a5797dd2509d2785e7c439b8b4177d6c2050d84303466c3b3d12bacf38620fc8
-Wine commit: 3a21173d5b3
+The captured FS_d10340c27c9daa60f6953469db6f3d0e956a33dc shader contains
+OpImageDrefGather and a 2D, arrayed, depth image type. The same shader also
+contains ordinary sample, explicit Dref, and implicit Dref instructions, so the
+GatherCmp result was not optimized away.
+
+Evidence archive: D:\MyProject\winehua-logs\automation\phase2-20260723-023746
+HAP SHA-256: e4d9ca1be2bc8f6512aa56ecfc01bda2c91a251da99e99f3120b05eee2c52260
+Wine commit: 5eb480fd61d
 
 The automation summary is PASS; its release gate=false is expected because this
 run was one reuse-prefix qualification, not the reuse x3, clean-prefix, and
