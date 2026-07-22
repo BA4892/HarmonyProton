@@ -26,8 +26,8 @@ $bundle = 'app.hackeris.winehua'
 if (-not (Test-Path -LiteralPath $hdc)) { throw "Windows HDC not found: $hdc" }
 
 if ($GamePreset -eq 'heaven-dx11') {
-    if ($GameArguments.Count -gt 0 -or $ClickTitlePrefix -or $ClickButtonText) {
-        throw '-GamePreset heaven-dx11 supplies its own arguments and bypasses the launcher'
+    if ($GameArguments.Count -gt 0) {
+        throw '-GamePreset heaven-dx11 supplies its own arguments'
     }
     if (-not $GamePath) {
         $GamePath = 'Z:\home\Heaven Benchmark 4.0\Heaven Benchmark 4.0\bin\heaven.exe'
@@ -45,6 +45,15 @@ if ($GamePreset -eq 'heaven-dx11') {
         '-extern_define', ',RELEASE,LANGUAGE_EN,QUALITY_LOW,TESSELLATION_DISABLED',
         '-extern_plugin', ',GPUMonitor'
     )
+    # The direct executable opens Heaven's Win32 launcher first. Use the same
+    # managed driver as other game automation so the benchmark scene, rather
+    # than the black pre-run client area, is the workload under test.
+    if (-not $ClickTitlePrefix) {
+        $ClickTitlePrefix = 'Unigine Heaven Benchmark 4.0 Basic (Direct3D11)'
+    }
+    if (-not $ClickButtonText) {
+        $ClickButtonText = 'Benchmark'
+    }
 }
 
 $environmentPairs = @($D3DEnvironment.GetEnumerator() | Sort-Object { [string]$_.Key })

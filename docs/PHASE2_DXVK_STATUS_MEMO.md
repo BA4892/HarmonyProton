@@ -7,6 +7,63 @@
 > code. Update it whenever a conclusion, gate result, commit, HAP, or primary
 > blocker changes.
 
+### 2026-07-23 BC4/BC5 matrix and physical-device automation update (current)
+
+The BC compatibility smoke now covers BC1, BC3, BC4, and BC5 in UNORM/SRGB or
+SNORM variants as applicable, with mip0 and mip1 and signed negative/zero/positive
+sample values. The SNORM vector was corrected so all sampled texels use the
+intended compressed index; the earlier apparent BC4/BC5 SNORM failure was a test
+vector bug, not a DXVK decoder failure.
+
+The latest physical ARM64 device result is:
+
+    Device: 5KPBB25818203996
+    HAP SHA-256: b923bf15c774da2262ffec74714ed9695859d891f052e0db92e7cf3247d0a504
+    wine-data.zip SHA-256: b59bf01e9b34e3d6f6612a1f795ff0476ac7b7b744a9d2215fd5d7aa0d5ca109
+    HAP embedded wine-data.zip: matches assembled zip
+
+Archives:
+
+    D:\MyProject\winehua-logs\automation\phase2-20260723-044615
+      explicit physical-device DXVK reuse run: PASS
+    D:\MyProject\winehua-logs\automation\phase2-20260723-044951
+      automatic physical-device selection DXVK reuse run: PASS
+
+Both x86 and x64 passed the full D3D11 coverage and fixed-frame visual gates.
+The result includes descriptor identity, mip/array/cube/cube-array, barriers,
+MSAA, compute/UAV, depth/stencil, BC coverage, and present checks. Both
+architectures report `cpuReadBytes=0`, `cpuUploadBytes=0`, and the visible cube
+reports `angleRegressions=0`. The matrix is machine-readable through
+`bcFormatMatrixValues`; the latest values are:
+
+    BC1_UNORM  mip0=0xff0000ff mip1=0xff00ff00
+    BC1_SRGB   mip0=0xff0000ff mip1=0xffff0000
+    BC3_UNORM  mip0=0xff0000ff mip1=0xffff0000
+    BC3_SRGB   mip0=0xff0000ff mip1=0xff00ff00
+    BC4_UNORM  mip0=0xff0000ff mip1=0xff000080
+    BC5_UNORM  mip0=0xff00ffff mip1=0xff00ff00
+    BC4_SNORM  mip0=0xff000000 mip1=0xff0000ff
+    BC5_SNORM  mip0=0xff000000 mip1=0xff0000ff
+
+The ordinary `R32_FLOAT` comparison-sampler probe still returns all-true and is
+retained as a diagnostic failure only. D32 and D24S8 comparison paths, including
+array/cube/cube-array/view/barrier coverage, pass and are the relevant depth paths
+for current Heaven investigation. Do not add a global comparison-sampler
+workaround from the R32 diagnostic alone.
+
+The automation script previously selected the first HDC target, which can be
+`127.0.0.1:5555` and rejects an ARM64 HAP with an ABI mismatch. It now prefers a
+non-localhost physical target and falls back to the first target only when no
+physical target is available. The fix was validated by the no-`-DeviceId`
+`phase2-20260723-044951` run.
+
+Current real-workload status is unchanged: direct Heaven DX11 launch creates a
+Feature Level 11.0 DXVK device and presents frames, but the scene remains
+partially black/overexposed and runs at roughly 1.8-4.2 FPS. The next P3 work is
+resource identity and state tracing for Heaven's depth/G-buffer SRV views,
+compatible format views, subresource barriers, and post-processing inputs. The
+stable cube and official smoke must remain green while doing this.
+
 ### 2026-07-23 CubeArray off-axis qualification (current)
 
 The off-axis CubeArray qualification is now complete on the physical device.

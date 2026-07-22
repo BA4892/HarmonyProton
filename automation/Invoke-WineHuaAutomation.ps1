@@ -686,8 +686,20 @@ if (-not (Test-Path -LiteralPath $HapWindows) -and $SkipBuild) { throw 'Signed H
 if ($Runs -lt 1) { throw '-Runs must be at least 1' }
 
 if (-not $DeviceId) {
-    $targets = & $Hdc list targets
-    $DeviceId = @($targets | Where-Object { $_ -and $_ -notmatch '^\[' })[0]
+    $targets = @(& $Hdc list targets | ForEach-Object { "$($_)".Trim() } |
+        Where-Object { $_ -and $_ -notmatch '^\[' })
+    # Prefer a physical target when HDC also exposes the local forwarding/emulator
+    # target. An ARM64 HAP is intentionally rejected by the x86 localhost target.
+    $physicalTargets = @($targets | Where-Object {
+        $_ -notmatch '^(127\.0\.0\.1|localhost)(:|$)'
+    })
+    $DeviceId = if ($physicalTargets.Count -gt 0) {
+        $physicalTargets[0]
+    } elseif ($targets.Count -gt 0) {
+        $targets[0]
+    } else {
+        ''
+    }
 }
 if (-not $DeviceId) { throw 'No HDC device is connected' }
 $script:DeviceId = $DeviceId
