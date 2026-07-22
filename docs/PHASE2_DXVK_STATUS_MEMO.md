@@ -1,11 +1,176 @@
 # WineHua Phase 2 DXVK Status Memo
 
-> Last updated: 2026-07-21
+> Last updated: 2026-07-23
 >
 > Purpose: this is the durable handoff for resuming the DXVK investigation.
 > Read this file before changing DXVK, Venus present, SmokeRunner, or game launch
 > code. Update it whenever a conclusion, gate result, commit, HAP, or primary
 > blocker changes.
+
+### 2026-07-23 CubeArray Dref root cause and Maleoon workaround (current)
+
+The D24S8 CubeArray blocker is closed for the tested DX11
+TextureCubeArray.SampleCmpLevelZero path.
+
+The exact Guest A/B used one cube-compatible image with 12 D24S8 layers, one
+comparison sampler, identical depth values and identical reference value:
+
+    samplerCubeArray ordinary sample              PASS
+    samplerCubeArrayShadow native Dref             Host Venus ring hang
+    sampler2DArrayShadow with cube-to-face mapping PASS
+
+The 2D-array Golden returned:
+
+    0,0,0,1,1,1,1,1,1,0,0,0
+
+It completed in 210 ms with two submits. The native CubeArray Dref is not a
+descriptor, image upload, barrier, layout, array-layer, or ordinary CubeArray
+filtering failure; it is a Maleoon Host Vulkan fault specific to CubeArray
+shadow/Dref execution.
+
+DXVK now enables an adapter quirk automatically when the device name contains
+Maleoon:
+
+1. The analysis pass marks only t# resources used by CubeArray comparison
+   sample/gather instructions.
+2. Those resources declare a 2D-array image type and request DXVK's existing
+   VK_IMAGE_VIEW_TYPE_2D_ARRAY alternate view.
+3. The DXBC compiler maps (direction.xyz, cubeIndex) to
+   (uv, cubeIndex * 6 + face).
+4. Comparison remains native OpImageSampleDref; it is not replaced by ordinary
+   depth sampling followed by a scalar compare, so per-texel compare and linear
+   PCF ordering are preserved.
+5. Other accesses to the same shader resource use the same mapped descriptor
+   type, and GetDimensions converts the six face layers back to cube count.
+6. Other GPUs retain the native CubeArray path.
+
+The archived failing fragment shader
+FS_fe4234d5022c30870ab5d78b73f8638252e3dcc1 now validates as:
+
+    OpTypeImage ... 2D ... Arrayed=1 ... Depth=1
+    OpImageSampleDrefExplicitLod
+
+Runtime tracing proves the descriptor is a 12-layer
+VK_IMAGE_VIEW_TYPE_2D_ARRAY, not an accidental fallback. x86 and x64 both
+return the exact 12 expected pixels with zero mismatches. The full DXVK suite,
+fixed-frame visual gate, and x64 present cube also pass; the cube produced 543
+frames with angleRegressions=0.
+
+Evidence:
+
+    Guest Golden:
+      D:\MyProject\winehua-logs\automation\phase2-20260723-005718
+    Full x86/x64 DXVK regression:
+      D:\MyProject\winehua-logs\automation\phase2-20260723-012108
+    HAP SHA-256:
+      97a4f7c712ae8deca196cd9015d264caee9b00ad5f8c2256c2cdfeb2bbc885c4
+
+Remaining qualification work is narrower than the fixed crash:
+
+* Add off-axis face/UV patterns rather than only face-centre samples.
+* Exercise implicit-LOD SampleCmp, mixed ordinary/comparison access to one
+  CubeArray resource, and comparison gather.
+* 2D-array hardware filtering cannot cross a cube-face seam. If a real game
+  exposes a visible point-shadow seam, add a bounded seam-aware shader path;
+  do not re-enable the Host instruction that hangs the ring.
+
+### 2026-07-22 DXVK Cube Dref exact-contract investigation (current)
+
+The native D24S8 Cube comparison probe now tests four independent contracts:
+
+    D24S8 2DArray Dref                         PASS
+    D24S8 Cube ordinary sample                PASS
+    D24S8 Cube combined comparison             PASS
+    D24S8 Cube separated comparison            PASS
+    D24S8 Cube DXVK contract comparison        PASS
+
+The last case uses the exact DXVK Legacy 1.10.3 image contract in a compute
+shader: the descriptor variable is `OpTypeImage ... Cube 0 ...`, the sampled
+image result is `OpTypeSampledImage` over `OpTypeImage ... Cube 1 ...`, and the
+shader executes `OpImageSampleDrefExplicitLod`. It is not a hand-written
+combined descriptor substitute. The result is `0,0,0,1,1,1`, matching the
+ordinary native Dref control.
+
+This rules out the following as the primary cause of the DXVK Cube comparison
+failure:
+
+* Venus/Host inability to execute separated Cube comparison samplers.
+* The DXVK `imageTypeId` (Depth=0) to `depthTypeId` (Depth=1) SPIR-V contract.
+* Generic D24S8 format creation, Cube view creation, or comparison sampler
+  creation in an isolated command path.
+
+The remaining failure is stage/runtime-specific. The DXVK fragment shader
+captured in the failing run reaches `OpImageSampleDrefExplicitLod`, but its
+render-pass/resource state, fragment-stage descriptor update/bind ordering,
+coordinate/reference inputs, or actual D24 resource contents still differ
+from the isolated probe. Continue with an exact graphics-pipeline replay and
+descriptor/resource identity trace; do not globally rewrite comparison
+sampling or replace it with ordinary sampling plus a scalar compare.
+
+Evidence archives:
+
+    D:\MyProject\winehua-logs\automation\phase2-20260722-141045
+      DXVK Legacy: Cube sample PASS, Cube comparison FAIL
+    D:\MyProject\winehua-logs\automation\phase2-20260722-165213
+      native combined/separated/DXVK-contract Cube Dref PASS
+      native CubeArray Dref still crashes in Venus/Box64 ring path
+
+Latest diagnostic HAP SHA-256:
+
+    18e66c77697d4991b6e91fa64a874b6cd756d10c2cbfecd99b8323d7720cd937
+
+### 2026-07-22 Heaven DX11 direct-launch and trace-noise update (current)
+
+Heaven can now be launched deterministically without its unstable legacy Qt
+launcher:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File `
+  \\wsl.localhost\Ubuntu\home\maple\Work\WineHua-build\automation\Start-WineHuaGameTest.ps1 `
+  -D3DBackend dxvk_legacy -GamePreset heaven-dx11
+```
+
+The launcher path is no longer authoritative automation. On the physical Pad,
+`QtWebKitUnigine_x864.dll` can fault at `0xBBADBEEF` before the Win32 driver
+posts the RUN click. Manual clicking sometimes wins that timing race, which
+explains why manual launch appeared more reliable. The preset starts
+`bin\heaven.exe` directly with the exact Direct3D 11 arguments captured from a
+successful manual run and lets game mode derive the working directory from the
+EXE path.
+
+Latest direct-launch evidence:
+
+    HAP SHA-256:
+      206c6288ebec1753feb8d26c5e2f3d226f8b37a32a48e9d4dbaacfb65acfdb77
+    manual trace archive:
+      D:\MyProject\winehua-logs\manual\heaven-manual-20260722-1014
+    direct launch archive:
+      D:\MyProject\winehua-logs\automation\heaven-direct-20260722-1051
+    log-quiet validation archive:
+      D:\MyProject\winehua-logs\automation\heaven-direct-logquiet-20260722-1125
+
+The direct path creates a Feature Level 11.0 DXVK device and a 640x360
+BrokerPresent swapchain. Frames continue to present and there is no WineD3D
+fallback, but rendering is not correct: the sky is visible while large parts
+of scene geometry are black and other regions are overexposed/white. This is a
+stable scene-rendering failure, not an all-white surface-routing failure and
+not a captured stale frame.
+
+The actual D32 comparison-resource smoke passes `1,0,1,0` on x86 and x64, the
+Heaven comparison sampler reaches Host Vulkan with `compareEnable=1` and
+`LESS_OR_EQUAL`, and traced Guest descriptor objects map to the expected Host
+view/sampler handles. Do not reopen generic sampled-image or comparison-sampler
+support as the leading theory. Continue with depth/G-buffer view identity,
+D24S8/D32 aspect and compatible-format views, render-pass barriers/order, and
+post-processing input identity.
+
+Normal `shadow-precise-strong-ring` no longer treats trace value `0` as enabled
+and no longer emits successful remote-flush, ring, fence, or queue summaries.
+The 30-second Host log delta fell to about 10.8 KB instead of multiple MB; all
+copies, cache operations, fences, ring barriers, and error logs remain active.
+The rendering failure remained unchanged, so suppressing diagnostic I/O did
+not hide or create the Heaven issue. Explicit sampled-descriptor trace is
+bounded at 32,768 Host records.
 
 > **Current performance addendum:** the normal product D3D11 cube is visible
 > and the release-candidate `shadow-precise-strong-ring` path sustains about
@@ -15,6 +180,119 @@
 > before changing Mesa Venus, virglrenderer shadow memory, fence feedback, or
 > BrokerPresent. That document contains the current architecture, measurements,
 > ranked hypotheses, and next experiments.
+
+### 2026-07-21 ComputeMark correctness and pacing update (current)
+
+The normal DXVK game lifecycle and the previous white-window blocker are now
+resolved. ComputeMark starts through the managed Legacy overlay, creates a
+D3D11 Feature Level 11.0 device, renders the expected outer scene after custom
+border-color emulation, and does not fall back to WineD3D. The stale white
+window investigation in sections 7 and 8 is retained only as historical
+context and must not be resumed as the current blocker.
+
+The custom-border policy is capability-driven and does not key on the GPU
+name: standard Vulkan colors use the standard path, native custom-border
+features use the extension, the supported `SampleLevel`/LOD-0 subset uses the
+shader emulation path, and unsupported combinations remain explicit. The x86
+and x64 D3D11 smoke passes point and linear custom borders with zero boundary
+mismatches. All 35 captured original/remapped SPIR-V binaries pass
+`spirv-val --target-env vulkan1.1`.
+
+Current validated artifacts and archives:
+
+    HAP SHA-256:
+      7574327fb6ca38e4e46793cf347c00b175dc2fe027ae7d25b0498363310866b5
+    capability archive:
+      D:\MyProject\winehua-logs\automation\phase2-20260721-183330
+    DXVK correctness archive:
+      D:\MyProject\winehua-logs\automation\phase2-20260721-183531
+    optimized smoke archive:
+      D:\MyProject\winehua-logs\automation\phase2-20260721-184301
+    ComputeMark stable pacing archive:
+      D:\MyProject\winehua-logs\manual\computemark-pacing-20260721-194956
+    async-present failure archive:
+      D:\MyProject\winehua-logs\manual\computemark-async-present-20260721-203229
+    async-present plus synchronous-submit archive:
+      D:\MyProject\winehua-logs\manual\computemark-async-present-sync-submit-20260721-204421
+
+The ordinary D3D11 smoke remains fast: 81.934 FPS, 549 cube frames, and zero
+angle regressions in the optimized archive. ComputeMark is a much heavier
+DirectCompute workload and measures about 7 FPS on the current Host path. This
+is not the old baseline-shadow regression:
+
+    stable profile: shadow-precise-strong-ring
+    present count 120 -> 240: 17.202 seconds, 6.98 FPS
+    presenter 120-frame summary: 7.06 FPS
+    present serial: 116 -> 236, monotonic
+    serial_regressions: 0
+    steady Host-to-Guest shadow refresh: skipped in precise mode
+    steady Guest-to-Host copies at sampled submits: normally 0 bytes
+
+The visible stutter is uneven low-throughput delivery, not fallback or old
+frame replay. Frames arrive in bursts, commonly with roughly 10-15 ms between
+two frames followed by a roughly 270 ms gap. On the 90 Hz display this repeats
+one image for many VSyncs and then jumps to the next animation time. There are
+no timestamp regressions, SurfaceQueue fallback transitions, or non-monotonic
+presentation serials in the captured run.
+
+The present breakdown identifies where the time is spent:
+
+    present_us_avg:       131615 us
+    release_wait_avg:     128317 us
+    acquire_avg:             915 us
+    presenter submit_avg:    657 us
+    queue_present_avg:      1180 us
+
+The synchronous release wait is a fence on the presenter copy submission. It
+therefore waits for all earlier DXVK compute/render work on the same Host queue
+as well as the final copy. It exposes GPU/WSI queue completion time; it is not
+equivalent to a 128 ms CPU shadow memcpy. The presenter holds the Vulkan queue
+external-synchronization mutex while this work completes, so the next Guest
+queue submission also stalls.
+
+Do not remove that mutex: Vulkan requires external synchronization for a
+shared `VkQueue`. The existing async-present prototype was tested and rejected:
+
+1. `shadow-precise-strong-ring-async-present` advanced only five frames, then
+   hit `aborting on ring fatal error at iter 4096` and Box64 signal 6.
+2. Adding `VN_PERF=no_fence_feedback,no_query_feedback,no_async_queue_submit`
+   removed the ring fatal and reached 120 frames, but only improved 7.06 to
+   7.46 FPS. The wait moved to `vkQueuePresentKHR` (`queue_present_avg=105484
+   us`), the swapchain recreated repeatedly, and the application later left an
+   empty desktop. This is a diagnostic FAIL, not a candidate default.
+
+The next performance work must preserve the stable profile and proceed in this
+order:
+
+1. Add split timing around Host queue mutex acquisition and the actual driver
+   `vkQueueSubmit`, while retaining the existing presenter stage metrics.
+2. Measure Host GPU execution separately from presentation copy/WSI. Prefer
+   timestamp queries or an equivalent bounded probe; do not infer GPU time
+   only from a CPU fence wait.
+3. Evaluate a managed `dxgi.maxFrameLatency=1` A/B to smooth burst pacing. The
+   config must be supplied by WineHua runtime/manifest packaging, not copied
+   beside a game. It is a pacing experiment, not an expected throughput gain.
+4. Only pursue a present worker or second-queue design if explicit ownership,
+   semaphore ordering, object lifetime, resize, and device-loss behavior are
+   defined. A raw async callback or unlocked `VkQueue` is not acceptable.
+5. Keep the 83 FPS smoke, x86/x64 correctness suite, frame-order trace, clean
+   and reuse-prefix gates active while changing the present path.
+
+Input automation is available and works. The packaged
+`winehua_win32_driver.exe` locates the Win32 title/button and records
+`BM_CLICK sent`; use this instead of asking for a manual click. The 12-second
+delay used once on 2026-07-21 was only an attempted capture alignment. Normal
+automation should start the driver after about one second and let it wait for
+the window. HDC touch injection did not reliably cross the current
+XComponent/Wayland input boundary.
+
+Two automation defects discovered during this run remain open:
+
+- Windows HDC can print `[Fail]`/`permission denied` while returning exit code
+  zero; deployment helpers must validate output text as well as `$LASTEXITCODE`.
+- A transient device disconnect during the force-stop polling loop is reported
+  as "WineHua process did not stop". Detect and classify the HDC transport
+  error, reconnect once, then retry the bounded status check.
 
 ### 2026-07-21 frame-order and ring-publication update
 

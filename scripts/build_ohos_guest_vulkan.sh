@@ -118,6 +118,13 @@ for shader in \
     venus_image_fetch \
     venus_combined_sample \
     venus_separated_sample \
+    venus_depth_array_compare \
+    venus_depth_cube_sample \
+    venus_depth_cube_compare \
+    venus_depth_cube_separated_compare \
+    venus_depth_cube_array_sample \
+    venus_depth_cube_array_2d_compare \
+    venus_depth_cube_array_compare \
     venus_dxvk_contract_sample \
     venus_dxvk_contract_unknown_sample \
     venus_dxvk_contract_spec_sample \
@@ -126,6 +133,136 @@ for shader in \
         "$ROOT/smoke/$shader.comp" -o "$SHADER_OUTPUT/$shader.spv" \
         >/dev/null
 done
+spirv-as --target-env vulkan1.1 \
+    "$ROOT/smoke/venus_depth_cube_dxvk_contract_compare.spvasm" \
+    -o "$SHADER_OUTPUT/venus_depth_cube_dxvk_contract_compare.spv"
+"$GLSLANG_VALIDATOR" -V --target-env vulkan1.1 \
+    "$ROOT/smoke/venus_fullscreen_triangle.vert" \
+    -o "$SHADER_OUTPUT/venus_fullscreen_triangle.vert.spv" >/dev/null
+"$GLSLANG_VALIDATOR" -V --target-env vulkan1.1 \
+    "$ROOT/smoke/venus_depth_cube_golden.frag" \
+    -o "$SHADER_OUTPUT/venus_depth_cube_golden.frag.spv" >/dev/null
+# Turn the hand-written fragment Golden into the exact DXVK Legacy image type
+# contract: the descriptor variable remains a color Cube image (Depth=0),
+# while OpSampledImage uses the depth Cube type (Depth=1).  The compute form of
+# this split already passes; this isolates the same contract in fragment stage.
+spirv-dis "$SHADER_OUTPUT/venus_depth_cube_golden.frag.spv" \
+    -o "$SHADER_OUTPUT/venus_depth_cube_golden_dxvk_contract.spvasm"
+awk '
+    /OpTypeImage %float Cube 1 0 0 1 Unknown$/ {
+        print
+        print "%winehua_color_cube = OpTypeImage %float Cube 0 0 0 1 Unknown"
+        print "%winehua_ptr_color_cube = OpTypePointer UniformConstant %winehua_color_cube"
+        next
+    }
+    /%sourceDepth = OpVariable/ {
+        sub(/%_ptr_UniformConstant_[0-9]+/, "%winehua_ptr_color_cube")
+    }
+    /OpLoad .* %sourceDepth$/ {
+        sub(/OpLoad %[A-Za-z0-9_]+ %sourceDepth/, "OpLoad %winehua_color_cube %sourceDepth")
+    }
+    { print }
+' "$SHADER_OUTPUT/venus_depth_cube_golden_dxvk_contract.spvasm" \
+    > "$SHADER_OUTPUT/venus_depth_cube_golden_dxvk_contract.tmp.spvasm"
+mv "$SHADER_OUTPUT/venus_depth_cube_golden_dxvk_contract.tmp.spvasm" \
+    "$SHADER_OUTPUT/venus_depth_cube_golden_dxvk_contract.spvasm"
+spirv-as --target-env vulkan1.1 \
+    "$SHADER_OUTPUT/venus_depth_cube_golden_dxvk_contract.spvasm" \
+    -o "$SHADER_OUTPUT/venus_depth_cube_golden_dxvk_contract.spv"
+spirv-val --target-env vulkan1.1 \
+    "$SHADER_OUTPUT/venus_depth_cube_golden_dxvk_contract.spv"
+spirv-as --target-env vulkan1.1 \
+    "$ROOT/smoke/venus_depth_cube_fail.spvasm" \
+    -o "$SHADER_OUTPUT/venus_depth_cube_fail.spv"
+spirv-opt -O "$SHADER_OUTPUT/venus_depth_cube_fail.spv" \
+    -o "$SHADER_OUTPUT/venus_depth_cube_fail_optimized.spv"
+spirv-val --target-env vulkan1.1 \
+    "$SHADER_OUTPUT/venus_depth_cube_fail_optimized.spv"
+# DXVK emits the minimum vec3 Cube coordinate for OpImageSampleDref*.  The
+# glslang Golden keeps the shadow reference as a fourth coordinate component
+# as well as the separate Dref operand.  Both validate, so test that exact
+# driver-facing representation without changing any other shader behavior.
+awk '
+    /%320 = OpBitcast %float %uint_1056964608$/ {
+        print
+        print " %winehua_padded_dref_coord = OpCompositeConstruct %v4float %318 %320"
+        next
+    }
+    /OpImageSampleDrefExplicitLod %float %324 %318 %320 Lod %float_0$/ {
+        sub(/%318 %320/, "%winehua_padded_dref_coord %320")
+    }
+    { print }
+' "$ROOT/smoke/venus_depth_cube_fail.spvasm" \
+    > "$SHADER_OUTPUT/venus_depth_cube_fail_padded_dref.spvasm"
+spirv-as --target-env vulkan1.1 \
+    "$SHADER_OUTPUT/venus_depth_cube_fail_padded_dref.spvasm" \
+    -o "$SHADER_OUTPUT/venus_depth_cube_fail_padded_dref.spv"
+spirv-val --target-env vulkan1.1 \
+    "$SHADER_OUTPUT/venus_depth_cube_fail_padded_dref.spv"
+# Independently exclude advertised float-control modes from the same exact
+# replay; these modes are unrelated to the descriptor/resource contract.
+awk '
+    /OpCapability DenormFlushToZero$/ { next }
+    /OpCapability SignedZeroInfNanPreserve$/ { next }
+    /OpExtension "SPV_KHR_float_controls"$/ { next }
+    /OpExecutionMode %main DenormFlushToZero 32$/ { next }
+    /OpExecutionMode %main SignedZeroInfNanPreserve 32$/ { next }
+    { print }
+' "$ROOT/smoke/venus_depth_cube_fail.spvasm" \
+    > "$SHADER_OUTPUT/venus_depth_cube_fail_no_float_controls.spvasm"
+spirv-as --target-env vulkan1.1 \
+    "$SHADER_OUTPUT/venus_depth_cube_fail_no_float_controls.spvasm" \
+    -o "$SHADER_OUTPUT/venus_depth_cube_fail_no_float_controls.spv"
+spirv-val --target-env vulkan1.1 \
+    "$SHADER_OUTPUT/venus_depth_cube_fail_no_float_controls.spv"
+# Keep DXVK's original coordinate/control-flow lowering, but replace the
+# texture operation with RGB encoding of the final Cube direction.  This
+# separates bad coordinates from a fragment compiler issue at the Dref sample.
+awk '
+    /OpDecorate %331 NoContraction$/ { next }
+    /%322 = OpLoad %22 %s0$/ {
+        print " %winehua_coord_half = OpVectorTimesScalar %v3float %318 %320"
+        print " %winehua_coord_bias = OpCompositeConstruct %v3float %320 %320 %320"
+        print " %winehua_coord_color = OpFAdd %v3float %winehua_coord_half %winehua_coord_bias"
+        print " %winehua_coord_r0 = OpLoad %v4float %r0"
+        print " %winehua_coord_out = OpVectorShuffle %v4float %winehua_coord_r0 %winehua_coord_color 4 5 6 3"
+        print "               OpStore %r0 %winehua_coord_out"
+        skip = 1
+        next
+    }
+    skip && /OpStore %r0 %333$/ {
+        skip = 0
+        next
+    }
+    !skip { print }
+' "$ROOT/smoke/venus_depth_cube_fail.spvasm" \
+    > "$SHADER_OUTPUT/venus_depth_cube_fail_coordinate_trace.spvasm"
+spirv-as --target-env vulkan1.1 \
+    "$SHADER_OUTPUT/venus_depth_cube_fail_coordinate_trace.spvasm" \
+    -o "$SHADER_OUTPUT/venus_depth_cube_fail_coordinate_trace.spv"
+spirv-val --target-env vulkan1.1 \
+    "$SHADER_OUTPUT/venus_depth_cube_fail_coordinate_trace.spv"
+# Diagnostic A/B: keep the captured final DXVK module byte-for-byte in the
+# normal replay, and produce a second module whose only semantic difference is
+# deterministic initialization of DXVK's private temporary registers.  Some
+# mobile fragment compilers propagate undef from the unselected OpSelect arm.
+awk '
+    { print }
+    /%float_0 = OpConstant %float 0$/ {
+        print " %winehua_zero_v4 = OpConstantNull %v4float"
+    }
+    /%14 = OpLabel$/ {
+        print "               OpStore %r0 %winehua_zero_v4"
+        print "               OpStore %r1 %winehua_zero_v4"
+        print "               OpStore %r2 %winehua_zero_v4"
+    }
+' "$ROOT/smoke/venus_depth_cube_fail.spvasm" \
+    > "$SHADER_OUTPUT/venus_depth_cube_fail_initialized.spvasm"
+spirv-as --target-env vulkan1.1 \
+    "$SHADER_OUTPUT/venus_depth_cube_fail_initialized.spvasm" \
+    -o "$SHADER_OUTPUT/venus_depth_cube_fail_initialized.spv"
+spirv-val --target-env vulkan1.1 \
+    "$SHADER_OUTPUT/venus_depth_cube_fail_initialized.spv"
 # Optional diagnostic payload: freeze the currently captured DXVK CS shaders
 # so the replay can separate specialization/default handling from generated
 # instruction semantics.  This never changes the product DXVK binaries.

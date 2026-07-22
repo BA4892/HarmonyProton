@@ -1,0 +1,151 @@
+; Diagnostic SPIR-V contract used by DXVK 1.10.3 for SampleCmp on a Cube SRV.
+; The sampled image result is a depth Cube, while the descriptor variable is
+; deliberately a color Cube image.  This is the exact imageTypeId/depthTypeId
+; split emitted by DxbcCompiler::emitLoadSampledImage.
+; Generated from venus_depth_cube_separated_compare.comp and kept explicit so
+; the contract remains reviewable and stable across glslang updates.
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %gl_GlobalInvocationID
+               OpExecutionMode %main LocalSize 1 1 1
+               OpSource Unknown 0
+               OpName %main "main"
+               OpName %cubeDirection_u1_ "cubeDirection(u1;"
+               OpName %face "face"
+               OpName %face_0 "face"
+               OpName %gl_GlobalInvocationID "gl_GlobalInvocationID"
+               OpName %value "value"
+               OpName %sourceDepth "sourceDepth"
+               OpName %compareSampler "compareSampler"
+               OpName %param "param"
+               OpName %Output "Output"
+               OpMemberName %Output 0 "values"
+               OpName %outputBuffer "outputBuffer"
+               OpDecorate %gl_GlobalInvocationID BuiltIn GlobalInvocationId
+               OpDecorate %sourceDepth Binding 0
+               OpDecorate %sourceDepth DescriptorSet 0
+               OpDecorate %compareSampler Binding 1
+               OpDecorate %compareSampler DescriptorSet 0
+               OpDecorate %_arr_uint_uint_12 ArrayStride 4
+               OpDecorate %Output Block
+               OpMemberDecorate %Output 0 Offset 0
+               OpDecorate %outputBuffer Binding 2
+               OpDecorate %outputBuffer DescriptorSet 0
+               OpDecorate %gl_WorkGroupSize BuiltIn WorkgroupSize
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+%_ptr_Function_uint = OpTypePointer Function %uint
+      %float = OpTypeFloat 32
+    %v3float = OpTypeVector %float 3
+         %10 = OpTypeFunction %v3float %_ptr_Function_uint
+     %uint_0 = OpConstant %uint 0
+       %bool = OpTypeBool
+    %float_1 = OpConstant %float 1
+    %float_0 = OpConstant %float 0
+         %22 = OpConstantComposite %v3float %float_1 %float_0 %float_0
+     %uint_1 = OpConstant %uint 1
+   %float_n1 = OpConstant %float -1
+         %30 = OpConstantComposite %v3float %float_n1 %float_0 %float_0
+     %uint_2 = OpConstant %uint 2
+         %37 = OpConstantComposite %v3float %float_0 %float_1 %float_0
+     %uint_3 = OpConstant %uint 3
+         %44 = OpConstantComposite %v3float %float_0 %float_n1 %float_0
+     %uint_4 = OpConstant %uint 4
+         %51 = OpConstantComposite %v3float %float_0 %float_0 %float_1
+         %53 = OpConstantComposite %v3float %float_0 %float_0 %float_n1
+     %v3uint = OpTypeVector %uint 3
+%_ptr_Input_v3uint = OpTypePointer Input %v3uint
+%gl_GlobalInvocationID = OpVariable %_ptr_Input_v3uint Input
+%_ptr_Input_uint = OpTypePointer Input %uint
+%_ptr_Function_float = OpTypePointer Function %float
+         %65 = OpTypeImage %float Cube 0 0 0 1 Unknown
+         %66 = OpTypeImage %float Cube 1 0 0 1 Unknown
+%_ptr_UniformConstant_65 = OpTypePointer UniformConstant %65
+%sourceDepth = OpVariable %_ptr_UniformConstant_65 UniformConstant
+         %69 = OpTypeSampler
+%_ptr_UniformConstant_69 = OpTypePointer UniformConstant %69
+%compareSampler = OpVariable %_ptr_UniformConstant_69 UniformConstant
+         %73 = OpTypeSampledImage %66
+  %float_0_5 = OpConstant %float 0.5
+    %v4float = OpTypeVector %float 4
+    %uint_12 = OpConstant %uint 12
+%_arr_uint_uint_12 = OpTypeArray %uint %uint_12
+     %Output = OpTypeStruct %_arr_uint_uint_12
+%_ptr_StorageBuffer_Output = OpTypePointer StorageBuffer %Output
+%outputBuffer = OpVariable %_ptr_StorageBuffer_Output StorageBuffer
+        %int = OpTypeInt 32 1
+      %int_0 = OpConstant %int 0
+%_ptr_StorageBuffer_uint = OpTypePointer StorageBuffer %uint
+%gl_WorkGroupSize = OpConstantComposite %v3uint %uint_1 %uint_1 %uint_1
+       %main = OpFunction %void None %3
+          %5 = OpLabel
+     %face_0 = OpVariable %_ptr_Function_uint Function
+      %value = OpVariable %_ptr_Function_float Function
+      %param = OpVariable %_ptr_Function_uint Function
+         %61 = OpAccessChain %_ptr_Input_uint %gl_GlobalInvocationID %uint_0
+         %62 = OpLoad %uint %61
+               OpStore %face_0 %62
+         %68 = OpLoad %65 %sourceDepth
+         %72 = OpLoad %69 %compareSampler
+         %74 = OpSampledImage %73 %68 %72
+         %76 = OpLoad %uint %face_0
+               OpStore %param %76
+         %77 = OpFunctionCall %v3float %cubeDirection_u1_ %param
+         %80 = OpCompositeExtract %float %77 0
+         %81 = OpCompositeExtract %float %77 1
+         %82 = OpCompositeExtract %float %77 2
+         %83 = OpCompositeConstruct %v4float %80 %81 %82 %float_0_5
+         %84 = OpCompositeExtract %float %83 3
+         %85 = OpImageSampleDrefExplicitLod %float %74 %83 %84 Lod %float_0
+               OpStore %value %85
+         %93 = OpLoad %uint %face_0
+         %94 = OpLoad %float %value
+         %95 = OpExtInst %float %1 FClamp %94 %float_0 %float_1
+         %96 = OpExtInst %float %1 Round %95
+         %97 = OpConvertFToU %uint %96
+         %99 = OpAccessChain %_ptr_StorageBuffer_uint %outputBuffer %int_0 %93
+               OpStore %99 %97
+               OpReturn
+               OpFunctionEnd
+%cubeDirection_u1_ = OpFunction %v3float None %10
+       %face = OpFunctionParameter %_ptr_Function_uint
+         %13 = OpLabel
+         %14 = OpLoad %uint %face
+         %17 = OpIEqual %bool %14 %uint_0
+               OpSelectionMerge %19 None
+               OpBranchConditional %17 %18 %19
+         %18 = OpLabel
+               OpReturnValue %22
+         %19 = OpLabel
+         %24 = OpLoad %uint %face
+         %26 = OpIEqual %bool %24 %uint_1
+               OpSelectionMerge %28 None
+               OpBranchConditional %26 %27 %28
+         %27 = OpLabel
+               OpReturnValue %30
+         %28 = OpLabel
+         %32 = OpLoad %uint %face
+         %34 = OpIEqual %bool %32 %uint_2
+               OpSelectionMerge %36 None
+               OpBranchConditional %34 %35 %36
+         %35 = OpLabel
+               OpReturnValue %37
+         %36 = OpLabel
+         %39 = OpLoad %uint %face
+         %41 = OpIEqual %bool %39 %uint_3
+               OpSelectionMerge %43 None
+               OpBranchConditional %41 %42 %43
+         %42 = OpLabel
+               OpReturnValue %44
+         %43 = OpLabel
+         %46 = OpLoad %uint %face
+         %48 = OpIEqual %bool %46 %uint_4
+               OpSelectionMerge %50 None
+               OpBranchConditional %48 %49 %50
+         %49 = OpLabel
+               OpReturnValue %51
+         %50 = OpLabel
+               OpReturnValue %53
+               OpFunctionEnd

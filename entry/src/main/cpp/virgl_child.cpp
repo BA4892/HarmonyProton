@@ -36,12 +36,15 @@ using WinehuaVtestPresentCallback = int (*)(
     uint64_t* nextPresentDeadlineNs, void* userData);
 using WinehuaVtestSetPresentCallback = void (*)(
     WinehuaVtestPresentCallback callback, void* userData);
+using WinehuaVtestReleaseQueueCallback = void (*)(void* queueSyncData);
 using WinehuaVtestVulkanPresentCallback = int (*)(
     uint32_t contextId, uintptr_t instance, uintptr_t physicalDevice,
     uintptr_t device, uintptr_t queue, uint64_t image, uint32_t queueFamily,
     uint32_t width, uint32_t height, uint32_t format, uint32_t layout,
     uint32_t clientPid, uint32_t surfaceId, uint32_t serial,
-    uint32_t presentFlags, uint64_t* nextPresentDeadlineNs, void* userData);
+    uint32_t presentFlags, uint64_t* nextPresentDeadlineNs,
+    WinehuaVtestReleaseQueueCallback releaseQueue, void* queueSyncData,
+    void* userData);
 using WinehuaVtestSetVulkanPresentCallback = void (*)(
     WinehuaVtestVulkanPresentCallback callback, void* userData);
 enum class IpcChildMode {
@@ -57,6 +60,7 @@ struct VtestIpcConfig {
     std::string logPath;
     std::string shadowMode;
     std::string shadowTrace;
+    std::string presentMode;
 };
 
 std::mutex g_ipcChildMutex;
@@ -96,9 +100,13 @@ int OnVirglIpcRequest(uint32_t code, const OHIPCParcel* data,
         const char* logPath = OH_IPCParcel_ReadString(data);
         const char* shadowMode = OH_IPCParcel_ReadString(data);
         const char* shadowTrace = OH_IPCParcel_ReadString(data);
+        const char* presentMode = OH_IPCParcel_ReadString(data);
         if (!helperPath || helperPath[0] != '/' || !socketPath || socketPath[0] != '/' ||
             !libraryPath || libraryPath[0] != '/' || !syncMode || !logPath || logPath[0] != '/' ||
-            !shadowMode || !shadowTrace)
+            !shadowMode || !shadowTrace || !presentMode ||
+            (strcmp(presentMode, "fifo") && strcmp(presentMode, "mailbox") &&
+             strcmp(presentMode, "fifo-async") &&
+             strcmp(presentMode, "fifo-poll")))
         {
             result = -2;
         }
@@ -118,6 +126,7 @@ int OnVirglIpcRequest(uint32_t code, const OHIPCParcel* data,
                 g_vtestIpcConfig.logPath = logPath;
                 g_vtestIpcConfig.shadowMode = shadowMode;
                 g_vtestIpcConfig.shadowTrace = shadowTrace;
+                g_vtestIpcConfig.presentMode = presentMode;
                 g_ipcChildMode = IpcChildMode::VtestServer;
             }
         }
@@ -197,6 +206,7 @@ bool IsAllowedHostEnv(const std::string& key)
            key == "WINEHUA_VKR_TRACE_SAMPLED" ||
            key == "VKR_WINEHUA_SHADOW_FROM_HOST" ||
            key == "VKR_WINEHUA_SHADOW_TRACE" ||
+           key == "WINEHUA_VENUS_PRESENT_MODE" ||
            key == "WINEHUA_VKR_FREEZE_BOOL_SPEC" ||
            key == "EGL_PLATFORM";
 }
@@ -294,6 +304,8 @@ int OnVtestVulkanPresent(uint32_t contextId,
                          uint32_t serial,
                          uint32_t presentFlags,
                          uint64_t* nextPresentDeadlineNs,
+                         WinehuaVtestReleaseQueueCallback releaseQueue,
+                         void* queueSyncData,
                          void*)
 {
     static std::atomic<uint64_t> callCount{0};
@@ -306,7 +318,7 @@ int OnVtestVulkanPresent(uint32_t contextId,
     const int result = winehua::PresentVenusSurface(
         contextId, instance, physicalDevice, device, queue, image,
         queueFamily, width, height, format, layout, clientPid, surfaceId,
-        serial, nextPresentDeadlineNs);
+        serial, nextPresentDeadlineNs, releaseQueue, queueSyncData);
     uint64_t failures = failureCount.load(std::memory_order_relaxed);
     if (result == 0) {
         successCount.fetch_add(1, std::memory_order_relaxed);
@@ -378,6 +390,7 @@ extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainPr
             "|__env=VKR_WINEHUA_SHADOW_FROM_HOST=" + fromHostMode +
             "|__env=VKR_WINEHUA_SHADOW_TO_HOST=" + toHostMode +
             "|__env=VKR_WINEHUA_SHADOW_TRACE=" + config.shadowTrace +
+            "|__env=WINEHUA_VENUS_PRESENT_MODE=" + config.presentMode +
             "|__env=EGL_PLATFORM=surfaceless";
         if (config.syncMode == "egl-thread")
             entryParams += "|__env=VIRGL_DISABLE_NATIVE_FENCE_FD=1";
@@ -435,14 +448,17 @@ extern "C" __attribute__((visibility("default"))) void Main(NativeChildProcess_A
 
     OH_LOG_INFO(LOG_APP,
                 "[virgl-child] helper=%{public}s socket=%{public}s hostLib=%{public}s egl=%{public}s "
-                "gles=%{public}s sync=%{public}s shadow=%{public}s trace=%{public}s",
+                "gles=%{public}s sync=%{public}s shadow=%{public}s trace=%{public}s "
+                "present=%{public}s",
                 helperPath, socketPath,
                 getenv("LD_LIBRARY_PATH") ? getenv("LD_LIBRARY_PATH") : "(unset)",
                 getenv("EGL_PLATFORM") ? getenv("EGL_PLATFORM") : "(unset)",
                 getenv("VTEST_USE_GLES") ? getenv("VTEST_USE_GLES") : "(unset)",
                 getenv("WINEHUA_VIRGL_SYNC_MODE") ? getenv("WINEHUA_VIRGL_SYNC_MODE") : "egl-thread",
                 getenv("VKR_WINEHUA_SHADOW_FROM_HOST") ? getenv("VKR_WINEHUA_SHADOW_FROM_HOST") : "full",
-                getenv("VKR_WINEHUA_SHADOW_TRACE") ? getenv("VKR_WINEHUA_SHADOW_TRACE") : "0");
+                getenv("VKR_WINEHUA_SHADOW_TRACE") ? getenv("VKR_WINEHUA_SHADOW_TRACE") : "0",
+                getenv("WINEHUA_VENUS_PRESENT_MODE")
+                    ? getenv("WINEHUA_VENUS_PRESENT_MODE") : "fifo");
 
     handle = dlopen(helperPath, RTLD_NOW | RTLD_LOCAL);
     if (!handle)

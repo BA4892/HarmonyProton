@@ -123,10 +123,18 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
     const bool trace = !strcmp(profile, "shadow-trace");
     const bool explicitToHost = !strcmp(profile, "shadow-to-host-explicit");
     const bool deferShmemUnref = !strcmp(profile, "shadow-precise-retain-shmem");
+    const bool mailboxPresent = !strcmp(profile, "shadow-precise-strong-ring-mailbox");
+    const bool asyncPresent = !strcmp(
+        profile, "shadow-precise-strong-ring-async-present");
+    const bool pollPresent = !strcmp(
+        profile, "shadow-precise-strong-ring-fence-poll");
     const bool precise = !strcmp(profile, "shadow-precise") ||
         !strcmp(profile, "shadow-precise-single-ring") ||
         !strcmp(profile, "shadow-precise-sync-submit") ||
         !strcmp(profile, "shadow-precise-strong-ring") ||
+        asyncPresent ||
+        pollPresent ||
+        mailboxPresent ||
         !strcmp(profile, "shadow-precise-direct-fence") ||
         deferShmemUnref;
     const char* mode = precise ? "precise" : skip ? "none" :
@@ -134,10 +142,14 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
     setenv("VKR_WINEHUA_SHADOW_FROM_HOST", mode, 1);
     setenv("VKR_WINEHUA_SHADOW_TRACE", trace ? "1" : "0", 1);
     setenv("VN_WINEHUA_DEFER_SHMEM_UNREF", deferShmemUnref ? "1" : "0", 1);
+    const char* presentMode = mailboxPresent ? "mailbox" :
+        (asyncPresent ? "fifo-async" : (pollPresent ? "fifo-poll" : "fifo"));
+    setenv("WINEHUA_VENUS_PRESENT_MODE", presentMode, 1);
     OH_LOG_INFO(LOG_APP,
                 "[NAPI] host shadow profile=%{public}s mode=%{public}s "
-                "trace=%{public}s defer_shmem_unref=%{public}s",
-                profile, mode, trace ? "1" : "0", deferShmemUnref ? "1" : "0");
+                "trace=%{public}s defer_shmem_unref=%{public}s present_mode=%{public}s",
+                profile, mode, trace ? "1" : "0", deferShmemUnref ? "1" : "0",
+                presentMode);
 
     napi_value result;
     napi_get_boolean(env, true, &result);

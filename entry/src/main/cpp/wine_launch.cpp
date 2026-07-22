@@ -248,6 +248,22 @@ static bool IsWineserverSocketReady(const std::string& prefix) {
     return found;
 }
 
+static void AppendStableDesktopDxvkEnv(std::vector<std::string>& env,
+                                       const LaunchParams& params)
+{
+    if (params.d3dBackend.rfind("dxvk_", 0) != 0) return;
+
+    /* Explorer-launched programs inherit the desktop process environment and
+     * bypass Index.d3dLaunchEnvironment(). Keep the product-correct settings
+     * here without changing the explicit A/B profiles used by runWineProgram. */
+    env.push_back("DXVK_LOG_LEVEL=info");
+    env.push_back("DXVK_LOG_PATH=C:\\windows\\temp");
+    env.push_back("BOX64_DYNAREC_WEAKBARRIER=0");
+    env.push_back("WINEHUA_PERF_PROFILE=shadow-precise-strong-ring");
+    env.push_back("DXVK_WINEHUA_PRECISE_SHADOW=1");
+    env.push_back("VN_WINEHUA_STRONG_RING_BARRIER=1");
+}
+
 static void PrepareDesktopSessionGraphicsEnv(const LaunchParams& params)
 {
     OH_LOG_INFO(LOG_APP, "[Launch-Async] preparing GL env for desktop child processes");
@@ -270,6 +286,7 @@ static void PrepareDesktopSessionGraphicsEnv(const LaunchParams& params)
     std::vector<std::string> env;
     gb.AppendWineEnv(env);
     AppendD3dBackendEnv(env, params.d3dBackend, params.winehuaBin);
+    AppendStableDesktopDxvkEnv(env, params);
     SetBrokerSessionEnv(std::move(env));
     LogGraphicsBackendStateForLaunch("DesktopSession");
 }
@@ -278,6 +295,7 @@ static void AppendDesktopD3dEntryEnv(std::string& entryParams, const LaunchParam
 {
     std::vector<std::string> env;
     AppendD3dBackendEnv(env, params.d3dBackend, params.winehuaBin);
+    AppendStableDesktopDxvkEnv(env, params);
     AppendMissingEntryParamsEnvOverrides(entryParams, env);
 }
 

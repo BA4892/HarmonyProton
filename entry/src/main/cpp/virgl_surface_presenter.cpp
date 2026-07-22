@@ -515,7 +515,9 @@ public:
                      uint32_t clientPid,
                      uint32_t surfaceId,
                      uint32_t serial,
-                     uint64_t* nextPresentDeadlineNs)
+                     uint64_t* nextPresentDeadlineNs,
+                     void (*releaseQueue)(void*),
+                     void* queueSyncData)
     {
         if (!clientPid || !surfaceId) return -EINVAL;
         const uint64_t surfaceKey =
@@ -545,7 +547,7 @@ public:
         return entry.venusTarget->Present(
             contextId, instance, physicalDevice, device, queue, image,
             queueFamily, width, height, format, layout, serial,
-            nextPresentDeadlineNs);
+            nextPresentDeadlineNs, releaseQueue, queueSyncData);
     }
 
     winehua::virgl_ipc::SurfaceQueryReply Query() const
@@ -636,12 +638,14 @@ int PresentVenusSurface(uint32_t contextId,
                         uint32_t clientPid,
                         uint32_t surfaceId,
                         uint32_t serial,
-                        uint64_t* nextPresentDeadlineNs)
+                        uint64_t* nextPresentDeadlineNs,
+                        void (*releaseQueue)(void*),
+                        void* queueSyncData)
 {
     return g_presenters.PresentVenus(
         contextId, instance, physicalDevice, device, queue, image,
         queueFamily, width, height, format, layout, clientPid, surfaceId,
-        serial, nextPresentDeadlineNs);
+        serial, nextPresentDeadlineNs, releaseQueue, queueSyncData);
 }
 
 virgl_ipc::SurfaceQueryReply QueryVirglSurfaces()

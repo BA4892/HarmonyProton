@@ -216,10 +216,10 @@ export function syncManagedSmoke(prefixMode: string): boolean {
   const required = [
     'x64/winehua_audio_smoke.exe', 'x64/winehua_graphics_smoke.exe',
     'x64/winehua_vulkan_smoke.exe', 'x64/winehua_d3d11_smoke.exe',
-    'x64/winehua_d3d_switch_cube.exe',
+    'x64/winehua_d3d_switch_cube.exe', 'x64/winehua_win32_driver.exe',
     'x86/winehua_audio_smoke.exe', 'x86/winehua_graphics_smoke.exe',
     'x86/winehua_vulkan_smoke.exe', 'x86/winehua_d3d11_smoke.exe',
-    'x86/winehua_d3d_switch_cube.exe',
+    'x86/winehua_d3d_switch_cube.exe', 'x86/winehua_win32_driver.exe',
     'assets/venus_storage_write.spv', 'assets/venus_storage_read.spv',
     'assets/venus_image_fetch.spv', 'assets/venus_combined_sample.spv',
     'assets/venus_separated_sample.spv',
@@ -311,6 +311,10 @@ export class SmokeRunner {
      * return VK_SUCCESS from queue/device idle before the mapped write is
      * observable; it must not poison the sampled-image qualification suite. */
     const includeVenusSampledIdle = this.request.suite === 'venus-sampled-idle';
+    const includeVenusDepthCube = this.request.suite === 'venus-depth-cube';
+    const includeVenusDepthCubeArray2D =
+      this.request.suite === 'venus-depth-cube-array-2d-golden';
+    const includeVenusDepthCubeGraphics = this.request.suite === 'venus-depth-cube-graphics';
     const includeWineVulkan = this.request.suite === 'wine-vulkan' ||
       this.request.suite === 'all';
     const includeWineVulkanPresent = this.request.suite === 'wine-vulkan-present' ||
@@ -349,6 +353,36 @@ export class SmokeRunner {
     }
     if (includeVenusSampledIdle) {
       tests.push({ id: 'venus-sampled-idle-x64', architecture: 'guest-x64',
+        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 90000 });
+    }
+    if (includeVenusDepthCube) {
+      tests.push({ id: 'venus-depth-cube-x64', architecture: 'guest-x64',
+        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 60000 });
+      tests.push({ id: 'venus-depth-cube-array-2d-golden-x64', architecture: 'guest-x64',
+        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 60000 });
+      tests.push({ id: 'venus-depth-cube-array-x64', architecture: 'guest-x64',
+        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 60000 });
+    }
+    if (includeVenusDepthCubeArray2D) {
+      tests.push({ id: 'venus-depth-cube-array-2d-golden-x64', architecture: 'guest-x64',
+        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 60000 });
+    }
+    if (includeVenusDepthCubeGraphics) {
+      tests.push({ id: 'venus-depth-cube-graphics-x64', architecture: 'guest-x64',
+        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 90000 });
+      tests.push({ id: 'venus-depth-cube-graphics-golden-x64', architecture: 'guest-x64',
+        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 90000 });
+      tests.push({ id: 'venus-depth-cube-graphics-golden-dxvk-contract-x64', architecture: 'guest-x64',
+        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 90000 });
+      tests.push({ id: 'venus-depth-cube-graphics-initialized-x64', architecture: 'guest-x64',
+        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 90000 });
+      tests.push({ id: 'venus-depth-cube-graphics-optimized-x64', architecture: 'guest-x64',
+        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 90000 });
+      tests.push({ id: 'venus-depth-cube-graphics-coordinate-trace-x64', architecture: 'guest-x64',
+        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 90000 });
+      tests.push({ id: 'venus-depth-cube-graphics-padded-dref-x64', architecture: 'guest-x64',
+        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 90000 });
+      tests.push({ id: 'venus-depth-cube-graphics-no-float-controls-x64', architecture: 'guest-x64',
         executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 90000 });
     }
     if (includeWineVulkan) {
@@ -481,8 +515,11 @@ export class SmokeRunner {
         } catch (_) {}
       }
       const current = testNapi.queryWineProcess(process.pid) as ProcessInfo;
-      if ((!current.found || current.status !== 'running') && !text) {
-        return this.failureResult(spec, 'crash', 'process disappeared without an authoritative result', current);
+      if (!current.found || current.status !== 'running') {
+        const detail = text ?
+          'process disappeared with only a non-final result' :
+          'process disappeared without an authoritative result';
+        return this.failureResult(spec, 'crash', detail, current);
       }
       await sleep(500);
     }
@@ -518,10 +555,34 @@ export class SmokeRunner {
           ...(spec.id.indexOf('general') >= 0 ? ['--layout', 'general'] : []),
           ...(spec.id.indexOf('sampled-only') >= 0 ? ['--sampled-only'] : []),
           ...(spec.id.indexOf('idle') >= 0 ? ['--force-idle'] : []),
+          ...(spec.id === 'venus-depth-cube-x64' ? ['--depth-cube'] : []),
+          ...(spec.id === 'venus-depth-cube-graphics-x64' ?
+            ['--depth-cube-graphics'] : []),
+          ...(spec.id === 'venus-depth-cube-graphics-golden-x64' ?
+            ['--depth-cube-graphics-golden'] : []),
+          ...(spec.id === 'venus-depth-cube-graphics-golden-dxvk-contract-x64' ?
+            ['--depth-cube-graphics-golden-dxvk-contract'] : []),
+          ...(spec.id === 'venus-depth-cube-graphics-initialized-x64' ?
+            ['--depth-cube-graphics-initialized'] : []),
+          ...(spec.id === 'venus-depth-cube-graphics-optimized-x64' ?
+            ['--depth-cube-graphics-optimized'] : []),
+          ...(spec.id === 'venus-depth-cube-graphics-coordinate-trace-x64' ?
+            ['--depth-cube-graphics-coordinate-trace'] : []),
+          ...(spec.id === 'venus-depth-cube-graphics-padded-dref-x64' ?
+            ['--depth-cube-graphics-padded-dref'] : []),
+          ...(spec.id === 'venus-depth-cube-graphics-no-float-controls-x64' ?
+            ['--depth-cube-graphics-no-float-controls'] : []),
+          ...(spec.id === 'venus-depth-cube-array-x64' ?
+            ['--depth-cube-array'] : []),
+          ...(spec.id === 'venus-depth-cube-array-2d-golden-x64' ?
+            ['--depth-cube-array-2d-golden'] : []),
           ...(spec.executable === 'venus_spirv_replay' ? ['--spv-dir', replaySpvDirectory] : [])],
         environment: {
           'WINEHUA_SMOKE_RUN_ID': this.request.runId,
-          'WINEHUA_SMOKE_TEST_ID': spec.id
+          'WINEHUA_SMOKE_TEST_ID': spec.id,
+          /* Guest and Host map different shadow files. Functional probes use
+           * explicit flush/invalidate for their tiny readback allocations. */
+          'VN_WINEHUA_REMOTE_MEMORY_SYNC': '1'
         },
         workingDirectory: GUEST_VULKAN_ROOT,
         automationMode: true
@@ -580,6 +641,10 @@ export class SmokeRunner {
         smokeEnvironment['DXVK_LOG_PATH'] = `C:\\smoke\\results\\${this.request.runId}`;
         smokeEnvironment['DXVK_WINEHUA_TRACE_SAMPLED'] = '1';
         smokeEnvironment['DXVK_WINEHUA_TRACE_QUERY'] = '1';
+        /* Bounded to 4096 records in DXVK. This preserves clear/bind/update/
+         * draw ordering evidence when the exhaustive D3D11 smoke exits in a
+         * later feature case. */
+        smokeEnvironment['DXVK_WINEHUA_TRACE_FLOW'] = '1';
         smokeEnvironment['DXVK_WINEHUA_COMMAND_QUERY_RESET'] = '1';
         smokeEnvironment['WINEHUA_D3D11_STENCIL_QUERY'] = '1';
         /* Capture the exact DXBC-derived SPIR-V used by this run. Disable
@@ -592,6 +657,9 @@ export class SmokeRunner {
           this.perfProfile === 'shadow-precise-single-ring' ||
           this.perfProfile === 'shadow-precise-sync-submit' ||
           this.perfProfile === 'shadow-precise-strong-ring' ||
+          this.perfProfile === 'shadow-precise-strong-ring-async-present' ||
+          this.perfProfile === 'shadow-precise-strong-ring-fence-poll' ||
+          this.perfProfile === 'shadow-precise-strong-ring-mailbox' ||
           this.perfProfile === 'shadow-precise-direct-fence' ||
           this.perfProfile === 'shadow-precise-retain-shmem') {
           smokeEnvironment['DXVK_WINEHUA_PRECISE_SHADOW'] = '1';
@@ -603,7 +671,10 @@ export class SmokeRunner {
           if (this.perfProfile === 'shadow-precise-sync-submit')
             smokeEnvironment['VN_PERF'] =
               'no_fence_feedback,no_query_feedback,no_async_queue_submit';
-          if (this.perfProfile === 'shadow-precise-strong-ring')
+          if (this.perfProfile === 'shadow-precise-strong-ring' ||
+            this.perfProfile === 'shadow-precise-strong-ring-async-present' ||
+            this.perfProfile === 'shadow-precise-strong-ring-fence-poll' ||
+            this.perfProfile === 'shadow-precise-strong-ring-mailbox')
             smokeEnvironment['VN_WINEHUA_STRONG_RING_BARRIER'] = '1';
           if (this.perfProfile === 'shadow-precise-direct-fence')
             smokeEnvironment['VN_WINEHUA_DIRECT_FENCE_WAIT'] = '1';
@@ -645,7 +716,10 @@ export class SmokeRunner {
           '--result', windowsResult, '--seconds', `${spec.seconds}`, '--present'],
         environment: {
           'WINEHUA_SMOKE_RUN_ID': this.request.runId,
-          'WINEHUA_SMOKE_TEST_ID': spec.id
+          'WINEHUA_SMOKE_TEST_ID': spec.id,
+          /* Guest and Host map different shadow files. Functional probes use
+           * explicit flush/invalidate for their tiny readback allocations. */
+          'VN_WINEHUA_REMOTE_MEMORY_SYNC': '1'
         },
         workingDirectory: `C:\\smoke\\${spec.architecture}`,
         prefixMode: this.request.prefixMode,

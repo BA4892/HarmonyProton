@@ -21,6 +21,7 @@ struct probe_state {
     const char *layout_name;
     int force_idle;
     int sampled_only;
+    int graphics_replay;
     uint64_t started_ms;
     uint32_t loader_api;
     VkPhysicalDeviceProperties properties;
@@ -284,9 +285,16 @@ static VkResult submit_and_wait(struct probe_state *state)
 
 static int read_output(struct probe_state *state, uint32_t *value)
 {
+    VkMappedMemoryRange range = { VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE };
     void *mapped = NULL;
     if (vkMapMemory(state->device, state->output_memory, 0, sizeof(uint32_t), 0, &mapped) != VK_SUCCESS)
         return 0;
+    range.memory = state->output_memory;
+    range.size = VK_WHOLE_SIZE;
+    if (vkInvalidateMappedMemoryRanges(state->device, 1, &range) != VK_SUCCESS) {
+        vkUnmapMemory(state->device, state->output_memory);
+        return 0;
+    }
     *value = *(const uint32_t *)mapped;
     vkUnmapMemory(state->device, state->output_memory);
     return 1;
@@ -454,7 +462,14 @@ static int run_compute(struct probe_state *state, const char *shader_name, int m
         void *mapped = NULL;
         if (vkMapMemory(state->device, state->output_memory, 0, sizeof(uint32_t), 0, &mapped) != VK_SUCCESS)
             return 0;
+        VkMappedMemoryRange range = { VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE };
         *(uint32_t *)mapped = SHADER_NOT_EXECUTED;
+        range.memory = state->output_memory;
+        range.size = VK_WHOLE_SIZE;
+        if (vkFlushMappedMemoryRanges(state->device, 1, &range) != VK_SUCCESS) {
+            vkUnmapMemory(state->device, state->output_memory);
+            return 0;
+        }
         vkUnmapMemory(state->device, state->output_memory);
     }
     if (!create_descriptor_and_pipeline(state, shader_name, mode, &set, &layout, &pipeline,
@@ -491,6 +506,9 @@ static int run_compute(struct probe_state *state, const char *shader_name, int m
     state->image_read_completed = state->shader_executed;
     return *value == expected;
 }
+
+#include "venus_depth_cube_probe.inc"
+#include "venus_depth_cube_graphics_replay.inc"
 
 static int init_vulkan(struct probe_state *state, const char **failure)
 {
@@ -530,7 +548,12 @@ static int init_vulkan(struct probe_state *state, const char **failure)
         if (!queues) { *failure = "queue allocation failed"; vkDestroyInstance(instance, NULL); return 0; }
         vkGetPhysicalDeviceQueueFamilyProperties(state->physical, &count, queues);
         for (i = 0; i < count; ++i)
-            if (queues[i].queueCount && (queues[i].queueFlags & VK_QUEUE_COMPUTE_BIT)) { state->queue_family = i; break; }
+            if (queues[i].queueCount &&
+                (queues[i].queueFlags & VK_QUEUE_COMPUTE_BIT) &&
+                (!state->graphics_replay || (queues[i].queueFlags & VK_QUEUE_GRAPHICS_BIT))) {
+                state->queue_family = i;
+                break;
+            }
         free(queues);
     }
     if (state->queue_family == UINT32_MAX) { *failure = "no compute queue"; vkDestroyInstance(instance, NULL); return 0; }
@@ -587,6 +610,9 @@ int main(int argc, char **argv)
     VkResult result;
     uint8_t pattern[64];
     uint32_t value;
+    int depth_cube_mode, depth_cube_array_mode, depth_cube_array_2d_mode;
+    int depth_cube_graphics_mode;
+    enum graphics_replay_variant graphics_variant = GRAPHICS_REPLAY_EXACT;
     void *mapped = NULL;
     memset(&state, 0, sizeof(state));
     state.image_format_supported = -1;
@@ -596,6 +622,34 @@ int main(int argc, char **argv)
     state.layout_name = !strcmp(argument_value(argc, argv, "--layout", "shader-read"), "general") ? "GENERAL" : "SHADER_READ_ONLY_OPTIMAL";
     state.force_idle = argument_flag(argc, argv, "--force-idle");
     state.sampled_only = argument_flag(argc, argv, "--sampled-only");
+    depth_cube_mode = argument_flag(argc, argv, "--depth-cube");
+    depth_cube_array_mode = argument_flag(argc, argv, "--depth-cube-array");
+    depth_cube_array_2d_mode =
+        argument_flag(argc, argv, "--depth-cube-array-2d-golden");
+    depth_cube_graphics_mode = argument_flag(argc, argv, "--depth-cube-graphics");
+    if (argument_flag(argc, argv, "--depth-cube-graphics-golden")) {
+        depth_cube_graphics_mode = 1;
+        graphics_variant = GRAPHICS_REPLAY_GOLDEN;
+    } else if (argument_flag(argc, argv, "--depth-cube-graphics-golden-dxvk-contract")) {
+        depth_cube_graphics_mode = 1;
+        graphics_variant = GRAPHICS_REPLAY_GOLDEN_DXVK_CONTRACT;
+    } else if (argument_flag(argc, argv, "--depth-cube-graphics-initialized")) {
+        depth_cube_graphics_mode = 1;
+        graphics_variant = GRAPHICS_REPLAY_INITIALIZED;
+    } else if (argument_flag(argc, argv, "--depth-cube-graphics-optimized")) {
+        depth_cube_graphics_mode = 1;
+        graphics_variant = GRAPHICS_REPLAY_OPTIMIZED;
+    } else if (argument_flag(argc, argv, "--depth-cube-graphics-coordinate-trace")) {
+        depth_cube_graphics_mode = 1;
+        graphics_variant = GRAPHICS_REPLAY_COORDINATE_TRACE;
+    } else if (argument_flag(argc, argv, "--depth-cube-graphics-padded-dref")) {
+        depth_cube_graphics_mode = 1;
+        graphics_variant = GRAPHICS_REPLAY_PADDED_DREF;
+    } else if (argument_flag(argc, argv, "--depth-cube-graphics-no-float-controls")) {
+        depth_cube_graphics_mode = 1;
+        graphics_variant = GRAPHICS_REPLAY_NO_FLOAT_CONTROLS;
+    }
+    state.graphics_replay = depth_cube_graphics_mode;
     state.started_ms = now_ms();
     if (!getenv("VN_DEBUG") || !strstr(getenv("VN_DEBUG"), "vtest") ||
         !getenv("VTEST_SOCKET_NAME") || !getenv("VK_DRIVER_FILES") ||
@@ -605,6 +659,17 @@ int main(int argc, char **argv)
     }
     write_result(&state, "started", "startup", "Venus sampled-image probe started");
     if (!init_vulkan(&state, &failure)) goto failed;
+    if (depth_cube_graphics_mode) {
+        int passed = run_depth_cube_graphics_replay(&state, graphics_variant);
+        cleanup(&state);
+        return passed ? 0 : 1;
+    }
+    if (depth_cube_mode || depth_cube_array_mode || depth_cube_array_2d_mode) {
+        int passed = run_depth_cube_probe(&state, depth_cube_array_mode,
+                                          depth_cube_array_2d_mode);
+        cleanup(&state);
+        return passed ? 0 : 1;
+    }
     if (create_buffer(&state, 64, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                       &state.upload_buffer, &state.upload_memory) != VK_SUCCESS ||

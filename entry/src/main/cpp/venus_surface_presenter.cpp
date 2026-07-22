@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #undef LOG_DOMAIN
@@ -27,6 +28,7 @@ using SteadyClock = std::chrono::steady_clock;
 
 constexpr uint64_t kDefaultFramePeriodNs = 16666667;
 constexpr uint64_t kDispatchLeadNs = 500000;
+constexpr uint64_t kReleaseFenceWatchdogNs = 1000000000;
 
 uint64_t NowNs()
 {
@@ -43,6 +45,36 @@ uint64_t PacingPeriodNs(uint64_t displayPeriodNs)
 {
     return displayPeriodNs > kDispatchLeadNs ? displayPeriodNs - kDispatchLeadNs
                                              : displayPeriodNs;
+}
+
+VkPresentModeKHR RequestedPresentMode()
+{
+    const char* mode = std::getenv("WINEHUA_VENUS_PRESENT_MODE");
+    return mode && !std::strcmp(mode, "mailbox")
+        ? VK_PRESENT_MODE_MAILBOX_KHR : VK_PRESENT_MODE_FIFO_KHR;
+}
+
+bool AsyncReleaseEnabled()
+{
+    const char* mode = std::getenv("WINEHUA_VENUS_PRESENT_MODE");
+    return mode && !std::strcmp(mode, "fifo-async");
+}
+
+bool PollReleaseEnabled()
+{
+    const char* mode = std::getenv("WINEHUA_VENUS_PRESENT_MODE");
+    return mode && !std::strcmp(mode, "fifo-poll");
+}
+
+const char* ReleaseModeName()
+{
+    if (AsyncReleaseEnabled()) return "async-ring";
+    return PollReleaseEnabled() ? "poll" : "wait";
+}
+
+const char* PresentModeName(VkPresentModeKHR mode)
+{
+    return mode == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : "fifo";
 }
 
 bool TraceFrameOrder()
@@ -124,6 +156,7 @@ struct VenusSurfaceQueueTarget::Impl {
         totalSubmitUs_ = 0;
         totalQueuePresentUs_ = 0;
         totalReleaseWaitUs_ = 0;
+        totalReleasePolls_ = 0;
         OH_LOG_INFO(LOG_APP,
                     "[VENUS-PRESENT][NCP] target attached key=%{public}llu "
                     "window=%{public}p display_period_us=%{public}llu",
@@ -165,7 +198,9 @@ struct VenusSurfaceQueueTarget::Impl {
                 uint32_t format,
                 uint32_t layout,
                 uint32_t serial,
-                uint64_t* nextPresentDeadlineNs)
+                uint64_t* nextPresentDeadlineNs,
+                void (*releaseQueue)(void*),
+                void* queueSyncData)
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const uint64_t presentStartNs = NowNs();
@@ -199,8 +234,10 @@ struct VenusSurfaceQueueTarget::Impl {
         }
         Frame& frame = frames_[frameIndex_++ % frames_.size()];
         uint64_t stageStartNs = NowNs();
+        const bool asyncRelease = AsyncReleaseEnabled();
         VkResult result = vkWaitForFences(
-            device_, 1, &frame.complete, VK_TRUE, displayPeriodNs_ * 4);
+            device_, 1, &frame.complete, VK_TRUE,
+            asyncRelease ? kReleaseFenceWatchdogNs : displayPeriodNs_ * 4);
         const uint64_t waitFenceUs = (NowNs() - stageStartNs) / 1000;
         if (result == VK_TIMEOUT) return 1;
         if (result != VK_SUCCESS) return FailLocked("wait fence", result, serial);
@@ -275,7 +312,7 @@ struct VenusSurfaceQueueTarget::Impl {
                              0, nullptr, 0, nullptr,
                              static_cast<uint32_t>(before.size()), before.data());
 
-        if (canBlit_) {
+        if (useBlit_) {
             VkImageBlit blit{};
             blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             blit.srcSubresource.layerCount = 1;
@@ -361,10 +398,54 @@ struct VenusSurfaceQueueTarget::Impl {
         result = vkQueuePresentKHR(queue_, &present);
         const uint64_t queuePresentUs = (NowNs() - stageStartNs) / 1000;
 
-        stageStartNs = NowNs();
-        const VkResult fenceResult = vkWaitForFences(
-            device_, 1, &frame.complete, VK_TRUE, displayPeriodNs_ * 4);
-        const uint64_t releaseWaitUs = (NowNs() - stageStartNs) / 1000;
+        /* Vulkan only requires external synchronization while a host queue
+         * command is executing. Keep the synchronous completion wait, but do
+         * not block unrelated guest QueueSubmit calls on this queue mutex. */
+        if (releaseQueue) releaseQueue(queueSyncData);
+
+        VkResult fenceResult = VK_SUCCESS;
+        uint64_t releaseWaitUs = 0;
+        uint64_t releasePolls = 0;
+        if (!asyncRelease ||
+            (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)) {
+            stageStartNs = NowNs();
+            const uint64_t timeoutNs =
+                std::max(displayPeriodNs_ * 4, kReleaseFenceWatchdogNs);
+            if (PollReleaseEnabled()) {
+                const uint64_t deadlineNs = stageStartNs + timeoutNs;
+                do {
+                    fenceResult = vkGetFenceStatus(device_, frame.complete);
+                    if (fenceResult != VK_NOT_READY) break;
+                    ++releasePolls;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                } while (NowNs() < deadlineNs);
+                if (fenceResult == VK_NOT_READY) fenceResult = VK_TIMEOUT;
+            } else {
+                fenceResult = vkWaitForFences(
+                    device_, 1, &frame.complete, VK_TRUE, timeoutNs);
+            }
+            releaseWaitUs = (NowNs() - stageStartNs) / 1000;
+        }
+        if (fenceResult == VK_TIMEOUT) {
+            if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+                swapchainDirty_ = true;
+                return -EAGAIN;
+            }
+            if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
+                return FailLocked("queue present", result, serial);
+            targetInitialized_[imageIndex] = true;
+            ++throttled_;
+            if (nextPresentDeadlineNs)
+                *nextPresentDeadlineNs = NowNs() + displayPeriodNs_;
+            if (throttled_ == 1 || !(throttled_ % 60)) {
+                OH_LOG_WARN(LOG_APP,
+                            "[VENUS-PRESENT][NCP] source release fence watchdog "
+                            "serial=%{public}u wait_us=%{public}llu throttled=%{public}llu",
+                            serial, static_cast<unsigned long long>(releaseWaitUs),
+                            static_cast<unsigned long long>(throttled_));
+            }
+            return 1;
+        }
         if (fenceResult != VK_SUCCESS)
             return FailLocked("source release fence", fenceResult, serial);
         targetInitialized_[imageIndex] = true;
@@ -390,6 +471,7 @@ struct VenusSurfaceQueueTarget::Impl {
         totalSubmitUs_ += submitUs;
         totalQueuePresentUs_ += queuePresentUs;
         totalReleaseWaitUs_ += releaseWaitUs;
+        totalReleasePolls_ += releasePolls;
         if (nextPresentDeadlineNs)
             *nextPresentDeadlineNs = lastPresentNs_ + framePeriodNs_;
         if (TraceFrameOrder() && framesPresented_ <= 600) {
@@ -418,7 +500,9 @@ struct VenusSurfaceQueueTarget::Impl {
                         "present_us_avg=%{public}llu max=%{public}llu "
                         "wait_fence_avg=%{public}llu acquire_avg=%{public}llu "
                         "submit_avg=%{public}llu queue_present_avg=%{public}llu "
-                        "release_wait_avg=%{public}llu failures=%{public}llu "
+                        "release_wait_avg=%{public}llu release_polls_avg=%{public}llu "
+                        "release_mode=%{public}s "
+                        "failures=%{public}llu "
                         "throttled=%{public}llu",
                         static_cast<unsigned long long>(framesPresented_), contextId,
                         static_cast<unsigned long long>(surfaceKey_), serial,
@@ -432,6 +516,8 @@ struct VenusSurfaceQueueTarget::Impl {
                         static_cast<unsigned long long>(totalSubmitUs_ / framesPresented_),
                         static_cast<unsigned long long>(totalQueuePresentUs_ / framesPresented_),
                         static_cast<unsigned long long>(totalReleaseWaitUs_ / framesPresented_),
+                        static_cast<unsigned long long>(totalReleasePolls_ / framesPresented_),
+                        ReleaseModeName(),
                         static_cast<unsigned long long>(failures_),
                         static_cast<unsigned long long>(throttled_));
         }
@@ -529,6 +615,28 @@ private:
             return false;
         }
 
+        const VkPresentModeKHR requestedPresentMode = RequestedPresentMode();
+        presentMode_ = VK_PRESENT_MODE_FIFO_KHR;
+        uint32_t presentModeCount = 0;
+        result = vkGetPhysicalDeviceSurfacePresentModesKHR(
+            physicalDevice_, surface_, &presentModeCount, nullptr);
+        if (result == VK_SUCCESS && presentModeCount) {
+            std::vector<VkPresentModeKHR> presentModes(presentModeCount);
+            result = vkGetPhysicalDeviceSurfacePresentModesKHR(
+                physicalDevice_, surface_, &presentModeCount, presentModes.data());
+            if (result == VK_SUCCESS &&
+                std::find(presentModes.begin(), presentModes.end(),
+                          requestedPresentMode) != presentModes.end()) {
+                presentMode_ = requestedPresentMode;
+            }
+        }
+        if (requestedPresentMode != presentMode_) {
+            OH_LOG_WARN(LOG_APP,
+                        "[VENUS-PRESENT][NCP] requested present mode=%{public}s "
+                        "unsupported; using fifo",
+                        PresentModeName(requestedPresentMode));
+        }
+
         uint32_t formatCount = 0;
         result = vkGetPhysicalDeviceSurfaceFormatsKHR(
             physicalDevice_, surface_, &formatCount, nullptr);
@@ -562,7 +670,9 @@ private:
             extent_.height = std::clamp(height, capabilities.minImageExtent.height,
                                        capabilities.maxImageExtent.height);
         }
-        uint32_t imageCount = std::max(2u, capabilities.minImageCount);
+        uint32_t imageCount = std::max(
+            presentMode_ == VK_PRESENT_MODE_MAILBOX_KHR ? 3u : 2u,
+            capabilities.minImageCount);
         if (capabilities.maxImageCount)
             imageCount = std::min(imageCount, capabilities.maxImageCount);
 
@@ -577,9 +687,22 @@ private:
         create.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
         create.preTransform = capabilities.currentTransform;
         create.compositeAlpha = ChooseCompositeAlpha(capabilities.supportedCompositeAlpha);
-        create.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+        create.presentMode = presentMode_;
         create.clipped = VK_TRUE;
         result = vkCreateSwapchainKHR(device_, &create, nullptr, &swapchain_);
+        if (result != VK_SUCCESS && presentMode_ == VK_PRESENT_MODE_MAILBOX_KHR) {
+            OH_LOG_WARN(LOG_APP,
+                        "[VENUS-PRESENT][NCP] mailbox swapchain failed result=%{public}d; "
+                        "retrying fifo",
+                        static_cast<int32_t>(result));
+            presentMode_ = VK_PRESENT_MODE_FIFO_KHR;
+            create.presentMode = presentMode_;
+            create.minImageCount = std::max(2u, capabilities.minImageCount);
+            if (capabilities.maxImageCount)
+                create.minImageCount = std::min(create.minImageCount,
+                                                capabilities.maxImageCount);
+            result = vkCreateSwapchainKHR(device_, &create, nullptr, &swapchain_);
+        }
         if (result != VK_SUCCESS) {
             error = -ENOTSUP;
             return false;
@@ -614,9 +737,9 @@ private:
         canBlit_ =
             (sourceProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) &&
             (targetProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT);
-        if (!canBlit_ &&
-            (sourceFormat_ != targetFormat_ || width != extent_.width ||
-             height != extent_.height)) {
+        useBlit_ = sourceFormat_ != targetFormat_ || width != extent_.width ||
+            height != extent_.height;
+        if (useBlit_ && !canBlit_) {
             error = -ENOTSUP;
             return false;
         }
@@ -657,12 +780,17 @@ private:
                     "[VENUS-PRESENT][NCP] swapchain ready key=%{public}llu "
                     "source=%{public}ux%{public}u target=%{public}ux%{public}u "
                     "source_format=%{public}u target_format=%{public}u images=%{public}u "
-                    "blit=%{public}d queue_family=%{public}u",
+                    "blit_supported=%{public}d transfer=%{public}s "
+                    "queue_family=%{public}u present_mode=%{public}s "
+                    "requested_mode=%{public}s release_mode=%{public}s",
                     static_cast<unsigned long long>(surfaceKey_),
                     width, height, extent_.width, extent_.height,
                     static_cast<uint32_t>(sourceFormat_),
                     static_cast<uint32_t>(targetFormat_), imageCount,
-                    canBlit_, queueFamily_);
+                    canBlit_, useBlit_ ? "blit" : "copy", queueFamily_,
+                    PresentModeName(presentMode_),
+                    PresentModeName(requestedPresentMode),
+                    ReleaseModeName());
         return true;
     }
 
@@ -697,9 +825,11 @@ private:
         sourceHeight_ = 0;
         sourceFormat_ = VK_FORMAT_UNDEFINED;
         targetFormat_ = VK_FORMAT_UNDEFINED;
+        presentMode_ = VK_PRESENT_MODE_FIFO_KHR;
         extent_ = {};
         frameIndex_ = 0;
         canBlit_ = false;
+        useBlit_ = false;
     }
 
     std::mutex mutex_;
@@ -721,9 +851,11 @@ private:
     VkExtent2D extent_{};
     VkFormat sourceFormat_ = VK_FORMAT_UNDEFINED;
     VkFormat targetFormat_ = VK_FORMAT_UNDEFINED;
+    VkPresentModeKHR presentMode_ = VK_PRESENT_MODE_FIFO_KHR;
     uint32_t sourceWidth_ = 0;
     uint32_t sourceHeight_ = 0;
     bool canBlit_ = false;
+    bool useBlit_ = false;
     bool swapchainDirty_ = false;
     uint64_t displayPeriodNs_ = kDefaultFramePeriodNs;
     uint64_t framePeriodNs_ = kDefaultFramePeriodNs;
@@ -741,6 +873,7 @@ private:
     uint64_t totalSubmitUs_ = 0;
     uint64_t totalQueuePresentUs_ = 0;
     uint64_t totalReleaseWaitUs_ = 0;
+    uint64_t totalReleasePolls_ = 0;
 };
 
 VenusSurfaceQueueTarget::VenusSurfaceQueueTarget()
@@ -778,11 +911,14 @@ int VenusSurfaceQueueTarget::Present(uint32_t contextId,
                                      uint32_t format,
                                      uint32_t layout,
                                      uint32_t serial,
-                                     uint64_t* nextPresentDeadlineNs)
+                                     uint64_t* nextPresentDeadlineNs,
+                                     void (*releaseQueue)(void*),
+                                     void* queueSyncData)
 {
     return impl_->Present(contextId, instance, physicalDevice, device, queue,
                           image, queueFamily, width, height, format, layout,
-                          serial, nextPresentDeadlineNs);
+                          serial, nextPresentDeadlineNs, releaseQueue,
+                          queueSyncData);
 }
 
 } // namespace winehua

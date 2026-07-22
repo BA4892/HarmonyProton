@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('baseline', 'direct-fence-wait', 'no-remote-sync', 'no-dynamic-flush', 'fence-feedback', 'shadow-none', 'shadow-trace', 'shadow-to-host-explicit', 'shadow-precise', 'shadow-precise-single-ring', 'shadow-precise-sync-submit', 'shadow-precise-strong-ring', 'shadow-precise-direct-fence', 'shadow-precise-retain-shmem')]
+    [ValidateSet('baseline', 'direct-fence-wait', 'no-remote-sync', 'no-dynamic-flush', 'fence-feedback', 'shadow-none', 'shadow-trace', 'shadow-to-host-explicit', 'shadow-precise', 'shadow-precise-single-ring', 'shadow-precise-sync-submit', 'shadow-precise-strong-ring', 'shadow-precise-strong-ring-async-present', 'shadow-precise-strong-ring-fence-poll', 'shadow-precise-strong-ring-mailbox', 'shadow-precise-direct-fence', 'shadow-precise-retain-shmem')]
     [string]$PerfProfile = 'shadow-precise-strong-ring',
     [string]$GamePath = 'C:\smoke\x64\winehua_d3d_switch_cube.exe',
     [ValidateRange(8, 120)]
@@ -108,6 +108,21 @@ try {
         -GamePath $GamePath -DeviceId $DeviceId | Tee-Object -FilePath (Join-Path $output 'launch.txt')
     if ($LASTEXITCODE -ne 0) { throw 'WineHua game launcher failed' }
     $started = $true
+
+    $profileObserved = $false
+    $profileDeadline = (Get-Date).AddSeconds(10)
+    $profileNeedle = "host shadow profile=$PerfProfile "
+    do {
+        Start-Sleep -Milliseconds 300
+        $profileLog = @(Invoke-Hdc -Arguments @('shell', 'hilog', '-x'))
+        if (($profileLog -join "`n").Contains($profileNeedle)) {
+            $profileObserved = $true
+            break
+        }
+    } while ((Get-Date) -lt $profileDeadline)
+    if (-not $profileObserved) {
+        throw "Requested performance profile was not observed: $PerfProfile"
+    }
 
     $deadline = (Get-Date).AddSeconds($StartupTimeoutSeconds)
     $startupIndex = 0

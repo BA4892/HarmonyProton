@@ -30,7 +30,9 @@ public:
                 uint32_t format,
                 uint32_t layout,
                 uint32_t serial,
-                uint64_t* nextPresentDeadlineNs);
+                uint64_t* nextPresentDeadlineNs,
+                void (*releaseQueue)(void*),
+                void* queueSyncData);
 
 private:
     struct Impl;

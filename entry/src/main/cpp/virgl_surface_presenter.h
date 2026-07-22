@@ -30,7 +30,9 @@ int PresentVenusSurface(uint32_t contextId,
                         uint32_t clientPid,
                         uint32_t surfaceId,
                         uint32_t serial,
-                        uint64_t* nextPresentDeadlineNs);
+                        uint64_t* nextPresentDeadlineNs,
+                        void (*releaseQueue)(void*),
+                        void* queueSyncData);
 virgl_ipc::SurfaceQueryReply QueryVirglSurfaces();
 void ResetVirglSurfaces();
 

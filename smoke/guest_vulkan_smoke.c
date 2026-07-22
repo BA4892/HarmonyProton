@@ -40,6 +40,9 @@ struct probe_state {
     int maintenance6;
     int present_wait;
     int swapchain_maintenance;
+    int custom_border_color_extension;
+    int custom_border_colors;
+    int custom_border_color_without_format;
     int fallback_detected;
     uint64_t started_ms;
 };
@@ -129,6 +132,9 @@ static void write_result(const struct probe_state *state, const char *status,
             "\"dynamicRendering\":%s,\"maintenance4\":%s,"
             "\"maintenance5\":%s,\"maintenance6\":%s,"
             "\"presentWait\":%s,\"swapchainMaintenance\":%s,"
+            "\"customBorderColorExtension\":%s,"
+            "\"customBorderColors\":%s,"
+            "\"customBorderColorWithoutFormat\":%s,"
             "\"bc1\":%s,\"bc2\":%s,\"bc3\":%s,\"bc4\":%s,"
             "\"bc5\":%s,\"bc6\":%s,\"bc7\":%s},\n"
             "  \"checks\": {\"bufferCopy\":%s,\"imageClear\":%s},\n"
@@ -161,6 +167,9 @@ static void write_result(const struct probe_state *state, const char *status,
             state->maintenance6 ? "true" : "false",
             state->present_wait ? "true" : "false",
             state->swapchain_maintenance ? "true" : "false",
+            state->custom_border_color_extension ? "true" : "false",
+            state->custom_border_colors ? "true" : "false",
+            state->custom_border_color_without_format ? "true" : "false",
             state->bc1 ? "true" : "false", state->bc2 ? "true" : "false",
             state->bc3 ? "true" : "false", state->bc4 ? "true" : "false",
             state->bc5 ? "true" : "false", state->bc6 ? "true" : "false",
@@ -250,11 +259,14 @@ static int query_extended_capabilities(VkPhysicalDevice physical, struct probe_s
     VkPhysicalDeviceMaintenance4Features maintenance4 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_FEATURES };
     VkPhysicalDeviceMaintenance5FeaturesKHR maintenance5 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR };
     VkPhysicalDeviceMaintenance6FeaturesKHR maintenance6 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_6_FEATURES_KHR };
+    VkPhysicalDeviceCustomBorderColorFeaturesEXT custom_border_color = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT };
     void **tail = &features2.pNext;
     int api12 = state->properties.apiVersion >= VK_API_VERSION_1_2;
     int api13 = state->properties.apiVersion >= VK_API_VERSION_1_3;
     int has_robustness2, has_transform_feedback, has_synchronization2;
     int has_dynamic_rendering, has_maintenance4, has_maintenance5, has_maintenance6;
+    int has_custom_border_color;
 
     if (vkEnumerateDeviceExtensionProperties(physical, NULL, &extension_count, NULL) != VK_SUCCESS)
         return 0;
@@ -273,6 +285,8 @@ static int query_extended_capabilities(VkPhysicalDevice physical, struct probe_s
     has_maintenance4 = api13 || has_extension(extensions, extension_count, VK_KHR_MAINTENANCE_4_EXTENSION_NAME);
     has_maintenance5 = has_extension(extensions, extension_count, VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
     has_maintenance6 = has_extension(extensions, extension_count, VK_KHR_MAINTENANCE_6_EXTENSION_NAME);
+    has_custom_border_color = has_extension(extensions, extension_count,
+                                             VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
 
 #define APPEND_FEATURE(feature, supported) do { \
     if (supported) { *tail = &(feature); tail = &(feature).pNext; } \
@@ -285,6 +299,7 @@ static int query_extended_capabilities(VkPhysicalDevice physical, struct probe_s
     APPEND_FEATURE(maintenance4, has_maintenance4);
     APPEND_FEATURE(maintenance5, has_maintenance5);
     APPEND_FEATURE(maintenance6, has_maintenance6);
+    APPEND_FEATURE(custom_border_color, has_custom_border_color);
 #undef APPEND_FEATURE
     vkGetPhysicalDeviceFeatures2(physical, &features2);
 
@@ -302,6 +317,10 @@ static int query_extended_capabilities(VkPhysicalDevice physical, struct probe_s
     state->present_wait = has_extension(extensions, extension_count, VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
     state->swapchain_maintenance = has_extension(extensions, extension_count,
                                                  VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME);
+    state->custom_border_color_extension = has_custom_border_color;
+    state->custom_border_colors = has_custom_border_color && custom_border_color.customBorderColors;
+    state->custom_border_color_without_format = has_custom_border_color &&
+                                                 custom_border_color.customBorderColorWithoutFormat;
     state->bc1 = format_supports(physical, VK_FORMAT_BC1_RGBA_UNORM_BLOCK,
                                  VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
     state->bc2 = format_supports(physical, VK_FORMAT_BC2_UNORM_BLOCK,

@@ -1,0 +1,73 @@
+#version 450
+
+#extension GL_EXT_texture_shadow_lod : require
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0) uniform sampler2DArrayShadow sourceDepth;
+layout(set = 0, binding = 1, std430) buffer Output {
+    uint values[12];
+} outputBuffer;
+
+vec3 cubeDirection(uint face) {
+    if (face == 0) return vec3(1.0, 0.0, 0.0);
+    if (face == 1) return vec3(-1.0, 0.0, 0.0);
+    if (face == 2) return vec3(0.0, 1.0, 0.0);
+    if (face == 3) return vec3(0.0, -1.0, 0.0);
+    if (face == 4) return vec3(0.0, 0.0, 1.0);
+    return vec3(0.0, 0.0, -1.0);
+}
+
+vec3 cubeToArray(vec3 direction, uint cubeIndex) {
+    vec3 magnitude = abs(direction);
+    float major;
+    float sc;
+    float tc;
+    uint face;
+
+    if (magnitude.x >= magnitude.y && magnitude.x >= magnitude.z) {
+        major = magnitude.x;
+        if (direction.x >= 0.0) {
+            face = 0;
+            sc = -direction.z;
+            tc = -direction.y;
+        } else {
+            face = 1;
+            sc = direction.z;
+            tc = -direction.y;
+        }
+    } else if (magnitude.y >= magnitude.z) {
+        major = magnitude.y;
+        if (direction.y >= 0.0) {
+            face = 2;
+            sc = direction.x;
+            tc = direction.z;
+        } else {
+            face = 3;
+            sc = direction.x;
+            tc = -direction.z;
+        }
+    } else {
+        major = magnitude.z;
+        if (direction.z >= 0.0) {
+            face = 4;
+            sc = direction.x;
+            tc = -direction.y;
+        } else {
+            face = 5;
+            sc = -direction.x;
+            tc = -direction.y;
+        }
+    }
+
+    vec2 uv = 0.5 * (vec2(sc, tc) / major + vec2(1.0));
+    return vec3(uv, float(cubeIndex * 6 + face));
+}
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    uint face = index % 6;
+    uint cubeIndex = index / 6;
+    vec3 coord = cubeToArray(cubeDirection(face), cubeIndex);
+    float value = textureLod(sourceDepth, vec4(coord, 0.5), 0.0);
+    outputBuffer.values[index] = uint(round(clamp(value, 0.0, 1.0)));
+}

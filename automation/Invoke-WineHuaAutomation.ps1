@@ -1,11 +1,11 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('core', 'audio', 'opengl', 'host-vulkan', 'venus', 'venus-sampled', 'venus-sampled-idle', 'capabilities', 'wine-vulkan', 'wine-vulkan-present', 'dxvk', 'dxvk-long', 'dxvk-replay', 'dxvk-layout-general', 'dxvk-combined', 'dxvk-dynamic', 'all', 'long')]
+    [ValidateSet('core', 'audio', 'opengl', 'host-vulkan', 'venus', 'venus-sampled', 'venus-sampled-idle', 'venus-depth-cube', 'venus-depth-cube-array-2d-golden', 'venus-depth-cube-graphics', 'capabilities', 'wine-vulkan', 'wine-vulkan-present', 'dxvk', 'dxvk-long', 'dxvk-replay', 'dxvk-layout-general', 'dxvk-combined', 'dxvk-dynamic', 'all', 'long')]
     [string]$Suite = 'core',
     [ValidateSet('reuse', 'clean')]
     [string]$Prefix = 'reuse',
-    [ValidateSet('baseline', 'direct-fence-wait', 'no-remote-sync', 'no-dynamic-flush', 'fence-feedback', 'shadow-none', 'shadow-trace', 'shadow-to-host-explicit', 'shadow-precise', 'shadow-precise-single-ring', 'shadow-precise-sync-submit', 'shadow-precise-strong-ring', 'shadow-precise-direct-fence', 'shadow-precise-retain-shmem')]
-    [string]$PerfProfile = 'baseline',
+    [ValidateSet('baseline', 'direct-fence-wait', 'no-remote-sync', 'no-dynamic-flush', 'fence-feedback', 'shadow-none', 'shadow-trace', 'shadow-to-host-explicit', 'shadow-precise', 'shadow-precise-single-ring', 'shadow-precise-sync-submit', 'shadow-precise-strong-ring', 'shadow-precise-strong-ring-async-present', 'shadow-precise-strong-ring-fence-poll', 'shadow-precise-strong-ring-mailbox', 'shadow-precise-direct-fence', 'shadow-precise-retain-shmem')]
+    [string]$PerfProfile = 'shadow-precise-strong-ring',
     [int]$Runs = 1,
     [ValidateRange(60, 3600)]
     [int]$LongSeconds = 3600,
@@ -250,6 +250,18 @@ function Get-D3D11Coverage {
             subresourceExplicitLod = [bool]$m.subresourceMatrix.explicitLod
             subresourceBarrierUpdate = [bool]$m.subresourceMatrix.barrierUpdate
             subresourceMatrix = [bool]$m.subresourceMatrix.pass
+            texture3dCreated = [bool]$m.texture3dMatrix.created
+            texture3dUpload = [bool]$m.texture3dMatrix.upload
+            texture3dSingleDispatch = [bool]$m.texture3dMatrix.singleDispatch
+            texture3dUavToSrvBarrier = [bool]$m.texture3dMatrix.uavToSrvBarrier
+            texture3dPingPong = [bool]$m.texture3dMatrix.pingPong
+            heavenCubeMatrix = [bool]$m.heavenResourceMatrix.cube.pass
+            heavenTexture3dR8 = [bool]$m.heavenResourceMatrix.texture3d.r8.pass
+            heavenTexture3dRg8 = [bool]$m.heavenResourceMatrix.texture3d.rg8.pass
+            heavenD32DepthComparison = [bool]$m.heavenResourceMatrix.depthComparisonSampler.pass
+            heavenD24S8DepthComparison = [bool]$m.heavenResourceMatrix.d24s8DepthComparisonSampler.pass
+            heavenD24S8ExtendedMatrix = [bool]$m.heavenResourceMatrix.d24s8ExtendedMatrix.pass
+            heavenResourceMatrix = [bool]$m.heavenResourceMatrix.pass
             bcTextureCreated = ($m.bcTextureTest -eq 'created_sampled')
             bcSamplingSubmitted = [bool]$m.bcSamplingSubmitted
             bcSamplingFunctional = [bool]$m.bcSamplingFunctional
@@ -291,6 +303,7 @@ function Get-D3D11Coverage {
                 rgba8SampleMatrix = $m.rgba8SampleMatrix
                 descriptorMatrix = $m.descriptorMatrix
                 subresourceMatrix = $m.subresourceMatrix
+                heavenResourceMatrix = $m.heavenResourceMatrix
                 cpuReadBytes = [int]$m.cpuReadBytes
                 cpuUploadBytes = [int]$m.cpuUploadBytes
             }
@@ -303,7 +316,7 @@ function Get-D3D11Coverage {
         suite = $RunSuite
         status = if ($requiredPass) { 'PASS' } else { 'FAIL' }
         tests = $entries
-        policy = 'required API/object/RGBA8 Load-POINT-LINEAR PS-CS/descriptor/subresource array-mip-explicit-LOD-update/texture sampling/present/readback coverage; optional MSAA resolve and stencil query are reported separately'
+        policy = 'required API/object/RGBA8 Load-POINT-LINEAR PS-CS/descriptor/subresource array-mip-explicit-LOD-update/texture sampling/D24S8 2D-array-per-view-cube-cube-array-linear-border/present/readback coverage; ordinary R32_FLOAT comparison, optional MSAA resolve, and stencil query are reported separately'
     }
 }
 
@@ -423,6 +436,9 @@ function Get-CanonicalCapabilities {
         maintenance6 = [bool]$Capabilities.maintenance6
         presentWait = [bool]$Capabilities.presentWait
         swapchainMaintenance = [bool]$Capabilities.swapchainMaintenance
+        customBorderColorExtension = [bool]$Capabilities.customBorderColorExtension
+        customBorderColors = [bool]$Capabilities.customBorderColors
+        customBorderColorWithoutFormat = [bool]$Capabilities.customBorderColorWithoutFormat
         bc1 = [bool]$Capabilities.bc1
         bc2 = [bool]$Capabilities.bc2
         bc3 = [bool]$Capabilities.bc3
@@ -627,6 +643,19 @@ function Invoke-OneRun {
         Save-DeviceFile $remoteResults (Join-Path $runDirectory 'device-results')
     }
 
+    $customBorderSelections = @()
+    $wineStderrPath = Join-Path $runDirectory 'wine-stderr.log'
+    if (Test-Path -LiteralPath $wineStderrPath) {
+        foreach ($match in Select-String -LiteralPath $wineStderrPath -Pattern 'custom-border path=([a-z-]+) reason=([a-zA-Z0-9_-]+)') {
+            $path = $match.Matches[0].Groups[1].Value
+            $reason = $match.Matches[0].Groups[2].Value
+            $key = "$path|$reason"
+            if (-not ($customBorderSelections | Where-Object { $_.key -eq $key })) {
+                $customBorderSelections += [ordered]@{ key = $key; path = $path; reason = $reason }
+            }
+        }
+    }
+
     $visualPass = -not ($captured.Values -contains $false)
     $coverage = if ($RunSuite -in @('dxvk', 'dxvk-long', 'dxvk-dynamic', 'all')) {
         Get-D3D11Coverage -Summary $summary -RunSuite $RunSuite
@@ -637,11 +666,15 @@ function Invoke-OneRun {
         runId = $RunId
         suite = $RunSuite
         prefix = $RunPrefix
+        perfProfile = $PerfProfile
         appStatus = $summary.status
         visualStatus = if ($visualPass) { 'PASS' } else { 'FAIL' }
         coverageStatus = if ($null -eq $coverage) { 'NOT_APPLICABLE' } else { $coverage.status }
         visuals = $captured
         coverage = $coverage
+        customBorderSelections = @($customBorderSelections | ForEach-Object {
+            [ordered]@{ path = $_.path; reason = $_.reason }
+        })
         status = if ($summary.status -eq 'PASS' -and $visualPass -and $coveragePass) { 'PASS' } else { 'FAIL' }
     }
     $hostSummary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $runDirectory 'host-summary.json') -Encoding UTF8
@@ -724,6 +757,7 @@ if ($Suite -eq 'capabilities') {
     deviceId = $DeviceId
     hapSha256 = $artifact.hapSha256
     gate = [bool]$Gate
+    perfProfile = $PerfProfile
     status = if ($allPassed) { 'PASS' } else { 'FAIL' }
     runs = $runRecords
     capabilityHashes = if ($capabilityMatrix) {

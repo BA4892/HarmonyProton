@@ -47,6 +47,7 @@ struct ZeroCopySurfaceInfo
     uint32_t height = 0;
     uint32_t serial = 0;
     bool attached = false;
+    bool vulkan = false;
 };
 
 class GraphicsBroker
@@ -60,6 +61,7 @@ public:
 
     void SetRequestedBackend(GraphicsBackend backend);
     void SetVulkanPresentMode(bool enabled);
+    bool IsVulkanPresentMode() const;
     GraphicsBackendState GetState() const;
 
     void AppendWineEnv(std::vector<std::string>& env) const;
@@ -138,6 +140,7 @@ private:
     std::string virglIpcLogPath_;
     std::string virglIpcShadowMode_;
     std::string virglIpcShadowTrace_;
+    std::string virglIpcPresentMode_;
     std::unordered_set<uint64_t> zeroCopyAttachedSurfaces_;
 };
 

@@ -131,6 +131,9 @@ struct ProbeCaps {
     bool maintenance6 = false;
     bool presentWait = false;
     bool swapchainMaintenance = false;
+    bool customBorderColorExtension = false;
+    bool customBorderColors = false;
+    bool customBorderColorWithoutFormat = false;
 };
 
 double Percentile(std::vector<double> values, double percentile)
@@ -198,6 +201,9 @@ std::string MakeResult(const std::string& runId, const char* status, const char*
         << "    \"maintenance6\": " << (caps.maintenance6 ? "true" : "false") << ",\n"
         << "    \"presentWait\": " << (caps.presentWait ? "true" : "false") << ",\n"
         << "    \"swapchainMaintenance\": " << (caps.swapchainMaintenance ? "true" : "false") << ",\n"
+        << "    \"customBorderColorExtension\": " << (caps.customBorderColorExtension ? "true" : "false") << ",\n"
+        << "    \"customBorderColors\": " << (caps.customBorderColors ? "true" : "false") << ",\n"
+        << "    \"customBorderColorWithoutFormat\": " << (caps.customBorderColorWithoutFormat ? "true" : "false") << ",\n"
         << "    \"bc1\": " << (caps.bc1 ? "true" : "false") << ",\n"
         << "    \"bc2\": " << (caps.bc2 ? "true" : "false") << ",\n"
         << "    \"bc3\": " << (caps.bc3 ? "true" : "false") << ",\n"
@@ -339,6 +345,8 @@ private:
         VkPhysicalDeviceMaintenance4Features maintenance4{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_FEATURES};
         VkPhysicalDeviceMaintenance5Features maintenance5{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES};
         VkPhysicalDeviceMaintenance6Features maintenance6{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_6_FEATURES};
+        VkPhysicalDeviceCustomBorderColorFeaturesEXT customBorderColor{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT};
         void** tail = &features2.pNext;
         auto append = [&tail](auto& feature, bool supported) {
             if (!supported) return;
@@ -354,6 +362,8 @@ private:
         const bool hasMaintenance4 = api13 || HasExtension(extensions, VK_KHR_MAINTENANCE_4_EXTENSION_NAME);
         const bool hasMaintenance5 = HasExtension(extensions, VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
         const bool hasMaintenance6 = HasExtension(extensions, VK_KHR_MAINTENANCE_6_EXTENSION_NAME);
+        const bool hasCustomBorderColor = HasExtension(
+            extensions, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
         append(vulkan12, api12);
         append(robustness2, hasRobustness2);
         append(transformFeedback, hasTransformFeedback);
@@ -362,6 +372,7 @@ private:
         append(maintenance4, hasMaintenance4);
         append(maintenance5, hasMaintenance5);
         append(maintenance6, hasMaintenance6);
+        append(customBorderColor, hasCustomBorderColor);
         vkGetPhysicalDeviceFeatures2(physical_, &features2);
 
         caps_.descriptorIndexing = api12 && vulkan12.descriptorIndexing;
@@ -377,6 +388,11 @@ private:
         caps_.maintenance6 = hasMaintenance6 && maintenance6.maintenance6;
         caps_.presentWait = HasExtension(extensions, VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
         caps_.swapchainMaintenance = HasExtension(extensions, VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME);
+        caps_.customBorderColorExtension = hasCustomBorderColor;
+        caps_.customBorderColors = hasCustomBorderColor &&
+            customBorderColor.customBorderColors;
+        caps_.customBorderColorWithoutFormat = hasCustomBorderColor &&
+            customBorderColor.customBorderColorWithoutFormat;
     }
 
     bool InitInstance(const char*& failure, bool& unsupported)

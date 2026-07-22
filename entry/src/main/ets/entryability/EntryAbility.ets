@@ -16,14 +16,85 @@ export default class EntryAbility extends UIAbility {
     };
     const mode = value('winehua.mode', '');
     const suite = value('winehua.suite', 'core');
-    const requestedD3d = value('winehua.d3d_backend', 'wined3d');
+    const explicitD3d = !!parameters && parameters['winehua.d3d_backend'] !== undefined &&
+      parameters['winehua.d3d_backend'] !== null;
+    const persistedD3d = AppStorage.get<string>('winehua.d3d.preference') || 'dxvk_legacy';
+    const requestedD3d = explicitD3d ? value('winehua.d3d_backend', 'wined3d') :
+      (mode === '' ? persistedD3d : 'wined3d');
     const d3dBackend = requestedD3d === 'dxvk_legacy' ? 'dxvk_legacy' : 'wined3d';
     const gamePath = value('winehua.game_path', '');
+    const requestedGameArgCount = Number(value('winehua.game_argc', '0'));
+    const gameArgCount = Math.max(0, Math.min(64, Math.floor(requestedGameArgCount)));
+    const gameArguments: string[] = [];
+    // aa start has a finite Want-parameter budget and also interprets a raw
+    // value beginning with '-' as an aa option.  The automation launcher
+    // therefore sends the complete argv array as one URI-encoded JSON value.
+    // Keep the per-item encoded/raw fields as a compatibility fallback.
+    const encodedArguments = value('winehua.game_args_json', '');
+    let decodedArguments = false;
+    if (encodedArguments.length > 0) {
+      try {
+        const parsed: string[] = JSON.parse(decodeURIComponent(encodedArguments)) as string[];
+        if (Array.isArray(parsed)) {
+          for (const item of parsed) {
+            if (gameArguments.length < gameArgCount) {
+              gameArguments.push(item);
+            }
+          }
+          decodedArguments = gameArguments.length === gameArgCount;
+        }
+      } catch (err) {
+        hilog.warn(DOMAIN, 'GameTest', 'invalid encoded game argv JSON');
+      }
+    }
+    if (!decodedArguments) {
+      gameArguments.length = 0;
+      for (let index = 0; index < gameArgCount; ++index) {
+        const encoded = value(`winehua.game_arg_enc${index}`, '');
+        if (encoded.length > 0) {
+          try {
+            gameArguments.push(decodeURIComponent(encoded));
+            continue;
+          } catch (err) {
+            hilog.warn(DOMAIN, 'GameTest',
+              'invalid encoded game argument index=%{public}d', index);
+          }
+        }
+        gameArguments.push(value(`winehua.game_arg${index}`, ''));
+      }
+    }
+    const requestedD3dEnvCount = Number(value('winehua.d3d_env_count', '0'));
+    const d3dEnvCount = Math.max(0, Math.min(32, Math.floor(requestedD3dEnvCount)));
+    const d3dEnvKeys: string[] = [];
+    const d3dEnvValues: string[] = [];
+    for (let index = 0; index < d3dEnvCount; ++index) {
+      const key = value(`winehua.d3d_env_key${index}`, '');
+      const envValue = value(`winehua.d3d_env_value${index}`, '');
+      if (!/^(WINEDEBUG|DXVK_|VN_|VKR_|WINEHUA_DXVK_)[A-Za-z0-9_]*$/.test(key) || envValue.length > 1024) {
+        hilog.warn(DOMAIN, 'GameTest', 'ignoring invalid D3D environment key=%{public}s', key);
+        continue;
+      }
+      d3dEnvKeys.push(key);
+      d3dEnvValues.push(envValue);
+    }
+    const clickTitlePrefix = value('winehua.click_title_prefix', '');
+    const clickButtonText = value('winehua.click_button_text', '');
+    const requestedClickDelayMs = Number(value('winehua.click_delay_ms', '1500'));
+    const clickDelayMs = Math.max(0, Math.min(30000, Math.floor(requestedClickDelayMs)));
+    const requestedClickClientXPermille = Number(value('winehua.click_client_x_permille', '-1'));
+    const requestedClickClientYPermille = Number(value('winehua.click_client_y_permille', '-1'));
+    const clickClientXPermille = Math.max(-1,
+      Math.min(1000, Math.floor(requestedClickClientXPermille)));
+    const clickClientYPermille = Math.max(-1,
+      Math.min(1000, Math.floor(requestedClickClientYPermille)));
     const requestedPerfProfile = value('winehua.perf_profile',
-      d3dBackend === 'dxvk_legacy' ? 'shadow-precise-strong-ring' : 'baseline');
+      mode === '' || d3dBackend === 'dxvk_legacy' ? 'shadow-precise-strong-ring' : 'baseline');
     const perfProfile = ['direct-fence-wait', 'no-remote-sync', 'no-dynamic-flush', 'fence-feedback',
       'shadow-none', 'shadow-trace', 'shadow-to-host-explicit', 'shadow-precise',
       'shadow-precise-single-ring', 'shadow-precise-sync-submit', 'shadow-precise-strong-ring',
+      'shadow-precise-strong-ring-async-present',
+      'shadow-precise-strong-ring-fence-poll',
+      'shadow-precise-strong-ring-mailbox',
       'shadow-precise-direct-fence', 'shadow-precise-retain-shmem']
       .indexOf(requestedPerfProfile) >= 0 ? requestedPerfProfile : 'baseline';
     this.contentPage = mode === 'smoke' && suite === 'host-vulkan' ?
@@ -42,12 +113,29 @@ export default class EntryAbility extends UIAbility {
     AppStorage.set<string>('winehua.d3d.backend', d3dBackend);
     AppStorage.setOrCreate<string>('winehua.game.path', gamePath);
     AppStorage.set<string>('winehua.game.path', gamePath);
+    AppStorage.setOrCreate<string[]>('winehua.game.args', gameArguments);
+    AppStorage.set<string[]>('winehua.game.args', gameArguments);
+    AppStorage.setOrCreate<string[]>('winehua.game.d3d_env_keys', d3dEnvKeys);
+    AppStorage.set<string[]>('winehua.game.d3d_env_keys', d3dEnvKeys);
+    AppStorage.setOrCreate<string[]>('winehua.game.d3d_env_values', d3dEnvValues);
+    AppStorage.set<string[]>('winehua.game.d3d_env_values', d3dEnvValues);
+    AppStorage.setOrCreate<string>('winehua.game.click_title_prefix', clickTitlePrefix);
+    AppStorage.set<string>('winehua.game.click_title_prefix', clickTitlePrefix);
+    AppStorage.setOrCreate<string>('winehua.game.click_button_text', clickButtonText);
+    AppStorage.set<string>('winehua.game.click_button_text', clickButtonText);
+    AppStorage.setOrCreate<number>('winehua.game.click_delay_ms', clickDelayMs);
+    AppStorage.set<number>('winehua.game.click_delay_ms', clickDelayMs);
+    AppStorage.setOrCreate<number>('winehua.game.click_client_x_permille', clickClientXPermille);
+    AppStorage.set<number>('winehua.game.click_client_x_permille', clickClientXPermille);
+    AppStorage.setOrCreate<number>('winehua.game.click_client_y_permille', clickClientYPermille);
+    AppStorage.set<number>('winehua.game.click_client_y_permille', clickClientYPermille);
     AppStorage.setOrCreate<string>('winehua.perf.profile', perfProfile);
     AppStorage.set<string>('winehua.perf.profile', perfProfile);
     hilog.info(DOMAIN, 'SmokeRunner', 'launch mode=%{public}s request=%{public}s', mode, request);
   }
 
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    PersistentStorage.persistProp<string>('winehua.d3d.preference', 'dxvk_legacy');
     try {
       this.context.getApplicationContext().setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
     } catch (err) {

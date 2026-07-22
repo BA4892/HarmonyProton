@@ -97,6 +97,11 @@ deps: $(STAMPS)/deps
 $(STAMPS)/deps: $(SCRIPTS)/build_deps.sh $(SCRIPTS)/build_ohos_guest_gfx.sh \
 	$(SCRIPTS)/build_ohos_guest_vulkan.sh $(ROOT)/smoke/guest_vulkan_smoke.c \
 	$(ROOT)/smoke/venus_sampled_image_probe.c \
+	$(ROOT)/smoke/venus_depth_cube_probe.inc \
+	$(ROOT)/smoke/venus_depth_cube_graphics_replay.inc \
+	$(ROOT)/smoke/venus_fullscreen_triangle.vert \
+	$(ROOT)/smoke/venus_depth_cube_golden.frag \
+	$(ROOT)/smoke/venus_depth_cube_fail.spvasm \
 	$(ROOT)/smoke/venus_storage_write.comp \
 	$(ROOT)/smoke/venus_storage_read.comp \
 	$(ROOT)/smoke/venus_image_fetch.comp \
@@ -105,6 +110,14 @@ $(STAMPS)/deps: $(SCRIPTS)/build_deps.sh $(SCRIPTS)/build_ohos_guest_gfx.sh \
 	$(ROOT)/smoke/venus_dxvk_contract_unknown_sample.comp \
 	$(ROOT)/smoke/venus_dxvk_contract_spec_sample.comp \
 	$(ROOT)/smoke/venus_dxvk_contract_vector_spec_sample.comp \
+	$(ROOT)/smoke/venus_depth_array_compare.comp \
+	$(ROOT)/smoke/venus_depth_cube_sample.comp \
+	$(ROOT)/smoke/venus_depth_cube_compare.comp \
+	$(ROOT)/smoke/venus_depth_cube_separated_compare.comp \
+	$(ROOT)/smoke/venus_depth_cube_dxvk_contract_compare.spvasm \
+	$(ROOT)/smoke/venus_depth_cube_array_sample.comp \
+	$(ROOT)/smoke/venus_depth_cube_array_2d_compare.comp \
+	$(ROOT)/smoke/venus_depth_cube_array_compare.comp \
 	$(ROOT)/smoke/venus_spirv_replay.c \
 	$(wildcard $(ROOT)/replay_spv/CS_*.remapped.spv) \
 	$(ROOT)/smoke/venus_separated_sample.comp \
@@ -123,11 +136,24 @@ $(STAMPS)/deps: $(SCRIPTS)/build_deps.sh $(SCRIPTS)/build_ohos_guest_gfx.sh \
 	    ! [ "$(SCRIPTS)/build_ohos_guest_vulkan.sh" -nt $@ ] && \
 	    ! [ "$(ROOT)/smoke/guest_vulkan_smoke.c" -nt $@ ] && \
 	    ! [ "$(ROOT)/smoke/venus_sampled_image_probe.c" -nt $@ ] && \
+	    ! [ "$(ROOT)/smoke/venus_depth_cube_probe.inc" -nt $@ ] && \
+	    ! [ "$(ROOT)/smoke/venus_depth_cube_graphics_replay.inc" -nt $@ ] && \
+	    ! [ "$(ROOT)/smoke/venus_fullscreen_triangle.vert" -nt $@ ] && \
+	    ! [ "$(ROOT)/smoke/venus_depth_cube_golden.frag" -nt $@ ] && \
+	    ! [ "$(ROOT)/smoke/venus_depth_cube_fail.spvasm" -nt $@ ] && \
 	    ! [ "$(ROOT)/smoke/venus_storage_write.comp" -nt $@ ] && \
 	    ! [ "$(ROOT)/smoke/venus_storage_read.comp" -nt $@ ] && \
 	    ! [ "$(ROOT)/smoke/venus_image_fetch.comp" -nt $@ ] && \
 	    ! [ "$(ROOT)/smoke/venus_combined_sample.comp" -nt $@ ] && \
 	    ! [ "$(ROOT)/smoke/venus_dxvk_contract_sample.comp" -nt $@ ] && \
+	    ! [ "$(ROOT)/smoke/venus_depth_array_compare.comp" -nt $@ ] && \
+	    ! [ "$(ROOT)/smoke/venus_depth_cube_sample.comp" -nt $@ ] && \
+	    ! [ "$(ROOT)/smoke/venus_depth_cube_compare.comp" -nt $@ ] && \
+	    ! [ "$(ROOT)/smoke/venus_depth_cube_separated_compare.comp" -nt $@ ] && \
+	    ! [ "$(ROOT)/smoke/venus_depth_cube_dxvk_contract_compare.spvasm" -nt $@ ] && \
+	    ! [ "$(ROOT)/smoke/venus_depth_cube_array_sample.comp" -nt $@ ] && \
+	    ! [ "$(ROOT)/smoke/venus_depth_cube_array_2d_compare.comp" -nt $@ ] && \
+	    ! [ "$(ROOT)/smoke/venus_depth_cube_array_compare.comp" -nt $@ ] && \
 	    ! [ "$(ROOT)/smoke/venus_spirv_replay.c" -nt $@ ] && \
 	    ! [ "$(ROOT)/smoke/venus_separated_sample.comp" -nt $@ ] && \
 	    ! find $(ROOT)/thirdparty/freetype \
@@ -267,6 +293,7 @@ assemble-$(1): $$(STAMPS)/$(1)/assemble
 
 $$(STAMPS)/$(1)/assemble: $(SCRIPTS)/assemble.sh $(SCRIPTS)/env.sh $(DXVK_SENTINEL) $(DXVK_STAMP) \
 	$(ROOT)/smoke/winehua_d3d_switch_cube.c \
+	$(ROOT)/smoke/winehua_win32_driver.c \
 	$$(STAMPS)/deps $$(STAMPS)/wine-$(1) $$(STAMPS)/$(1)/native \
 	$$(ASSEMBLE_GUEST_INPUTS) | $$(STAMPS)/$(1)
 	@echo "=== assemble ($(1)) ==="

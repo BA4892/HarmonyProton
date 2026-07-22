@@ -90,7 +90,16 @@ interface ProcessInfo {
 struct Index {
   @StorageLink('winehua.smoke.request') smokeRequestText: string = '';
   @StorageLink('winehua.d3d.backend') d3dBackendText: string = 'wined3d';
+  @StorageLink('winehua.d3d.preference') d3dPreferenceText: string = 'dxvk_legacy';
   @StorageLink('winehua.game.path') gamePathText: string = '';
+  @StorageLink('winehua.game.args') gameArguments: string[] = [];
+  @StorageLink('winehua.game.d3d_env_keys') d3dEnvKeys: string[] = [];
+  @StorageLink('winehua.game.d3d_env_values') d3dEnvValues: string[] = [];
+  @StorageLink('winehua.game.click_title_prefix') gameClickTitlePrefix: string = '';
+  @StorageLink('winehua.game.click_button_text') gameClickButtonText: string = '';
+  @StorageLink('winehua.game.click_delay_ms') gameClickDelayMs: number = 1500;
+  @StorageLink('winehua.game.click_client_x_permille') gameClickClientXPermille: number = -1;
+  @StorageLink('winehua.game.click_client_y_permille') gameClickClientYPermille: number = -1;
   @StorageLink('winehua.perf.profile') perfProfileText: string = 'baseline';
   @State state: string = 'idle';
   @State prefixReady: boolean = false;
@@ -398,6 +407,9 @@ struct Index {
       this.perfProfileText === 'shadow-precise-single-ring' ||
       this.perfProfileText === 'shadow-precise-sync-submit' ||
       this.perfProfileText === 'shadow-precise-strong-ring' ||
+      this.perfProfileText === 'shadow-precise-strong-ring-async-present' ||
+      this.perfProfileText === 'shadow-precise-strong-ring-fence-poll' ||
+      this.perfProfileText === 'shadow-precise-strong-ring-mailbox' ||
       this.perfProfileText === 'shadow-precise-direct-fence' ||
       this.perfProfileText === 'shadow-precise-retain-shmem') {
       environment['DXVK_WINEHUA_PRECISE_SHADOW'] = '1';
@@ -410,18 +422,34 @@ struct Index {
       if (this.perfProfileText === 'shadow-precise-sync-submit')
         environment['VN_PERF'] =
           'no_fence_feedback,no_query_feedback,no_async_queue_submit';
-      if (this.perfProfileText === 'shadow-precise-strong-ring')
+      if (this.perfProfileText === 'shadow-precise-strong-ring' ||
+        this.perfProfileText === 'shadow-precise-strong-ring-async-present' ||
+        this.perfProfileText === 'shadow-precise-strong-ring-fence-poll' ||
+        this.perfProfileText === 'shadow-precise-strong-ring-mailbox')
         environment['VN_WINEHUA_STRONG_RING_BARRIER'] = '1';
       if (this.perfProfileText === 'shadow-precise-direct-fence')
         environment['VN_WINEHUA_DIRECT_FENCE_WAIT'] = '1';
       if (this.perfProfileText === 'shadow-precise-retain-shmem')
         environment['VN_WINEHUA_DEFER_SHMEM_UNREF'] = '1';
     }
+    const overrideCount = Math.min(this.d3dEnvKeys.length, this.d3dEnvValues.length);
+    for (let index = 0; index < overrideCount; ++index) {
+      environment[this.d3dEnvKeys[index]] = this.d3dEnvValues[index];
+    }
     return environment;
   }
 
   private d3dPresentBackend(): string {
     return this.d3dBackend === 'dxvk_legacy' ? 'venus_broker_present' : 'virgl_compositor';
+  }
+
+  private selectD3dBackend = (backend: string): void => {
+    const selected = backend === 'dxvk_legacy' ? 'dxvk_legacy' : 'wined3d';
+    this.d3dBackend = selected;
+    this.d3dBackendText = selected;
+    this.d3dPreferenceText = selected;
+    this.statusText = selected === 'dxvk_legacy' ? 'DXVK Legacy' : 'WineD3D';
+    hilog.info(DOMAIN, 'GameTest', 'D3D backend selected=%{public}s', selected);
   }
 
   private enterDir = (name: string): void => {
@@ -558,7 +586,9 @@ struct Index {
     const gamePath = this.gamePathText;
     const result = testNapi.runWineProgram({
       windowsExePath: gamePath,
-      argv: [],
+      // @StorageLink arrays are observable proxies. Pass a plain array across
+      // the N-API boundary so napi_is_array can enumerate every game argument.
+      argv: this.gameArguments.slice(),
       environment: this.d3dLaunchEnvironment(),
       workingDirectory: this.windowsParentDirectory(gamePath),
       prefixMode: 'reuse',
@@ -567,8 +597,40 @@ struct Index {
       automationMode: false
     }) as ProcessInfo;
     hilog.info(DOMAIN, 'GameTest',
-      'game launch path=%{public}s backend=%{public}s perf=%{public}s pid=%{public}d status=%{public}s',
-      gamePath, this.d3dBackend, this.perfProfileText, result.pid, result.state);
+      'game launch path=%{public}s argc=%{public}d backend=%{public}s perf=%{public}s '
+        + 'pid=%{public}d status=%{public}s',
+      gamePath, this.gameArguments.length, this.d3dBackend, this.perfProfileText,
+      result.pid, result.state);
+    if (this.gameClickTitlePrefix.length > 0 && this.gameClickButtonText.length > 0) {
+      const titlePrefix = this.gameClickTitlePrefix;
+      const buttonText = this.gameClickButtonText;
+      const delayMs = this.gameClickDelayMs;
+      const clickXPermille = this.gameClickClientXPermille;
+      const clickYPermille = this.gameClickClientYPermille;
+      setTimeout(() => {
+        const driverArguments = ['--attach', '--title-prefix', titlePrefix,
+          '--button-text', buttonText, '--timeout-ms', '60000'];
+        if (clickXPermille >= 0 && clickYPermille >= 0) {
+          driverArguments.push('--client-x-permille', `${clickXPermille}`,
+            '--client-y-permille', `${clickYPermille}`);
+        }
+        const driverResult = testNapi.runWineProgram({
+          windowsExePath: 'C:\\smoke\\x64\\winehua_win32_driver.exe',
+          argv: driverArguments,
+          environment: {},
+          workingDirectory: 'C:\\smoke\\x64',
+          prefixMode: 'reuse',
+          d3dBackend: this.d3dBackend,
+          presentBackend: this.d3dPresentBackend(),
+          automationMode: false
+        }) as ProcessInfo;
+        hilog.info(DOMAIN, 'GameTest',
+          'click driver title=%{public}s button=%{public}s relative=%{public}d,%{public}d '
+            + 'pid=%{public}d status=%{public}s',
+          titlePrefix, buttonText, clickXPermille, clickYPermille,
+          driverResult.pid, driverResult.state);
+      }, delayMs);
+    }
   }
 
   private startDeveloperSmoke = (): void => {
@@ -614,6 +676,22 @@ struct Index {
         .alignItems(VerticalAlign.Center)
 
         Divider().color('#2a2a2a').width('100%')
+
+        Text('D3D backend')
+          .fontWeight(FontWeight.Bold).fontColor('#999')
+          .width('100%').padding({ top: 12, bottom: 8 })
+
+        Row({ space: 4 }) {
+          Button('WineD3D')
+            .layoutWeight(1).height(34)
+            .backgroundColor(this.d3dBackend === 'wined3d' ? '#285' : '#333')
+            .onClick(() => this.selectD3dBackend('wined3d'))
+          Button('DXVK Legacy')
+            .layoutWeight(1).height(34)
+            .backgroundColor(this.d3dBackend === 'dxvk_legacy' ? '#285' : '#333')
+            .onClick(() => this.selectD3dBackend('dxvk_legacy'))
+        }
+        .width('100%').margin({ bottom: 8 })
 
         // -- 快速操作 --
         Text('快速操作')

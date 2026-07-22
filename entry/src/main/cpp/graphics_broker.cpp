@@ -304,6 +304,8 @@ bool GraphicsBroker::SendVirglConfigureLocked()
         writeResult = OH_IPCParcel_WriteString(request, virglIpcShadowMode_.c_str());
     if (writeResult == OH_IPC_SUCCESS)
         writeResult = OH_IPCParcel_WriteString(request, virglIpcShadowTrace_.c_str());
+    if (writeResult == OH_IPC_SUCCESS)
+        writeResult = OH_IPCParcel_WriteString(request, virglIpcPresentMode_.c_str());
 
     int32_t childResult = -1;
     int32_t sendResult = writeResult;
@@ -517,7 +519,8 @@ bool GraphicsBroker::QueryZeroCopySurfaces(std::vector<ZeroCopySurfaceInfo>& sur
             const auto& item = queryReply.surfaces[i];
             surfaces.push_back({item.surfaceKey, item.clientPid, item.surfaceId,
                                 item.width, item.height, item.serial,
-                                (item.flags & virgl_ipc::kSurfaceAttached) != 0});
+                                (item.flags & virgl_ipc::kSurfaceAttached) != 0,
+                                (item.flags & virgl_ipc::kSurfaceVulkan) != 0});
         }
     }
     if (reply) OH_IPCParcel_Destroy(reply);
@@ -683,6 +686,11 @@ void GraphicsBroker::SetRequestedBackend(GraphicsBackend backend)
 void GraphicsBroker::SetVulkanPresentMode(bool enabled)
 {
     vulkanPresentMode_.store(enabled, std::memory_order_release);
+}
+
+bool GraphicsBroker::IsVulkanPresentMode() const
+{
+    return vulkanPresentMode_.load(std::memory_order_acquire);
 }
 
 GraphicsBackendState GraphicsBroker::GetState() const
@@ -1020,10 +1028,16 @@ void GraphicsBroker::StartVirglSocketServerLocked()
         const std::string virglLogPath = "/data/storage/el2/base/cache/winehua_virgl_host.log";
         const char* requestedShadowMode = getenv("VKR_WINEHUA_SHADOW_FROM_HOST");
         const char* requestedShadowTrace = getenv("VKR_WINEHUA_SHADOW_TRACE");
+        const char* requestedPresentMode = getenv("WINEHUA_VENUS_PRESENT_MODE");
         const std::string shadowMode = requestedShadowMode && requestedShadowMode[0]
             ? requestedShadowMode : "full";
         const std::string shadowTrace = requestedShadowTrace && requestedShadowTrace[0]
             ? requestedShadowTrace : "0";
+        const std::string presentMode = requestedPresentMode &&
+            (!strcmp(requestedPresentMode, "mailbox") ||
+             !strcmp(requestedPresentMode, "fifo-async") ||
+             !strcmp(requestedPresentMode, "fifo-poll"))
+            ? requestedPresentMode : "fifo";
         {
             std::lock_guard<std::mutex> ipcLock(virglIpcMutex_);
             virglIpcHelperPath_ = virglVtestLibraryPath_;
@@ -1033,6 +1047,7 @@ void GraphicsBroker::StartVirglSocketServerLocked()
             virglIpcLogPath_ = virglLogPath;
             virglIpcShadowMode_ = shadowMode;
             virglIpcShadowTrace_ = shadowTrace;
+            virglIpcPresentMode_ = presentMode;
             virglIpcAcceptCallback_ = true;
             virglIpcCallbackComplete_ = false;
             virglIpcConfigured_ = false;
@@ -1072,9 +1087,11 @@ void GraphicsBroker::StartVirglSocketServerLocked()
         virglServerUsesNcp_ = false;
         OH_LOG_INFO(LOG_APP,
                     "[GraphicsBroker] IPC NCP virgl_child configured helper=%{public}s "
-                    "socket=%{public}s hostLib=%{public}s sync=%{public}s log=%{public}s",
+                    "socket=%{public}s hostLib=%{public}s sync=%{public}s log=%{public}s "
+                    "present=%{public}s",
                     virglVtestLibraryPath_.c_str(), virglSocketPath_.c_str(),
-                    ldLibraryPath.c_str(), syncMode.c_str(), virglLogPath.c_str());
+                    ldLibraryPath.c_str(), syncMode.c_str(), virglLogPath.c_str(),
+                    presentMode.c_str());
     }
 
     virglServerPid_ = -1;

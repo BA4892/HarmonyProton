@@ -241,6 +241,24 @@ void main() {
 }
 )";
 
+/* Keep the NativeImage transform intact and apply the Vulkan-only image-origin
+ * correction on its input. The VirGL/OpenGL producer keeps the existing path. */
+static void ComposeZeroCopySamplingTransform(const float* nativeTransform,
+                                             bool flipY,
+                                             float* samplingTransform)
+{
+    if (!nativeTransform || !samplingTransform) return;
+    std::copy(nativeTransform, nativeTransform + 16, samplingTransform);
+    if (!flipY) return;
+
+    // sampling = native * (u, 1-v), in column-major OpenGL layout.
+    for (int row = 0; row < 4; ++row)
+    {
+        samplingTransform[4 + row] = -nativeTransform[4 + row];
+        samplingTransform[12 + row] = nativeTransform[4 + row] + nativeTransform[12 + row];
+    }
+}
+
 static GLuint CompileShader(GLenum type, const char* src) {
     GLuint s = glCreateShader(type);
     glShaderSource(s, 1, &src, nullptr);
@@ -338,6 +356,7 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
             if (surface.surfaceKey != zeroCopySurfaceKey_) continue;
             zeroCopySourceW_ = static_cast<int>(surface.width);
             zeroCopySourceH_ = static_cast<int>(surface.height);
+            zeroCopyVulkanSource_ = surface.vulkan;
             return true;
         }
         return true;
@@ -400,6 +419,7 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
         zeroCopySurfaceId_ = surface.surfaceId;
         zeroCopySourceW_ = static_cast<int>(surface.width);
         zeroCopySourceH_ = static_cast<int>(surface.height);
+        zeroCopyVulkanSource_ = surface.vulkan || broker.IsVulkanPresentMode();
         zeroCopyLayerX_ = layer.x;
         zeroCopyLayerY_ = layer.y;
         zeroCopyLayerW_ = layer.width;
@@ -418,6 +438,7 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
                     "pid=%{public}u surface=%{public}u source=%{public}dx%{public}d "
                     "layer=%{public}dx%{public}d+%{public}d,%{public}d "
                     "parent=%{public}u geometry=%{public}s queue=%{public}d "
+                    "source_kind=%{public}s "
                     "size_ret=%{public}d usage_ret=%{public}d drop_ret=%{public}d",
                     rendererToplevelId,
                     static_cast<unsigned long long>(zeroCopySurfaceKey_),
@@ -425,6 +446,7 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
                     zeroCopySourceW_, zeroCopySourceH_, zeroCopyLayerW_, zeroCopyLayerH_,
                     zeroCopyLayerX_, zeroCopyLayerY_, layer.parentToplevel,
                     layer.protocolOnly ? "protocol" : "shm", queueSize,
+                    zeroCopyVulkanSource_ ? "vulkan" : "virgl",
                     sizeResult, usageResult, dropResult);
         return true;
     }
@@ -475,6 +497,28 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
                         static_cast<unsigned long long>(zeroCopyFallbackShmSerial_));
         }
         return false;
+    }
+
+    ComposeZeroCopySamplingTransform(
+        zeroCopyTransform_, zeroCopyVulkanSource_, zeroCopySamplingTransform_);
+    if (zeroCopyFrames_ == 0)
+    {
+        OH_LOG_INFO(LOG_APP,
+                    "[VIRGL-ZC][MAIN] transform source=%{public}s flip_y=%{public}s "
+                    "native_r0=(%{public}.3f,%{public}.3f,%{public}.3f,%{public}.3f) "
+                    "native_r1=(%{public}.3f,%{public}.3f,%{public}.3f,%{public}.3f) "
+                    "sample_r0=(%{public}.3f,%{public}.3f,%{public}.3f,%{public}.3f) "
+                    "sample_r1=(%{public}.3f,%{public}.3f,%{public}.3f,%{public}.3f)",
+                    zeroCopyVulkanSource_ ? "vulkan" : "virgl",
+                    zeroCopyVulkanSource_ ? "yes" : "no",
+                    zeroCopyTransform_[0], zeroCopyTransform_[4],
+                    zeroCopyTransform_[8], zeroCopyTransform_[12],
+                    zeroCopyTransform_[1], zeroCopyTransform_[5],
+                    zeroCopyTransform_[9], zeroCopyTransform_[13],
+                    zeroCopySamplingTransform_[0], zeroCopySamplingTransform_[4],
+                    zeroCopySamplingTransform_[8], zeroCopySamplingTransform_[12],
+                    zeroCopySamplingTransform_[1], zeroCopySamplingTransform_[5],
+                    zeroCopySamplingTransform_[9], zeroCopySamplingTransform_[13]);
     }
 
     zeroCopyConsecutiveFailures_ = 0;
@@ -592,6 +636,7 @@ void EglRenderer::ReleaseZeroCopyBinding()
     zeroCopySurfaceId_ = 0;
     zeroCopySourceW_ = 0;
     zeroCopySourceH_ = 0;
+    zeroCopyVulkanSource_ = false;
 }
 
 void EglRenderer::ShutdownZeroCopyConsumer()
@@ -950,7 +995,8 @@ void EglRenderer::RenderLoop() {
             glUseProgram(zeroCopyProgram_);
             glBindTexture(GL_TEXTURE_EXTERNAL_OES, zeroCopyTexture_);
             glUniform1i(glGetUniformLocation(zeroCopyProgram_, "uTex"), 0);
-            glUniformMatrix4fv(zeroCopyTransformLocation_, 1, GL_FALSE, zeroCopyTransform_);
+            glUniformMatrix4fv(zeroCopyTransformLocation_, 1, GL_FALSE,
+                               zeroCopySamplingTransform_);
             glDrawArrays(GL_TRIANGLES, 0, 6);
         }
 
