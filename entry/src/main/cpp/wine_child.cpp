@@ -329,6 +329,20 @@ static void apply_entry_param_env_overrides(const std::vector<std::string>& envO
     }
 }
 
+static void log_d3d_environment_summary()
+{
+    const char* profile = getenv("WINEHUA_PERF_PROFILE");
+    const char* logPath = getenv("DXVK_LOG_PATH");
+    const char* dumpPath = getenv("DXVK_SHADER_DUMP_PATH");
+    const char* traceSampled = getenv("DXVK_WINEHUA_TRACE_SAMPLED");
+    const char* traceFlow = getenv("DXVK_WINEHUA_TRACE_FLOW");
+    OH_LOG_INFO(LOG_APP,
+                "[WineChild] final D3D env profile=%{public}s logPath=%{public}s dumpPath=%{public}s "
+                "traceSampled=%{public}s traceFlow=%{public}s",
+                profile ? profile : "", logPath ? logPath : "", dumpPath ? dumpPath : "",
+                traceSampled ? traceSampled : "", traceFlow ? traceFlow : "");
+}
+
 extern "C" void Main(NativeChildProcess_Args args)
 {
     OH_LOG_INFO(LOG_APP, "[WineChild] Main() ENTER pid=%{public}d entryParams=%{public}s",
@@ -428,7 +442,11 @@ extern "C" void Main(NativeChildProcess_Args args)
         }
     }
 
-    // Step B: 应用转发来的 guest 环境变量 (覆盖 baseline, 复刻 fork+exec 继承)
+    // Step B: entryParams 中的兼容性覆盖先应用；完整 env blob 最后应用，
+    // 这样调用方传入的诊断/DXVK 变量不会被 Broker 的 session 默认值覆盖。
+    apply_entry_param_env_overrides(envOverrides);
+
+    // Step C: 应用转发来的 guest 环境变量 (覆盖 baseline 和 entryParams)
     if (envBuf && envBufLen > 0) {
         char *p = envBuf, *end = envBuf + envBufLen;
         int applied = 0;
@@ -446,7 +464,7 @@ extern "C" void Main(NativeChildProcess_Args args)
         free(envBuf);
     }
 
-    apply_entry_param_env_overrides(envOverrides);
+    log_d3d_environment_summary();
 
     // 覆盖 per-process fd 变量 (转发 env 中的是父进程 fd 号, 本进程无效)
     // 等价于 fork+exec 路径中 exec_wineloader 的 putenv("WINESERVERSOCKET")

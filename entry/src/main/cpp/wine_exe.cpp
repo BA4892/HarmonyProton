@@ -176,7 +176,8 @@ static std::string NativePathToWindows(const std::string& path, const std::strin
     return result;
 }
 
-static pid_t SpawnViaBroker(const std::string& entryParams)
+static pid_t SpawnViaBroker(const std::string& entryParams,
+                            const std::vector<std::string>& environment)
 {
     const char* brokerPath = getenv("PROCESSBROKER");
     if (!brokerPath || !brokerPath[0]) brokerPath = WINE_BROKER_SOCKET;
@@ -199,14 +200,28 @@ static pid_t SpawnViaBroker(const std::string& entryParams)
     }
 
     static constexpr char header[] = "SPAWN\n";
-    iovec iov[3] = {
+    std::string envBlob;
+    for (const std::string& line : environment) {
+        if (line.find('\0') != std::string::npos || line.find('|') != std::string::npos ||
+            line.find('\n') != std::string::npos || line.find('\r') != std::string::npos)
+            continue;
+        envBlob.append(line);
+        envBlob.push_back('\0');
+    }
+    std::string envHeader;
+    if (!envBlob.empty())
+        envHeader = "ENV:" + std::to_string(envBlob.size()) + "\n";
+    std::string requestTail = entryParams + "\n" + envHeader;
+    static constexpr char empty[] = "";
+    iovec iov[4] = {
         {const_cast<char*>(header), sizeof(header) - 1},
-        {const_cast<char*>(entryParams.data()), entryParams.size()},
-        {const_cast<char*>("\n"), 1},
+        {const_cast<char*>(requestTail.data()), requestTail.size()},
+        {const_cast<char*>(envBlob.empty() ? empty : envBlob.data()), envBlob.size()},
+        {const_cast<char*>(""), 0},
     };
     msghdr message = {};
     message.msg_iov = iov;
-    message.msg_iovlen = 3;
+    message.msg_iovlen = envBlob.empty() ? 2 : 3;
     if (sendmsg(brokerFd, &message, MSG_NOSIGNAL) < 0)
     {
         close(brokerFd);
@@ -315,9 +330,8 @@ static pid_t SpawnWineProgram(const ProgramOptions& options)
     std::string entryParams = binDir + "|wine|" + exePath;
 #endif
     for (const std::string& arg : options.argv) entryParams += "|" + arg;
-    AppendMissingEntryParamsEnvOverrides(entryParams, envStrs);
 
-    const pid_t pid = SpawnViaBroker(entryParams);
+    const pid_t pid = SpawnViaBroker(entryParams, envStrs);
     if (pid <= 0) return -1;
     AddProcess(pid, options.windowsExePath, -1);
     OH_LOG_INFO(LOG_APP,
@@ -397,9 +411,8 @@ static pid_t SpawnGuestProgram(const GuestProgramOptions& options)
 
     std::string entryParams = binDir + "|__winehua_guest_elf__|" + options.executablePath;
     for (const std::string& arg : options.argv) entryParams += "|" + arg;
-    AppendMissingEntryParamsEnvOverrides(entryParams, envStrs);
 
-    const pid_t pid = SpawnViaBroker(entryParams);
+    const pid_t pid = SpawnViaBroker(entryParams, envStrs);
     if (pid <= 0) return -1;
     AddProcess(pid, options.executablePath, -1);
     OH_LOG_INFO(LOG_APP, "[GuestProgram] pid=%{public}d elf=%{public}s icd=%{public}s",

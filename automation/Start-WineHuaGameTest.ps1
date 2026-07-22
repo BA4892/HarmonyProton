@@ -117,20 +117,24 @@ if ($GamePath) {
         '--ps', 'winehua.perf_profile', $PerfProfile,
         '--ps', 'winehua.game_path', $wantGamePath,
         '--pi', 'winehua.game_argc', [string]$GameArguments.Count,
-        '--ps', 'winehua.game_args_json',
-        [Uri]::EscapeDataString($gameArgumentsJson),
-        '--pi', 'winehua.d3d_env_count', [string]$environmentPairs.Count,
-        '--ps', 'winehua.click_title_prefix', $ClickTitlePrefix,
-        '--ps', 'winehua.click_button_text', $ClickButtonText,
-        '--pi', 'winehua.click_delay_ms', [string]$ClickDelayMs,
-        '--pi', 'winehua.click_client_x_permille', [string]$ClickClientXPermille,
-        '--pi', 'winehua.click_client_y_permille', [string]$ClickClientYPermille)
+        '--pi', 'winehua.d3d_env_count', [string]$environmentPairs.Count)
+    # Keep explicit D3D overrides near the front of the Want.  aa start has a
+    # finite parameter budget and silently drops tail parameters; Heaven's
+    # long argv and click options otherwise caused trace variables to vanish.
     for ($index = 0; $index -lt $environmentPairs.Count; ++$index) {
         $key = [string]$environmentPairs[$index].Key
         $escapedValue = ([string]$environmentPairs[$index].Value).Replace('\', '\\')
         $startArguments += @('--ps', "winehua.d3d_env_key$index", $key,
             '--ps', "winehua.d3d_env_value$index", $escapedValue)
     }
+    $startArguments += @(
+        '--ps', 'winehua.game_args_json',
+        [Uri]::EscapeDataString($gameArgumentsJson),
+        '--ps', 'winehua.click_title_prefix', $ClickTitlePrefix,
+        '--ps', 'winehua.click_button_text', $ClickButtonText,
+        '--pi', 'winehua.click_delay_ms', [string]$ClickDelayMs,
+        '--pi', 'winehua.click_client_x_permille', [string]$ClickClientXPermille,
+        '--pi', 'winehua.click_client_y_permille', [string]$ClickClientYPermille)
     $output = & $hdc @startArguments
 } else {
     $output = & $hdc -t $DeviceId shell aa start -a EntryAbility -b $bundle `

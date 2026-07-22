@@ -400,6 +400,11 @@ struct Index {
     } else if (this.perfProfileText === 'shadow-trace') {
       environment['VKR_WINEHUA_SHADOW_FROM_HOST'] = 'full';
       environment['VKR_WINEHUA_SHADOW_TRACE'] = '1';
+      /* A game Want cannot reliably carry arbitrary env arrays on all
+       * Harmony builds. Reuse the explicit diagnostic profile as a bounded
+       * trace switch so Heaven render-pass investigation is reproducible. */
+      environment['DXVK_WINEHUA_TRACE_SAMPLED'] = '1';
+      environment['DXVK_WINEHUA_TRACE_FLOW'] = '1';
     } else if (this.perfProfileText === 'shadow-to-host-explicit') {
       environment['VKR_WINEHUA_SHADOW_FROM_HOST'] = 'to-host-explicit';
       environment['VKR_WINEHUA_SHADOW_TRACE'] = '0';
