@@ -7,6 +7,68 @@
 > code. Update it whenever a conclusion, gate result, commit, HAP, or primary
 > blocker changes.
 
+### 2026-07-23 Heaven Host constant-buffer identity result (current)
+
+The Host-side Venus buffer identity trace is now implemented and committed:
+
+    virglrenderer: e37023d3 venus: trace host constant buffer identity
+    main:          7e2c254  submodule: add Venus constant buffer tracing
+
+It records the Guest `VkBuffer`, Host `VkBuffer`, bound Guest/Host memory,
+descriptor offset/range, absolute allocation offset, and matching FNV-1a hashes
+from the OHOS shadow and Host mapped memory. Hashing is diagnostic-only under
+`WINEHUA_VKR_TRACE_SAMPLED=1`; the normal product profile does not pay this
+cost.
+
+The ARM64 native/HAP build passed. The validated artifact is:
+
+    HAP SHA-256:
+      2ccfd619576dcb599e1f7db42236c43fe471c4d13b7e3e99cce56c2544ca3eba
+    embedded wine-data.zip:
+      matches 35beaa3e8b297949cd126d6adda97fa576dffdcee37b2de1b7d03186d8c8cd7a
+    Guest EGL: x86-64
+    Host libentry.so: AArch64
+
+The ordinary `shadow-precise-strong-ring` DXVK reuse suite remains PASS:
+
+    D:\MyProject\winehua-logs\automation\phase2-20260723-184718
+
+The real Heaven `shadow-trace` run reproduced the black/missing scene while
+the Host buffer trace produced:
+
+    D:\MyProject\winehua-logs\manual\heaven-cbtrace-20260723-1853
+
+    buffer descriptor records: 8429
+    distinct Guest buffers:    741
+    uniform buffer (type 6):   7221
+    dynamic uniform (type 8):  1208
+    hashEqual:                 8429
+    hashMismatch:              0
+    unavailable/invalid/empty: 0
+
+This substantially rules out Guest shadow to Host mapped-memory corruption,
+wrong buffer-memory binding, and descriptor offset overflow as the Heaven
+root cause at descriptor update time. Together with the earlier descriptor,
+dynamic-offset, image-identity, barrier, and conservative full-sync results,
+do not continue changing shadow synchronization for correctness.
+
+The remaining P0 is the ordinary pass-2 material shader, especially
+`FS_56289d3e1ccd04a77c3d954c5ea8fe76a545a831`. Its pre-remap dump validates,
+uses six ordinary implicit-LOD samples, and requests float-control execution
+modes. Capture the final binary after binding remap and bool-specialization
+freezing, then replay or reduce that exact binary on Venus and a conformant
+reference implementation. If the final binary succeeds in isolated Venus,
+resume draw-time resource-state/command-order correlation; if it fails only on
+Maleoon/Venus, add a narrow capability/driver quirk and a dedicated regression
+smoke rather than relaxing Vulkan behavior globally.
+
+The current game launcher still serializes each environment override as two
+Want parameters. On this device, a larger trace request can be silently
+truncated and HDC can return success without starting the Ability. Pack the
+environment map as one URI-encoded JSON parameter, as already done for game
+argv, before relying on arbitrary trace overrides for automated exact replay.
+This is an automation defect, not evidence for the rendering failure.
+
 ### 2026-07-23 Heaven mini-pipeline and Sarek strategy update (current)
 
 The D3D11 smoke now includes a combined Heaven-style mini pipeline rather than
