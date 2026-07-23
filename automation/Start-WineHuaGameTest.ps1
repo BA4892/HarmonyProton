@@ -83,6 +83,14 @@ foreach ($pair in $environmentPairs) {
         throw "D3D environment value is too long: $key"
     }
 }
+$environmentPayload = @($environmentPairs | ForEach-Object {
+    [ordered]@{
+        key = [string]$_.Key
+        value = [string]$_.Value
+    }
+})
+$environmentJson = ConvertTo-Json -InputObject $environmentPayload -Compress
+$encodedEnvironmentJson = [Uri]::EscapeDataString($environmentJson)
 
 & $hdc -t $DeviceId shell aa force-stop $bundle | Out-Null
 $stopped = $false
@@ -117,16 +125,9 @@ if ($GamePath) {
         '--ps', 'winehua.perf_profile', $PerfProfile,
         '--ps', 'winehua.game_path', $wantGamePath,
         '--pi', 'winehua.game_argc', [string]$GameArguments.Count,
-        '--pi', 'winehua.d3d_env_count', [string]$environmentPairs.Count)
-    # Keep explicit D3D overrides near the front of the Want.  aa start has a
-    # finite parameter budget and silently drops tail parameters; Heaven's
-    # long argv and click options otherwise caused trace variables to vanish.
-    for ($index = 0; $index -lt $environmentPairs.Count; ++$index) {
-        $key = [string]$environmentPairs[$index].Key
-        $escapedValue = ([string]$environmentPairs[$index].Value).Replace('\', '\\')
-        $startArguments += @('--ps', "winehua.d3d_env_key$index", $key,
-            '--ps', "winehua.d3d_env_value$index", $escapedValue)
-    }
+        # A single encoded JSON value avoids aa start's finite Want-parameter
+        # count silently dropping one or more environment key/value pairs.
+        '--ps', 'winehua.d3d_env_json', $encodedEnvironmentJson)
     $startArguments += @(
         '--ps', 'winehua.game_args_json',
         [Uri]::EscapeDataString($gameArgumentsJson),
@@ -141,7 +142,24 @@ if ($GamePath) {
         --ps winehua.d3d_backend $D3DBackend `
         --ps winehua.perf_profile $PerfProfile
 }
-if ($LASTEXITCODE -ne 0) { throw "WineHua start failed: $($output -join ' ')" }
+$startExitCode = $LASTEXITCODE
+$outputText = ($output -join "`n").Trim()
+if ($startExitCode -ne 0 -or $outputText -notmatch 'start ability successfully') {
+    throw "WineHua start failed (exit=$startExitCode): $outputText"
+}
+
+$startedPid = ''
+for ($attempt = 0; $attempt -lt 25; ++$attempt) {
+    $pidOutput = @(& $hdc -t $DeviceId shell pidof $bundle 2>$null)
+    if ($LASTEXITCODE -eq 0) {
+        $startedPid = ($pidOutput -join ' ').Trim()
+        if ($startedPid) { break }
+    }
+    Start-Sleep -Milliseconds 200
+}
+if (-not $startedPid) {
+    throw "WineHua start reported success but no process appeared: $outputText"
+}
 
 Write-Host "WineHua desktop requested with D3D backend: $D3DBackend"
 Write-Host "Performance profile: $PerfProfile"
@@ -153,6 +171,7 @@ if ($GamePath) {
     Write-Host "Game argument count: $($GameArguments.Count)"
     if ($environmentPairs.Count -gt 0) {
         Write-Host "D3D environment overrides: $((@($environmentPairs | ForEach-Object Key)) -join ', ')"
+        Write-Host "D3D environment transport: encoded JSON ($($environmentPairs.Count) entries)"
     }
     if ($ClickTitlePrefix) {
         Write-Host "Automatic click: '$ClickButtonText' in '$ClickTitlePrefix*' after ${ClickDelayMs}ms"
@@ -163,3 +182,4 @@ if ($GamePath) {
 } else {
     Write-Host "Launch the DX11 game from the Wine desktop Explorer; its managed DXVK overlay is inherited by the game."
 }
+Write-Host "WineHua PID: $startedPid"

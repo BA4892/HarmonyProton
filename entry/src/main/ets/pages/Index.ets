@@ -602,9 +602,10 @@ struct Index {
       automationMode: false
     }) as ProcessInfo;
     hilog.info(DOMAIN, 'GameTest',
-      'game launch path=%{public}s argc=%{public}d backend=%{public}s perf=%{public}s '
+      'game launch path=%{public}s argc=%{public}d env=%{public}d backend=%{public}s perf=%{public}s '
         + 'pid=%{public}d status=%{public}s',
-      gamePath, this.gameArguments.length, this.d3dBackend, this.perfProfileText,
+      gamePath, this.gameArguments.length, this.d3dEnvKeys.length,
+      this.d3dBackend, this.perfProfileText,
       result.pid, result.state);
     if (this.gameClickTitlePrefix.length > 0 && this.gameClickButtonText.length > 0) {
       const titlePrefix = this.gameClickTitlePrefix;

@@ -5,6 +5,11 @@ import { WineWindowManager } from '../service/WineWindowManager';
 
 const DOMAIN = 0x0000;
 
+interface D3dEnvironmentEntry {
+  key: string;
+  value: string;
+}
+
 export default class EntryAbility extends UIAbility {
   private contentPage: string = 'pages/Index';
 
@@ -63,20 +68,46 @@ export default class EntryAbility extends UIAbility {
         gameArguments.push(value(`winehua.game_arg${index}`, ''));
       }
     }
-    const requestedD3dEnvCount = Number(value('winehua.d3d_env_count', '0'));
-    const d3dEnvCount = Math.max(0, Math.min(32, Math.floor(requestedD3dEnvCount)));
     const d3dEnvKeys: string[] = [];
     const d3dEnvValues: string[] = [];
-    for (let index = 0; index < d3dEnvCount; ++index) {
-      const key = value(`winehua.d3d_env_key${index}`, '');
-      const envValue = value(`winehua.d3d_env_value${index}`, '');
-      if (!/^(WINEDEBUG|DXVK_|VN_|VKR_|WINEHUA_DXVK_)[A-Za-z0-9_]*$/.test(key) || envValue.length > 1024) {
-        hilog.warn(DOMAIN, 'GameTest', 'ignoring invalid D3D environment key=%{public}s', key);
-        continue;
+    const appendD3dEnvironment = (key: string, envValue: string): void => {
+      if (!/^(WINEDEBUG|DXVK_|VN_|VKR_|WINEHUA_DXVK_)[A-Za-z0-9_]*$/.test(key) ||
+        envValue.length > 1024 || d3dEnvKeys.length >= 32) {
+        hilog.warn(DOMAIN, 'GameTest',
+          'ignoring invalid D3D environment key=%{public}s', key);
+        return;
       }
       d3dEnvKeys.push(key);
       d3dEnvValues.push(envValue);
+    };
+    const encodedD3dEnvironment = value('winehua.d3d_env_json', '');
+    let decodedD3dEnvironment = false;
+    if (encodedD3dEnvironment.length > 0) {
+      try {
+        const parsed: D3dEnvironmentEntry[] =
+          JSON.parse(decodeURIComponent(encodedD3dEnvironment)) as D3dEnvironmentEntry[];
+        if (Array.isArray(parsed)) {
+          for (const entry of parsed) {
+            if (entry && typeof entry.key === 'string' && typeof entry.value === 'string') {
+              appendD3dEnvironment(entry.key, entry.value);
+            }
+          }
+          decodedD3dEnvironment = true;
+        }
+      } catch (err) {
+        hilog.warn(DOMAIN, 'GameTest', 'invalid encoded D3D environment JSON');
+      }
     }
+    if (!decodedD3dEnvironment) {
+      const requestedD3dEnvCount = Number(value('winehua.d3d_env_count', '0'));
+      const d3dEnvCount = Math.max(0, Math.min(32, Math.floor(requestedD3dEnvCount)));
+      for (let index = 0; index < d3dEnvCount; ++index) {
+        appendD3dEnvironment(value(`winehua.d3d_env_key${index}`, ''),
+          value(`winehua.d3d_env_value${index}`, ''));
+      }
+    }
+    hilog.info(DOMAIN, 'GameTest', 'D3D environment decoded source=%{public}s count=%{public}d',
+      decodedD3dEnvironment ? 'json' : 'legacy', d3dEnvKeys.length);
     const clickTitlePrefix = value('winehua.click_title_prefix', '');
     const clickButtonText = value('winehua.click_button_text', '');
     const requestedClickDelayMs = Number(value('winehua.click_delay_ms', '1500'));
