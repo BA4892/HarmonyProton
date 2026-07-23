@@ -7,6 +7,61 @@
 > code. Update it whenever a conclusion, gate result, commit, HAP, or primary
 > blocker changes.
 
+### 2026-07-23 Heaven mini-pipeline and Sarek strategy update (current)
+
+The D3D11 smoke now includes a combined Heaven-style mini pipeline rather than
+only isolated feature probes:
+
+    3 x MRT + writable D24
+      -> G-buffer and depth SRV
+      -> RGBA16F lighting
+      -> half-resolution bloom/downsample
+      -> tone-map to R8G8B8A8
+
+The physical ARM64 device passed this path in both x86 and x64 Wine:
+
+    Session: phase2-20260723-124318
+    Archive: D:\MyProject\winehua-logs\automation\phase2-20260723-124318
+    Wine commit: 5903b075e31
+    Main gitlink commit: 8c5cfb7
+    HAP SHA-256:
+      129a74728bd44f0a2eb255c1acd733282edae3cafc41fa1d7768bbe9be5c3644
+
+    x86 duration: 10888 ms
+    x64 duration:  9689 ms
+    mini values:
+      0xff0c0c84, 0xff17a717, 0xffbb2121, 0xffc7c7c7
+    mini mismatches: 0
+    fallbackDetected: false
+    visible cube: 545 frames, angleRegressions=0
+
+This rules out the basic combination of MRT ordering, D24 render/SRV use,
+RGBA16F lighting, bloom downsample, and tone mapping as a sufficient
+explanation for Heaven's corruption. Do not keep expanding generic smoke before
+capturing evidence from the real workload. The next diagnostic is a gated dump
+of one selected Heaven frame, with per-pass attachment metadata and selected
+intermediate images. Locate the first incorrect G-buffer, depth/shadow, HDR,
+bloom, pre-tone-map, or final image and fix only that contract.
+
+Proton-Sarek and DXVK-Sarek were reviewed as compatibility references. Adopt
+their narrow GPU/driver quirk principle, but do not copy their broad feature
+optionalization into WineHua Stable. In particular:
+
+* The Mali unbound-texture optimization change is useful only as an
+  environment-controlled Heaven A/B until real-frame evidence proves it fixes
+  the scene.
+* Missing capabilities must remain classified as native, semantically
+  emulated, or unsupported. Merely allowing D3D11 device creation does not
+  implement the missing feature.
+* Do not use `MESA_VK_VERSION_OVERRIDE=1.4`, ignored/relaxed barriers, or broad
+  optional feature declarations as product defaults.
+* A future Legacy Compatibility/Aggressive mode may prioritize startup and
+  record visual-risk warnings, but it remains separate from Stable correctness.
+
+The existing WineHua bool-specialization, BC expansion, custom-border, and
+Maleoon CubeArray Dref paths follow the desired narrow, test-backed model and
+remain unchanged.
+
 ### 2026-07-23 BC4/BC5 matrix and physical-device automation update (current)
 
 The BC compatibility smoke now covers BC1, BC3, BC4, and BC5 in UNORM/SRGB or
