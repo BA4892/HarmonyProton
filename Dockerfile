@@ -32,8 +32,12 @@ RUN ln -sf /usr/lib/x86_64-linux-gnu/libxml2.so.16 /usr/lib/x86_64-linux-gnu/lib
 WORKDIR /data/src/winehua
 
 # 使用时挂载:
-#   -v /path/to/wineohos:/data/src/winehua          (项目源码)
-#   -v /path/to/harmony-sdk:/apps/harmony             (OHOS SDK)
+#   -v /path/to/wineohos:/data/src/winehua                  (项目源码)
+#   -v /path/to/harmony-sdk:/apps/harmony                   (OHOS SDK)
+# 可选: 从 Windows/DevEco Studio 直接导入签名, 免去复制到 WSL
+#   -v /mnt/c/path/to/deveco_project:/mnt/user-profile      (含 build-profile.json5 的工程目录)
+#   -v /mnt/c/path/to/signature_dir:/mnt/user-signature     (含 .cer / .p7b / .p12 的目录)
+# 两者需同时挂载才生效; 缺失任一则回退到项目内置 build-profile.json5.
 #
 # 构建:
 #   docker run --rm -v $(pwd):/data/src/winehua -v ~/huawei/command-line-tools:/apps/harmony \

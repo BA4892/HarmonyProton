@@ -5,6 +5,61 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/env.sh"
 
 # ============================================================
+# 工具函数: 从用户挂载目录导入 build-profile.json5 + 签名材料
+# 挂载约定 (二者需同时存在, 否则回退到项目自带模板):
+#   -v C:\path\to\winehua_project:/mnt/user-profile
+#   -v C:\path\to\signature_dir:/mnt/user-signature
+# ============================================================
+USER_PROFILE_DIR="${USER_PROFILE_DIR:-/mnt/user-profile}"
+USER_SIGNATURE_DIR="${USER_SIGNATURE_DIR:-/mnt/user-signature}"
+
+import_user_profile() {
+    local src_profile="$USER_PROFILE_DIR/build-profile.json5"
+    local dst_profile="$WINEHUA/build-profile.json5"
+
+    if [ ! -f "$src_profile" ] || [ ! -d "$USER_SIGNATURE_DIR" ]; then
+        log "未检测到用户挂载 (profile=$src_profile, signature=$USER_SIGNATURE_DIR)"
+        log "  → 使用项目内置 build-profile.json5"
+        return 0
+    fi
+
+    log "=== 检测到用户挂载, 导入 build-profile.json5 + 签名材料 ==="
+    log "  profile   : $src_profile"
+    log "  signature : $USER_SIGNATURE_DIR"
+
+    cp "$src_profile" "$dst_profile"
+
+    python3 - "$dst_profile" "$USER_SIGNATURE_DIR" <<'PY'
+import re, sys
+
+profile_path, sig_dir = sys.argv[1:]
+sig_dir = sig_dir.rstrip("/")
+
+with open(profile_path, "r", encoding="utf-8") as f:
+    content = f.read()
+
+# 仅重写签名材料三件套的路径, 其他字段 (buildOption 之类) 一律不碰
+pattern = re.compile(r'("(?:certpath|profile|storeFile)"\s*:\s*)"([^"]+)"')
+
+def rewrite(m):
+    prefix, value = m.group(1), m.group(2)
+    # 按正/反斜杠切分, 过滤空段, 取最后一段作为文件名
+    parts = [p for p in re.split(r'[\\/]+', value) if p]
+    fname = parts[-1] if parts else value
+    new_path = f"{sig_dir}/{fname}"
+    print(f"  rewrite: {value}  ->  {new_path}", file=sys.stderr)
+    return f'{prefix}"{new_path}"'
+
+content = pattern.sub(rewrite, content)
+
+with open(profile_path, "w", encoding="utf-8") as f:
+    f.write(content)
+PY
+
+    log "build-profile.json5 导入完成"
+}
+
+# ============================================================
 # 工具函数: 同步根 build-profile 的 SDK 版本
 set_sdk_versions() {
     local profile="$WINEHUA/build-profile.json5"
@@ -78,6 +133,7 @@ package_hap() {
     local unsigned_hap="$WINEHUA/entry/build/default/outputs/default/entry-default-unsigned.hap"
     local signed_hap="$WINEHUA/entry/build/default/outputs/default/entry-default-signed.hap"
 
+    import_user_profile     # <-- 优先使用用户挂载的 profile + 签名
     set_sdk_versions
     set_abi_filters
 
