@@ -31,6 +31,9 @@ add_library(entry SHARED
     wine_exe.cpp
     wine_mmap_test.cpp
     broker.cpp
+    ncp_dispatch.cpp
+    phone_adapter/phone_process.cpp
+    phone_adapter/phone_virgl_relay.cpp
     wayland_server.cpp
     egl_renderer.cpp
     plugin_manager.cpp
@@ -63,6 +66,7 @@ target_link_libraries(wine_child PUBLIC libhilog_ndk.z.so libchild_process.so)
 add_library(virgl_child SHARED
     virgl_child.cpp
     virgl_surface_presenter.cpp
+    phone_adapter/phone_virgl_dispatch.cpp
 )
 target_link_libraries(virgl_child PUBLIC
     libEGL.so

@@ -4,8 +4,42 @@
 #include "wayland_server.h"
 
 #include <AbilityKit/native_child_process.h>
+#include "phone_adapter/phone_adapter.h"
 #include <IPCKit/ipc_kit.h>
 #include <native_window/external_window.h>
+#include "virgl_ipc_protocol.h"
+
+// ---- 与 OH_IPCRemoteProxy_* 签名兼容的包装：真 proxy 走原 API，dummy 走 socket relay ----
+static int SendVirglRequestLocked(OHIPCRemoteProxy* proxy, uint32_t code,
+                                  const OHIPCParcel* data, OHIPCParcel* reply,
+                                  OH_IPC_MessageOption* option) {
+    if (!PhoneAdapter_IsDummyProxy(proxy)) {
+        return OH_IPCRemoteProxy_SendRequest(proxy, code, data, reply, option);
+    }
+    if (code == winehua::virgl_ipc::kAttachSurfaceRequest) {
+        // OHNativeWindow 依赖 Binder 跨进程，手机 fork 路径下不可达 → 伪造失败，走 shm
+        OH_LOG_WARN(LOG_APP, "[PhoneVirgl] AttachSurface denied in phone mode, fallback to shm");
+        if (reply) OH_IPCParcel_WriteInt32(reply, kPhoneVirglAttachDenied);
+        return OH_IPC_SUCCESS;
+    }
+    return PhoneVirgl_RelayRequest(code, data, reply);  // → phone_adapter/phone_virgl_relay.cpp
+}
+
+static void VirglProxyDestroy(OHIPCRemoteProxy* proxy) {
+    if (PhoneAdapter_IsDummyProxy(proxy)) return;   // dummy proxy 的 socket 由手机适配层管理
+    OH_IPCRemoteProxy_Destroy(proxy);
+}
+
+static int VirglProxyIsRemoteDead(OHIPCRemoteProxy* proxy) {
+    if (!PhoneAdapter_IsDummyProxy(proxy)) return OH_IPCRemoteProxy_IsRemoteDead(proxy);
+    int fd = PhoneAdapter_GetConfigSocket();
+    if (fd < 0) return 1;
+    char c;
+    ssize_t n = recv(fd, &c, 1, MSG_PEEK | MSG_DONTWAIT);
+    if (n == 0) return 1;
+    if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) return 1;
+    return 0;
+}
 
 #include "virgl_ipc_protocol.h"
 
@@ -261,7 +295,7 @@ void GraphicsBroker::OnVirglIpcProcessStarted(int errorCode, OHIPCRemoteProxy* r
     broker.virglIpcError_ = errorCode;
     if (!broker.virglIpcAcceptCallback_ || errorCode != NCP_NO_ERROR || !remoteProxy)
     {
-        if (remoteProxy) OH_IPCRemoteProxy_Destroy(remoteProxy);
+        if (remoteProxy) VirglProxyDestroy(remoteProxy);
         broker.virglIpcConfigured_ = false;
         broker.virglIpcCallbackComplete_ = true;
         lock.unlock();
@@ -269,7 +303,7 @@ void GraphicsBroker::OnVirglIpcProcessStarted(int errorCode, OHIPCRemoteProxy* r
         return;
     }
 
-    if (broker.virglRemoteProxy_) OH_IPCRemoteProxy_Destroy(broker.virglRemoteProxy_);
+    if (broker.virglRemoteProxy_) VirglProxyDestroy(broker.virglRemoteProxy_);
     broker.virglRemoteProxy_ = remoteProxy;
     broker.virglIpcConfigured_ = broker.SendVirglConfigureLocked();
     broker.virglIpcCallbackComplete_ = true;
@@ -306,7 +340,7 @@ bool GraphicsBroker::SendVirglConfigureLocked()
     if (writeResult == OH_IPC_SUCCESS && reply)
     {
         OH_IPC_MessageOption option = {OH_IPC_REQUEST_MODE_SYNC, 0, nullptr};
-        sendResult = OH_IPCRemoteProxy_SendRequest(
+        sendResult = SendVirglRequestLocked(
             virglRemoteProxy_, virgl_ipc::kConfigureRequest,
             request, reply, &option);
         if (sendResult == OH_IPC_SUCCESS)
@@ -342,7 +376,7 @@ bool GraphicsBroker::SendVirglTargetLocked(uint64_t surfaceKey,
     if (writeResult == OH_IPC_SUCCESS && reply)
     {
         OH_IPC_MessageOption option = {OH_IPC_REQUEST_MODE_SYNC, 0, nullptr};
-        sendResult = OH_IPCRemoteProxy_SendRequest(
+        sendResult = SendVirglRequestLocked(
             virglRemoteProxy_, virgl_ipc::kAttachSurfaceRequest,
             request, reply, &option);
         if (sendResult == OH_IPC_SUCCESS)
@@ -381,7 +415,7 @@ bool GraphicsBroker::SendVirglFramePeriodLocked(uint64_t surfaceKey,
     if (writeResult == OH_IPC_SUCCESS && reply)
     {
         OH_IPC_MessageOption option = {OH_IPC_REQUEST_MODE_SYNC, 0, nullptr};
-        sendResult = OH_IPCRemoteProxy_SendRequest(
+        sendResult = SendVirglRequestLocked(
             virglRemoteProxy_, virgl_ipc::kSetFramePeriodRequest,
             request, reply, &option);
         if (sendResult == OH_IPC_SUCCESS)
@@ -410,7 +444,7 @@ bool GraphicsBroker::SendVirglDetachLocked(uint64_t surfaceKey)
     if (writeResult == OH_IPC_SUCCESS && reply)
     {
         OH_IPC_MessageOption option = {OH_IPC_REQUEST_MODE_SYNC, 0, nullptr};
-        sendResult = OH_IPCRemoteProxy_SendRequest(
+        sendResult = SendVirglRequestLocked(
             virglRemoteProxy_, virgl_ipc::kDetachSurfaceRequest,
             request, reply, &option);
         if (sendResult == OH_IPC_SUCCESS)
@@ -475,7 +509,7 @@ bool GraphicsBroker::QueryZeroCopySurfaces(std::vector<ZeroCopySurfaceInfo>& sur
     if (result == OH_IPC_SUCCESS && reply)
     {
         OH_IPC_MessageOption option = {OH_IPC_REQUEST_MODE_SYNC, 0, nullptr};
-        result = OH_IPCRemoteProxy_SendRequest(
+        result = SendVirglRequestLocked(
             virglRemoteProxy_, virgl_ipc::kQuerySurfacesRequest,
             request, reply, &option);
     }
@@ -557,13 +591,13 @@ void GraphicsBroker::ShutdownVirglIpc()
             OH_IPCParcel_WriteInt32(request, virgl_ipc::kProtocolVersion) == OH_IPC_SUCCESS)
         {
             OH_IPC_MessageOption option = {OH_IPC_REQUEST_MODE_SYNC, 0, nullptr};
-            OH_IPCRemoteProxy_SendRequest(
+            SendVirglRequestLocked(
                 virglRemoteProxy_, virgl_ipc::kShutdownRequest,
                 request, reply, &option);
         }
         if (reply) OH_IPCParcel_Destroy(reply);
         if (request) OH_IPCParcel_Destroy(request);
-        OH_IPCRemoteProxy_Destroy(virglRemoteProxy_);
+        VirglProxyDestroy(virglRemoteProxy_);
         virglRemoteProxy_ = nullptr;
     }
     virglIpcConfigured_ = false;
@@ -811,7 +845,7 @@ bool GraphicsBroker::IsVirglServerProcessAliveLocked()
     if (virglServerUsesIpc_)
     {
         std::lock_guard<std::mutex> lock(virglIpcMutex_);
-        if (virglRemoteProxy_ && OH_IPCRemoteProxy_IsRemoteDead(virglRemoteProxy_) == 0)
+        if (virglRemoteProxy_ && VirglProxyIsRemoteDead(virglRemoteProxy_) == 0)
             return true;
 
         lastError_ = "virgl IPC native child process is not running";

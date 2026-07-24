@@ -14,6 +14,7 @@ export const resetWinePrefix: () => void;
 export const setOutputSize: (w: number, h: number) => void;
 export const setDisplayScale: (scale: number) => void;
 export const setDesktopMode: (enabled: boolean) => void;
+export const setPhoneMode: (enabled: boolean) => void;
 export const findToplevelAt: (px: number, py: number) => number;
 export const raiseToplevel: (toplevelId: number) => void;
 export const createRenderer: (toplevelId: number, surfaceId: BigInt) => void;

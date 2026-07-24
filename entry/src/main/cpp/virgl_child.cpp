@@ -1,4 +1,5 @@
 #include <AbilityKit/native_child_process.h>
+#include "phone_adapter/phone_virgl_dispatch.h"
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES3/gl3.h>
@@ -15,6 +16,9 @@
 #include <dlfcn.h>
 #include <mutex>
 #include <unistd.h>
+#include <sys/socket.h>
+#include <cerrno>
+#include <vector>
 
 #include <cstdlib>
 #include <cstring>
@@ -272,6 +276,15 @@ extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainPr
 {
     ClearGuestGraphicsEnv();
     setenv("EGL_PLATFORM", "surfaceless", 1);
+    // 手机适配层：启动 socket dispatch 线程，替代 Binder 驱动回调
+    {
+        const char* fdEnv = getenv("WINEHUA_PHONE_CFG_FD");
+        if (fdEnv && fdEnv[0]) {
+            int fd = atoi(fdEnv);
+            OH_LOG_INFO(LOG_APP, "[PhoneVirgl] phone mode, starting dispatch on fd=%{public}d", fd);
+            PhoneVirgl_DispatchStart(fd, OnVirglIpcRequest);  // → phone_adapter/phone_virgl_dispatch.cpp
+        }
+    }
     std::unique_lock<std::mutex> lock(g_ipcChildMutex);
     const bool completed = g_ipcChildCondition.wait_for(
         lock, std::chrono::seconds(5), [] { return g_ipcChildMode != IpcChildMode::None; });

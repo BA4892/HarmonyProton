@@ -94,11 +94,11 @@ export class WineWindowManager {
     hilog.info(DOMAIN, TAG, '[MW] init: mainWindow=%{public}s ctx=%{public}s',
       this.mainWindow ? 'ok' : 'NULL', this.uiAbilityContext ? 'ok' : 'NULL');
 
-    // Tablet 检测: 桌面合成模式
-    this.isDesktopMode = deviceInfo.deviceType === 'tablet';
+    // Tablet/Phone 检测: 桌面合成模式
+    this.isDesktopMode = (deviceInfo.deviceType === 'tablet' || deviceInfo.deviceType === 'phone');
     if (this.isDesktopMode) {
       testNapi.setDesktopMode(true);
-      hilog.info(DOMAIN, TAG, '[MW] Tablet → DESKTOP MODE (single XComponent)');
+      hilog.info(DOMAIN, TAG, '[MW] Tablet/Phone → DESKTOP MODE (single XComponent)');
     } else {
       hilog.info(DOMAIN, TAG, '[MW] deviceType=%{public}s → MANAGED MODE', deviceInfo.deviceType);
     }
