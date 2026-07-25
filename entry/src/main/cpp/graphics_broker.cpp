@@ -689,7 +689,14 @@ void GraphicsBroker::Stop()
         serverPid = virglServerPid_;
         serverUsesNcp = virglServerUsesNcp_;
         serverUsesIpc = virglServerUsesIpc_;
-        if (!serverUsesInProcess)
+        if (serverUsesInProcess)
+        {
+            virglServerPid_ = -1;
+            virglServerUsesInProcess_.store(false, std::memory_order_release);
+            virglServerRunning_.store(false, std::memory_order_release);
+            virglSocketReady_ = false;
+        }
+        else
         {
             virglServerPid_ = -1;
             virglServerUsesNcp_ = false;
@@ -705,6 +712,7 @@ void GraphicsBroker::Stop()
     {
         std::lock_guard<std::mutex> ipcLock(virglIpcMutex_);
         ResetVirglInProcessSurfacesLocked();
+        if (!socketPath.empty()) unlink(socketPath.c_str());
         return;
     }
     if (serverUsesIpc)

@@ -408,10 +408,10 @@ extern "C" __attribute__((visibility("default"))) void Main(NativeChildProcess_A
 extern "C" __attribute__((visibility("default"))) int WinehuaVirgl_AttachSurfaceTarget(
     uint64_t surfaceKey, uint64_t framePeriodNs, OHNativeWindow* window)
 {
-    if (!window || OH_NativeWindow_NativeObjectReference(window) != 0) return -1;
-    const int result = winehua::AttachVirglSurfaceTarget(surfaceKey, framePeriodNs, window);
-    if (result != 0) OH_NativeWindow_NativeObjectUnreference(window);
-    return result;
+    // In-process 模式下 window 由调用方 (renderer) 持有引用，
+    // g_presenters.Attach 只借用指针，无需额外 NativeObjectReference。
+    if (!window) return -1;
+    return winehua::AttachVirglSurfaceTarget(surfaceKey, framePeriodNs, window);
 }
 
 extern "C" __attribute__((visibility("default"))) int WinehuaVirgl_DetachSurfaceTarget(
