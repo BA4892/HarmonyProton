@@ -24,25 +24,10 @@ DesktopRootManager::DesktopRootManager(ToplevelManager& tmgr,
 {
 }
 
-// -- desktop root 识别特征 --
-// 为什么保留 appId 字符串匹配而不是改用纯协议特征 (首个接近全屏的
-// toplevel): xdg_toplevel.app_id 本身就是协议提供的身份机制 (Wine 填
-// 进程名), 语义明确; 而 "首个全屏窗口" 会把抢在 explorer 桌面之前弹
-// 全屏的游戏/应用误判为 root。评估结论: 保留 appId 匹配。
-// 识别失败的兜底: root 保持 0, 全部窗口按普通 toplevel 渲染, desktop
-// 画面经 deprecated 全局 fb 路径维持可见 (MaintainDeprecatedGlobalFb)。
-static bool IsExplorerDesktopShell(const std::string& appId)
-{
-    return appId.find("explorer") != std::string::npos;
-}
-
-// 接近全屏判定: 内容尺寸 ≥ 输出的 80% (explorer 桌面窗口铺满虚拟屏;
-// 留 20% 余量吸收整数缩放/边框误差)
-static bool IsNearFullOutputSize(int32_t contentW, int32_t contentH,
-                                 int32_t outputW, int32_t outputH)
-{
-    return contentW >= outputW * 8 / 10 && contentH >= outputH * 8 / 10;
-}
+// -- desktop root 识别 --
+// Wine 侧对 #32769 窗口设置 app_id="explorer.exe.desktop-shell",
+// compositor 精确匹配即可识别。 空 title 的 desktop-shell 是非活跃
+// 的辅助窗口, 不作为 root 候选。
 
 void DesktopRootManager::SetRecognitionEnabled(bool enabled)
 {
@@ -71,10 +56,9 @@ uint32_t DesktopRootManager::PromotePending()
             return 0;
         }
         if (desktopRootToplevelId_ > 0) {
-            if (auto* oldRoot = tmgr_.FindToplevelLocked(desktopRootToplevelId_))
-                oldRoot->isBackground = true;
+            tmgr_.HideToplevelLocked(desktopRootToplevelId_);
         }
-        pst->isBackground = false;
+        tmgr_.ShowToplevelLocked(id);
         desktopRootToplevelId_ = id;
         pendingDesktopRootToplevelId_ = 0;
         pst->dirty = true;
@@ -97,37 +81,39 @@ DesktopRootManager::CheckRootLocked(SurfaceData* sd, bool isFirstCommit,
     CheckRootResult result;
     if (!isFirstCommit) return result;
 
-    uint32_t rootId = desktopRootToplevelId_;
-    bool isExplorer = IsExplorerDesktopShell(sd->appId);
-    bool isFullSize = IsNearFullOutputSize(contentW, contentH, outputW_, outputH_);
+    if (sd->appId != "explorer.exe.desktop-shell") return result;
 
-    if (!isExplorer || !isFullSize) return result;
+    // 空 title 的 desktop-shell 是非活跃的辅助窗口, 永远不作为 root 候选。
+    // (真 desktop 总会被 set_desktop_window_title 设置非空 title)
+    if (sd->title.empty()) {
+        tmgr_.HideToplevelLocked(sd->toplevelId);
+        OH_LOG_INFO(LOG_APP, "[MW] desktop-shell #%{public}u title empty, hide as background",
+                    sd->toplevelId);
+        return result;
+    }
+
+    // --- 以下 sd 是真 desktop-shell ---
+
+    uint32_t rootId = desktopRootToplevelId_;
 
     if (!recognitionEnabled_) {
-        if (!sd->title.empty()) {
-            pendingDesktopRootToplevelId_ = sd->toplevelId;
-            tmgr_.EnsureToplevelLocked(sd->toplevelId).isBackground = false;
-            OH_LOG_INFO(LOG_APP,
-                        "[MW] full-size explorer #%{public}u pending as desktop root while recognition is disabled title=%{public}s",
-                        sd->toplevelId, sd->title.c_str());
-        } else {
-            tmgr_.EnsureToplevelLocked(sd->toplevelId).isBackground = true;
-            OH_LOG_INFO(LOG_APP,
-                        "[MW] full-size explorer #%{public}u ignored while desktop root recognition is disabled (no title)",
-                        sd->toplevelId);
-        }
+        pendingDesktopRootToplevelId_ = sd->toplevelId;
+        tmgr_.ShowToplevelLocked(sd->toplevelId);
+        OH_LOG_INFO(LOG_APP,
+                    "[MW] desktop-shell #%{public}u pending (recognition disabled)",
+                    sd->toplevelId);
         return result;
     }
 
     if (rootId == 0) {
         if (pendingDesktopRootToplevelId_ > 0 &&
             pendingDesktopRootToplevelId_ != sd->toplevelId) {
-            tmgr_.EnsureToplevelLocked(sd->toplevelId).isBackground = true;
+            tmgr_.HideToplevelLocked(sd->toplevelId);
             OH_LOG_INFO(LOG_APP,
-                        "[MW] full-size explorer #%{public}u -> background, pending root #%{public}u exists",
+                        "[MW] desktop-shell #%{public}u -> background, pending root #%{public}u exists",
                         sd->toplevelId, pendingDesktopRootToplevelId_);
         } else {
-            OH_LOG_INFO(LOG_APP, "[MW] desktop root: #%{public}u appId=explorer",
+            OH_LOG_INFO(LOG_APP, "[MW] desktop root: #%{public}u appId=explorer.exe.desktop-shell",
                         sd->toplevelId);
             result.moveRendererTo = sd->toplevelId;
             desktopRootToplevelId_ = sd->toplevelId;
@@ -137,27 +123,13 @@ DesktopRootManager::CheckRootLocked(SurfaceData* sd, bool isFirstCommit,
         return result;
     }
 
-    if (!sd->title.empty()) {
-        wl_resource* oldSurf = tmgr_.GetSurfaceForToplevel(rootId);
-        auto* oldSd = oldSurf ? static_cast<SurfaceData*>(wl_resource_get_user_data(oldSurf)) : nullptr;
-        if (oldSd && oldSd->title.empty()) {
-            OH_LOG_INFO(LOG_APP, "[MW] root switch: #%{public}u (empty) -> #%{public}u (%{public}s)",
-                        rootId, sd->toplevelId, sd->title.c_str());
-            tmgr_.EnsureToplevelLocked(rootId).isBackground = true;
-            result.moveRendererFrom = rootId;
-            result.moveRendererTo = sd->toplevelId;
-            desktopRootToplevelId_ = sd->toplevelId;
-            result.fireDesktopRoot = true;
-        } else {
-            tmgr_.EnsureToplevelLocked(sd->toplevelId).isBackground = true;
-            OH_LOG_INFO(LOG_APP, "[MW] extra full-size explorer #%{public}u -> background",
-                        sd->toplevelId);
-        }
-    } else {
-        tmgr_.EnsureToplevelLocked(sd->toplevelId).isBackground = true;
-        OH_LOG_INFO(LOG_APP, "[MW] extra full-size explorer #%{public}u (no title) -> background",
-                    sd->toplevelId);
-    }
-
+    // root 已存在, 新来的真 desktop-shell 替换旧 root
+    OH_LOG_INFO(LOG_APP, "[MW] root switch: #%{public}u -> #%{public}u",
+                rootId, sd->toplevelId);
+    tmgr_.HideToplevelLocked(rootId);
+    result.moveRendererFrom = rootId;
+    result.moveRendererTo = sd->toplevelId;
+    desktopRootToplevelId_ = sd->toplevelId;
+    result.fireDesktopRoot = true;
     return result;
 }

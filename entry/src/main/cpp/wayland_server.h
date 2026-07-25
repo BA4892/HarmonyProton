@@ -208,7 +208,7 @@ private:
     bool HandleNullBufferCommit(SurfaceData* sd, wl_resource* surfRes);
     bool BeginShmAccess(SurfaceData* sd, ShmCommitInfo& fi);
     void ComputeContentArea(SurfaceData* sd, ShmCommitInfo& fi);
-    void MaintainDeprecatedGlobalFb(const ShmCommitInfo& fi);
+
     void UpdateToplevelFrameOnCommit(SurfaceData* sd, wl_resource* surfRes,
                                      ShmCommitInfo& fi, bool& outFirstCommit);
     void CheckDesktopRootOnCommit(SurfaceData* sd, ShmCommitInfo& fi, bool isFirstCommit);
@@ -242,6 +242,7 @@ private:
     DisplayPolicy policy_{};
     uint32_t desktopRootToplevelId_ = 0;
     uint32_t pendingDesktopRootToplevelId_ = 0;
+    uint32_t taskbarId_ = 0;  // app_id == "explorer.exe.taskbar", RaiseToplevel/GetWorkAreaHeight 用
     bool desktopRootRecognitionEnabled_ = true;
     // 交互式窗口移动 (xdg_toplevel.move) — 已移入 MoveGrabHandler
     MoveGrabHandler moveGrab_;

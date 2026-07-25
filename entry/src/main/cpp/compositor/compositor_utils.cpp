@@ -17,12 +17,6 @@ uint32_t GetWaylandClientPid(wl_client* client)
     return pid > 0 ? static_cast<uint32_t>(pid) : 0;
 }
 
-bool IsTaskbarLike(int top, int height, int outputHeight)
-{
-    return height > 0 && height < compositor_consts::kTaskbarMaxHeight &&
-           top + height >= outputHeight;
-}
-
 void BlitScaled(uint8_t* dst, int rootW, int rootH,
                 const uint8_t* src, int srcStride, int srcW, int srcH,
                 int dstX, int dstY, int dstW, int dstH, bool alphaBlend)

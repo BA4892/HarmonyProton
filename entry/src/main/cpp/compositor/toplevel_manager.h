@@ -94,7 +94,12 @@ public:
 
     // -- 方法 --
 
-    // toplevel 可见性 (调用方须已持有 mutex 或传入 desktopRootId)
+    // toplevel 可见性: 隐藏/显示 toplevel, 控制渲染和输入是否包含该窗口。
+    // 调用方须已持有 mutex。
+    void HideToplevelLocked(uint32_t id) { EnsureToplevelLocked(id).isBackground = true; }
+    void ShowToplevelLocked(uint32_t id) { EnsureToplevelLocked(id).isBackground = false; }
+
+    // 查询隐藏/可见状态 (桌面合成时会排除已隐藏 and 未 hidden 的窗口)。
     bool IsToplevelVisibleLocked(uint32_t id, uint32_t desktopRootId);
 
     // popup 管理 (调用方须已持有 mutex, 除非另行说明)

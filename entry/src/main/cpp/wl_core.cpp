@@ -556,19 +556,6 @@ void WaylandServer::ComputeContentArea(SurfaceData* sd, ShmCommitInfo& fi) {
     }
 }
 
-// 全局 framebuffer (deprecated) 唯一活消费场景: desktop 模式 root 未识别前,
-// 渲染循环取不到 root 帧时回退 TakeFrame (egl_renderer.cpp / graphics_broker.cpp)。
-// root 识别后渲染全部走 TakeToplevelFrame — 此后不再每次 commit
-// 维护这份全量拷贝 (省一整帧 memcpy); root 切换窗口期 id 归 0 时自动恢复维护
-void WaylandServer::MaintainDeprecatedGlobalFb(const ShmCommitInfo& fi) {
-    if (!Policy().RootCompositing() || desktopRootToplevelId_ != 0) return;
-    std::lock_guard<std::mutex> lk(mutex_);
-    CopyShmBufferTight(fi, pixels_);
-    width_ = fi.bufW;
-    height_ = fi.bufH;
-    dirty_ = true;
-}
-
 // toplevel 帧更新: 内容裁剪拷贝进 ToplevelState, 建档/首帧事件/格式事件/
 // ARGB 掩码/z-order/尺寸上报。协议上 xdg_toplevel 的首个 attach+commit
 // 完成 initial show window 语义, 首帧判定靠 hasPosition。
@@ -587,7 +574,7 @@ void WaylandServer::UpdateToplevelFrameOnCommit(SurfaceData* sd, wl_resource* su
         desktopCompositor_.IncrementDesktopRootFrameSerial();
     }
     /*
-     * 自动恢复最小化窗口: 启发式判定见 IsRestoreSizeCommit (compositor_utils.h)。
+     * 自动恢复最小化窗口: 判定逻辑见 IsRestoreSizeCommit (compositor_utils.h)。
      * 注意: 此处已持有 toplevelMutex_, 不能调 SetToplevelRestored。
      */
     if (IsRestoreSizeCommit(st.minimized, fi.contentW, fi.contentH)) {
@@ -708,6 +695,15 @@ void WaylandServer::UpdateToplevelFrameOnCommit(SurfaceData* sd, wl_resource* su
 // Desktop 模式子窗口 commit → desktop root 识别 (判定逻辑在 DesktopRootManager)
 void WaylandServer::CheckDesktopRootOnCommit(SurfaceData* sd, ShmCommitInfo& fi, bool isFirstCommit) {
     if (!Policy().RootCompositing() || !sd->hasToplevel || sd->toplevelId == desktopRootToplevelId_) return;
+
+    // 任务栏身份登记 (app_id 在 xdg_toplevel 创建时已设置, 首次 commit 即有值)
+    if (sd->appId == "explorer.exe.taskbar") {
+        if (taskbarId_ != sd->toplevelId) {
+            OH_LOG_INFO(LOG_APP, "[MW] taskbar registered: #%{public}u (was #%{public}u)",
+                        sd->toplevelId, taskbarId_);
+            taskbarId_ = sd->toplevelId;
+        }
+    }
     DesktopRootManager::CheckRootResult cr;
     {
         auto lk = toplevelMgr_.Lock();
@@ -733,14 +729,23 @@ void WaylandServer::UpdateSubsurfaceOnCommit(SurfaceData* sd, wl_resource* surfR
     }
 }
 
-// Wine 最小化时 Windows 窗口管理器将窗口移到 (-32000, -32000)。
-// 此时如果弹出 context menu (如任务栏右键菜单):
-//   winewayland.drv/wayland_surface.c:745
-//     local_x = surface->window.rect.left - toplevel->window.rect.left
-//             = 正常屏幕坐标 - (-32000) = 正常坐标 + 32000
-// compositor 收到偏了 32000 的 subsurface offset,
-// 再用 x/y (compositor 位置) 累加 → 菜单跑出屏幕。
-// 补偿: 检测 offset 超阈值时减去 32000 还原真实偏移。
+// ---- 最小化 subsurface offset 补偿 ----
+//
+// Windows 窗口管理器将最小化窗口移到 (-32000, -32000)，这是一个自 Win95 以来
+// 的既定行为——WS_MINIMIZE 是语义标记，(-32000,-32000) 是其副作用。
+// Wine 忠实地复现了这一行为；winewayland.drv 在计算 subsurface offset 时
+// 直接使用 window->rect，数学上并无错误：
+//
+//   wayland_surface.c: wayland_surface_reconfigure_client()
+//     client_x = client_rect->left + window->client_rect.left - window->rect.left
+//              = 正常屏幕坐标 - (-32000) = 正常坐标 + 32000
+//
+// 这不是 Wine 的 bug——Wine 的角色是忠实地表达 Windows 窗口系统的状态。
+// 若在 Wine 侧特判 window->minimized 排除 rect 偏移，等于在协议通道上掩盖
+// 正确的 Windows 行为，不利于其他 compositor 理解真实状态。
+//
+// 因此补偿放在 compositor 侧：检测 offset 超过阈值时减去 32000 还原。
+// 超过 16000 才算偏移是因为正常窗口坐标不会这么大（虚拟桌面极端值约 ±8000）。
 static void CompensateMinimizedSubsurfaceOffset(const ToplevelManager::ToplevelState* pst,
                                                 int32_t& sx, int32_t& sy) {
     if (pst && pst->minimized) {
@@ -999,7 +1004,6 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                     fi.bufW, fi.bufH, fi.stride, sd->pixels.size(), fi.contentW, fi.contentH,
                     sd->hasWindowGeometry ? "yes" : "no");
 
-        self->MaintainDeprecatedGlobalFb(fi);
         bool isFirstCommit = false;
         self->UpdateToplevelFrameOnCommit(sd, surfRes, fi, isFirstCommit);
         self->CheckDesktopRootOnCommit(sd, fi, isFirstCommit);

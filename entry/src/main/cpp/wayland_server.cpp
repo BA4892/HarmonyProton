@@ -13,7 +13,7 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include "compositor/compositor_utils.h"
+
 
 extern "C" void RegisterXdgShell(wl_display* display);
 extern "C" void RegisterWlCoreGlobals(wl_display* display);
@@ -136,20 +136,13 @@ void WaylandServer::RaiseToplevel(uint32_t id) {
     auto lk = toplevelMgr_.Lock();
     toplevelMgr_.RemoveFromZOrder(id);
     toplevelMgr_.AddToZOrder(id);
-    // 任务栏始终在顶层 (判定见 IsTaskbarLike);
+    // 任务栏始终在顶层 (app_id == "explorer.exe.taskbar");
     // 全屏窗口例外 — 游戏全屏必须压过任务栏
-    uint32_t taskbarId = 0;
-    for (auto& [tid, st] : toplevelMgr_.toplevels()) {
-        if (IsTaskbarLike(st.y, st.h, outputH_)) {
-            taskbarId = tid;
-            break;
-        }
-    }
     bool raisedFullscreen = false;
     if (const auto* rst = toplevelMgr_.FindToplevelLocked(id)) raisedFullscreen = rst->fullscreen;
-    if (taskbarId > 0 && taskbarId != id && !raisedFullscreen) {
-        toplevelMgr_.RemoveFromZOrder(taskbarId);
-        toplevelMgr_.AddToZOrder(taskbarId);
+    if (taskbarId_ > 0 && taskbarId_ != id && !raisedFullscreen) {
+        toplevelMgr_.RemoveFromZOrder(taskbarId_);
+        toplevelMgr_.AddToZOrder(taskbarId_);
     }
     MarkDesktopRootDirtyLocked();
 }
@@ -202,6 +195,11 @@ void WaylandServer::OnToplevelDestroyed(uint32_t toplevelId) {
         toplevelMgr_.EraseToplevelLocked(toplevelId);
         if (pendingDesktopRootToplevelId_ == toplevelId)
             pendingDesktopRootToplevelId_ = 0;
+        if (taskbarId_ == toplevelId) {
+            OH_LOG_INFO(LOG_APP, "[MW] taskbar toplevel #%{public}u destroyed, clearing cached id",
+                        toplevelId);
+            taskbarId_ = 0;
+        }
         // root 本体被销毁 (xs_destroy / 客户端断连路径同样走到这里): 复位, 等待下一个 explorer
         if (desktopRootToplevelId_ == toplevelId) {
             OH_LOG_INFO(LOG_APP, "[MW] desktop root toplevel #%{public}u destroyed, clearing root",
@@ -264,14 +262,10 @@ void WaylandServer::SendToplevelClose(uint32_t toplevelId) {
 
 int32_t WaylandServer::GetWorkAreaHeight() {
     auto lk = toplevelMgr_.Lock();
-    int32_t h = outputH_;
-    // 找任务栏 (判定见 IsTaskbarLike), 工作区 = 任务栏上方空间
-    for (auto& [id, st] : toplevelMgr_.toplevels()) {
-        if (IsTaskbarLike(st.y, st.h, outputH_) && st.y < h) {
-            h = st.y;
-        }
-    }
-    return h;
+    if (taskbarId_ == 0) return outputH_;
+    const auto* st = toplevelMgr_.FindToplevelLocked(taskbarId_);
+    if (!st) return outputH_;
+    return st->y;  // 工作区 = 任务栏上方空间
 }
 
 void WaylandServer::SetToplevelMinimized(uint32_t id) {
