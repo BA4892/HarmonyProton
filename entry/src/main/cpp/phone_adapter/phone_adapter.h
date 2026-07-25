@@ -13,6 +13,7 @@
 extern "C" {
 #endif
 void PhoneAdapter_SetPhoneMode(bool phone);
+bool PhoneAdapter_IsPhoneMode();
 #ifdef __cplusplus
 }
 #endif

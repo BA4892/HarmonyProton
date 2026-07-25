@@ -17,6 +17,10 @@ extern "C" void PhoneAdapter_SetPhoneMode(bool phone) {
     g_isPhone = phone;
 }
 
+extern "C" bool PhoneAdapter_IsPhoneMode() {
+    return g_isPhone;
+}
+
 // 获取系统 libchild_process.so 的原始 NCP 函数指针。
 // 不能用 RTLD_NEXT（libchild_process.so 在 entry.so 之前加载，NEXT 搜不到），
 // 改用 dlopen(NOLOAD) 获取已加载的 libchild_process.so 句柄再 dlsym。
