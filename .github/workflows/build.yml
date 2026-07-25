@@ -1,0 +1,282 @@
+# .github/workflows/build.yml
+name: Build HAP (arm64-v8a, unsigned)
+
+on:
+  push:
+    branches: [master]
+    tags:
+      - 'v*'                    # v0.1.0, v1.2.3-rc1 等, 推 tag 会额外触发 release job
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - '.gitignore'
+      - 'LICENSE*'
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag (留空则只构建不发布)'
+        required: false
+        type: string
+
+# GITHUB_TOKEN 权限:
+#   contents: write — 拉源码 + 发布 Release (需要 write)
+#   packages: read  — 拉 GHCR 私有 buildenv 镜像
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  build:
+    name: make NATIVE_ARCH=arm64-v8a hap
+    runs-on: ubuntu-26.04
+    timeout-minutes: 180
+
+    # 容器里默认 shell 是 sh, 不认 `set -o pipefail` 等 bash 语法
+    # 这里强制所有 run step 用 bash
+    defaults:
+      run:
+        shell: bash
+
+    container:
+      image: ghcr.io/panedioic/winehua-buildenv:test
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      # ---- 让私有 submodule 走 HTTPS + GITHUB_TOKEN ----
+      # 前提: wine/box64/mesa-ohos 三个私有 submodule 与本仓库在同一账号/组织下
+      # 若跨组织, 需替换成有跨仓库权限的 PAT (存到 secrets.SUBMODULE_PAT)
+      - name: Configure git for private submodules
+        run: |
+          git config --global --add safe.directory '*'
+          git config --global \
+            url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf \
+            "git@github.com:"
+          git config --global --add \
+            url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf \
+            "https://github.com/"
+
+      - name: Checkout with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ---- 绕过签名: 用 stub 替换 sign.py ----
+      # scripts/package.sh 最后会调 `python3 sign.py <unsigned> <signed>`,
+      # 无签名场景下这里直接把 unsigned 拷成 "signed" 文件, 让 make hap 完整跑完
+      - name: Stub sign.py (unsigned build)
+        run: |
+          cat > sign.py <<'PY'
+          #!/usr/bin/env python3
+          # CI-only stub: 无签名构建, 直接把 unsigned HAP 拷贝为 "signed" 输出
+          import shutil, sys, os
+          src, dst = sys.argv[1], sys.argv[2]
+          os.makedirs(os.path.dirname(dst), exist_ok=True)
+          shutil.copy(src, dst)
+          print(f"[sign-stub] copied {src} -> {dst} (UNSIGNED)")
+          PY
+          chmod +x sign.py
+
+      # ---- CI-only: 无签名的 build-profile.json5 ----
+      # 从 example 派生会踩坑: example 里的 signingConfigs 指向占位符路径,
+      # hvigor 的 SignHap 任务会校验这些文件存在, 直接失败.
+      # 这里显式写一份 signingConfigs 为空的 profile, 让 hvigor 跳过 SignHap,
+      # 直接输出 entry-default-unsigned.hap.
+      - name: Provision unsigned build-profile.json5
+        run: |
+          cat > build-profile.json5 <<'JSON5'
+          {
+            "app": {
+              "signingConfigs": [],
+              "products": [
+                {
+                  "name": "default",
+                  "targetSdkVersion": "6.1.0(23)",
+                  "compatibleSdkVersion": "6.1.0(23)",
+                  "runtimeOS": "HarmonyOS",
+                  "buildOption": {
+                    "nativeCompiler": "BiSheng",
+                    "strictMode": {
+                      "caseSensitiveCheck": true,
+                      "useNormalizedOHMUrl": true
+                    }
+                  }
+                }
+              ],
+              "buildModeSet": [
+                {
+                  "name": "debug"
+                },
+                {
+                  "name": "release"
+                }
+              ]
+            },
+            "modules": [
+              {
+                "name": "entry",
+                "srcPath": "./entry",
+                "targets": [
+                  {
+                    "name": "default",
+                    "applyToProducts": ["default"]
+                  }
+                ]
+              }
+            ]
+          }
+          JSON5
+          echo "[ci] wrote unsigned build-profile.json5 (signingConfigs empty)"
+
+      # ---- 兜底: 确保 libtool m4 宏 (ltdl.m4) 存在 ----
+      # buildenv 镜像里 apt Recommends 被禁, 未显式列出的 libltdl-dev 不装.
+      # 待 Dockerfile 修好后可以删除这一步.
+      - name: Ensure libtool m4 macros present
+        run: |
+          if [ ! -f /usr/share/aclocal/ltdl.m4 ]; then
+            echo "ltdl.m4 missing, installing libltdl-dev..."
+            apt-get update
+            apt-get install -y libltdl-dev
+          else
+            echo "ltdl.m4 present, no action needed"
+          fi
+
+      - name: Show environment
+        run: |
+          echo "== toolchain =="
+          gcc --version | head -1
+          cmake --version | head -1
+          meson --version
+          ninja --version
+          python3 --version
+          java -version 2>&1 | head -1
+          echo "== OHOS SDK =="
+          ls /apps/harmony/sdk/default/openharmony/native/llvm/bin/clang
+          /apps/harmony/bin/hvigorw --version || true
+          echo "== nproc =="
+          nproc
+
+      - name: Build HAP
+        env:
+          NATIVE_ARCH: arm64-v8a
+          BUILD_GUEST_GFX: '0'
+          BUILD_WINE_MONO: '0'
+        run: |
+          set -euxo pipefail
+          make NATIVE_ARCH=arm64-v8a hap
+
+      - name: Locate artifacts
+        id: art
+        run: |
+          set -eux
+          out_dir=entry/build/default/outputs/default
+          ls -lh "$out_dir"
+          if [ -f "$out_dir/entry-default-unsigned.hap" ]; then
+            echo "hap=$out_dir/entry-default-unsigned.hap" >> "$GITHUB_OUTPUT"
+          else
+            echo "hap=$out_dir/entry-default-signed.hap" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload HAP
+        uses: actions/upload-artifact@v4
+        with:
+          name: WineHua-arm64-v8a-unsigned-${{ github.sha }}
+          path: ${{ steps.art.outputs.hap }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.sha }}
+          path: |
+            build/**/meson-logs/**
+            build/**/CMakeFiles/CMakeOutput.log
+            build/**/CMakeFiles/CMakeError.log
+            build/**/config.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ============================================================
+  # Release job: 仅在推 tag 或手动指定 release_tag 时运行
+  # ============================================================
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-26.04
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.release_tag != ''
+
+    steps:
+      - name: Checkout (for changelog)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # 需要历史 commit 生成 changelog
+
+      - name: Determine release tag
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.release_tag }}" ]; then
+            tag="${{ github.event.inputs.release_tag }}"
+          else
+            tag="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Resolved release tag: $tag"
+
+      - name: Download HAP artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: WineHua-arm64-v8a-unsigned-${{ github.sha }}
+          path: ./release-assets
+
+      - name: Rename artifact with version
+        run: |
+          set -eux
+          cd release-assets
+          for f in *.hap; do
+            mv "$f" "WineHua-${{ steps.tag.outputs.tag }}-arm64-v8a-unsigned.hap"
+          done
+          ls -lh
+
+      - name: Generate changelog
+        run: |
+          # 找到上一个 tag (若存在)
+          prev_tag=$(git describe --tags --abbrev=0 "${{ steps.tag.outputs.tag }}^" 2>/dev/null || echo "")
+          if [ -n "$prev_tag" ]; then
+            {
+              echo "## Changes since \`$prev_tag\`"
+              echo
+              git log --pretty=format:'- %s (%h)' "$prev_tag..${{ steps.tag.outputs.tag }}"
+            } > changelog.md
+          else
+            echo "## Initial release" > changelog.md
+          fi
+          {
+            echo
+            echo
+            echo "---"
+            echo
+            echo "**Note**: This build is **unsigned**. To install on a HarmonyOS device you'll need developer mode enabled, or sign the HAP with your own certificate first."
+            echo
+            echo "Built from commit \`${GITHUB_SHA:0:7}\`."
+          } >> changelog.md
+          echo "---- changelog.md ----"
+          cat changelog.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: WineHua ${{ steps.tag.outputs.tag }}
+          body_path: changelog.md
+          files: release-assets/*.hap
+          draft: false
+          # -rc / -beta / -alpha 后缀自动标记为 pre-release
+          prerelease: ${{ contains(steps.tag.outputs.tag, '-rc') || contains(steps.tag.outputs.tag, '-beta') || contains(steps.tag.outputs.tag, '-alpha') }}
+          fail_on_unmatched_files: true
