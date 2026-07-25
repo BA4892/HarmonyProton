@@ -194,15 +194,6 @@ assemble_pad() {
     else
         warn "  x86_64-w64-mingw32-strip not found, skipping strip"
     fi
-    if command -v i686-w64-mingw32-strip &>/dev/null; then
-        for f in "$wine_data/bin/i386-windows/"*.dll "$wine_data/bin/i386-windows/"*.drv "$wine_data/bin/i386-windows/"*.exe "$wine_data/bin/i386-windows/"*.sys; do
-            [ -f "$f" ] && i686-w64-mingw32-strip "$f" 2>/dev/null
-        done
-        log "  32-bit PE stripped"
-    else
-        warn "  i686-w64-mingw32-strip not found, skipping strip"
-    fi
-
     # i386-windows/ (32-bit PE DLL for WoW64)
     # 主构建 --enable-archs=i386,x86_64 已产出全部 32-bit PE, 直接取自 wine-ohos,
     # 无需独立的 i686-mingw32 构建.
@@ -222,6 +213,16 @@ assemble_pad() {
         [ -f "$exe" ] && cp "$exe" "$wine_data/bin/i386-windows/"
     done
     log "  i386 exe stubs → $(ls "$wine_data/bin/i386-windows"/*.exe 2>/dev/null | wc -l) files"
+
+    # 32-bit PE strip (必须在 copy 之后)
+    if command -v i686-w64-mingw32-strip &>/dev/null; then
+        for f in "$wine_data/bin/i386-windows/"*.dll "$wine_data/bin/i386-windows/"*.drv "$wine_data/bin/i386-windows/"*.exe "$wine_data/bin/i386-windows/"*.sys; do
+            [ -f "$f" ] && i686-w64-mingw32-strip "$f" 2>/dev/null
+        done
+        log "  32-bit PE stripped"
+    else
+        warn "  i686-w64-mingw32-strip not found, skipping strip"
+    fi
 
     # *.exe stubs → rawfile
     for exe in "$BUILD_DIR/wine-ohos/programs/"*/x86_64-windows/*.exe; do

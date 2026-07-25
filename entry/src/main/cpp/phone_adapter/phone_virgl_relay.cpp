@@ -14,6 +14,8 @@
 #include <mutex>
 #include <vector>
 
+#undef LOG_DOMAIN
+#define LOG_DOMAIN 0x0000
 #include <hilog/log.h>
 
 namespace {

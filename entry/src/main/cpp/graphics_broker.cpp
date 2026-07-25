@@ -1,5 +1,8 @@
 #include "graphics_broker.h"
 
+#include "fs_utils.h"
+#include "process_utils.h"
+#include "string_utils.h"
 #include "wait_utils.h"
 #include "wayland_server.h"
 
@@ -60,6 +63,8 @@ static int VirglProxyIsRemoteDead(OHIPCRemoteProxy* proxy) {
 #include <thread>
 
 #undef LOG_TAG
+#undef LOG_DOMAIN
+#define LOG_DOMAIN 0x0000
 #define LOG_TAG "WL_GFX"
 #include <hilog/log.h>
 
@@ -96,92 +101,6 @@ void RemoveStaleZeroCopyMarkers()
     closedir(dir);
 }
 
-bool EnsureDir(const std::string& path)
-{
-    if (path.empty()) return false;
-    return mkdir(path.c_str(), 0755) == 0 || errno == EEXIST;
-}
-
-bool FileExists(const std::string& path)
-{
-    return !path.empty() && access(path.c_str(), F_OK) == 0;
-}
-
-bool DirExists(const std::string& path)
-{
-    struct stat st = {};
-
-    if (path.empty()) return false;
-    if (stat(path.c_str(), &st) != 0) return false;
-    return S_ISDIR(st.st_mode);
-}
-
-bool DirHasSharedObjectWithPrefix(const std::string& dir, const std::string& prefix)
-{
-    DIR* handle = nullptr;
-    struct dirent* entry = nullptr;
-
-    if (dir.empty() || prefix.empty()) return false;
-    handle = opendir(dir.c_str());
-    if (!handle) return false;
-
-    while ((entry = readdir(handle)))
-    {
-        std::string name = entry->d_name;
-        if (name.rfind(prefix, 0) != 0) continue;
-        if (name.find(".so") == std::string::npos) continue;
-        closedir(handle);
-        return true;
-    }
-
-    closedir(handle);
-    return false;
-}
-
-std::string DirNameCopy(const std::string& path)
-{
-    size_t slash = path.find_last_of('/');
-    if (slash == std::string::npos) return ".";
-    if (slash == 0) return "/";
-    return path.substr(0, slash);
-}
-
-std::string CurrentSharedObjectDir()
-{
-    Dl_info info = {};
-    if (dladdr(reinterpret_cast<void*>(&CurrentSharedObjectDir), &info) && info.dli_fname && info.dli_fname[0])
-        return DirNameCopy(info.dli_fname);
-    return "";
-}
-
-std::string ToLower(std::string value)
-{
-    for (char& ch : value) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-    return value;
-}
-
-std::string TrimCopy(const std::string& value)
-{
-    size_t start = 0;
-    size_t end = value.size();
-
-    while (start < end && std::isspace(static_cast<unsigned char>(value[start]))) ++start;
-    while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1]))) --end;
-    return value.substr(start, end - start);
-}
-
-void ReplaceAll(std::string& value, const std::string& needle, const std::string& replacement)
-{
-    size_t pos = 0;
-
-    if (needle.empty()) return;
-
-    while ((pos = value.find(needle, pos)) != std::string::npos)
-    {
-        value.replace(pos, needle.size(), replacement);
-        pos += replacement.size();
-    }
-}
 
 bool LoadGuestReceiverEnvFile(const std::string& receiverDir,
                               const std::string& envPath,
@@ -226,48 +145,6 @@ bool LoadGuestReceiverEnvFile(const std::string& receiverDir,
     return true;
 }
 
-std::string DescribeWaitStatus(int status)
-{
-    if (WIFEXITED(status))
-    {
-        return "exited code=" + std::to_string(WEXITSTATUS(status));
-    }
-    if (WIFSIGNALED(status))
-    {
-        return "signaled signal=" + std::to_string(WTERMSIG(status));
-    }
-    return "status=" + std::to_string(status);
-}
-
-bool IsProcessRunningBySignal(pid_t pid)
-{
-    if (pid <= 0) return false;
-    if (kill(pid, 0) == 0) return true;
-    return errno == EPERM;
-}
-
-void TerminateTrackedProcess(pid_t pid, bool usesNcp)
-{
-    if (pid <= 0) return;
-
-    kill(pid, SIGTERM);
-    if (usesNcp)
-    {
-        WaitFor("virgl native child exit", [pid]() { return !IsProcessRunningBySignal(pid); }, 2000, 100);
-        if (IsProcessRunningBySignal(pid)) kill(pid, SIGKILL);
-        return;
-    }
-
-    for (int i = 0; i < 20; ++i)
-    {
-        int status = 0;
-        pid_t waited = waitpid(pid, &status, WNOHANG);
-        if (waited == pid || (waited < 0 && errno == ECHILD)) return;
-        usleep(100000);
-    }
-    kill(pid, SIGKILL);
-    waitpid(pid, nullptr, 0);
-}
 
 } // namespace
 
@@ -795,7 +672,7 @@ bool GraphicsBroker::TakeFrameForToplevel(uint32_t rendererToplevelId,
     WaylandServer* ws = WaylandServer::GetInstance();
     uint32_t sourceToplevelId = rendererToplevelId;
 
-    if (ws->IsDesktopMode()) sourceToplevelId = ws->GetDesktopRootToplevelId();
+    if (ws->Policy().RootCompositing()) sourceToplevelId = ws->GetDesktopRootToplevelId();
     if (outSourceToplevelId) *outSourceToplevelId = sourceToplevelId;
 
     if (sourceToplevelId != 0) return ws->TakeToplevelFrame(sourceToplevelId, outPixels, w, h);

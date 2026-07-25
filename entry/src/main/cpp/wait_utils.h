@@ -13,6 +13,8 @@
 
 #include <functional>
 #include <unistd.h>
+#undef LOG_DOMAIN
+#define LOG_DOMAIN 0x0000
 #include <hilog/log.h>
 
 // 轮询 probe() 直到返回 true 或超时。

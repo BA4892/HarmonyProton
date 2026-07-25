@@ -1,6 +1,6 @@
 # OpenGL / VirGL Step 1 设计说明
 
-> 更新日期: 2026-06-26
+> 更新日期: 2026-07-25
 
 ## 目标
 
@@ -85,6 +85,60 @@ flowchart LR
 
 - 作为一个真实 Windows x86 EXE 验证 WGL、像素格式、上下文创建、SwapBuffers 和实际画面输出
 - 输出当前 backend / guest receiver / socket / library 等状态，方便直接对照日志
+
+## 宿主 ↔ guest 环境变量契约
+
+宿主侧 `GraphicsBroker::AppendWineEnv()`（`entry/src/main/cpp/graphics_broker.cpp`）在启动 Wine 进程时注入以下变量，guest 侧（Wine / smoke 程序）按需读取。**契约以本节为准**，两侧代码均直接写字面量字符串。历史上曾存在共享头 `shared/graphics/graphics_runtime_env.h` 统一宏名，但宿主侧实际未包含它，已于 2026-07 移除；wine 树内的 `programs/winehua_graphics_smoke/graphics_runtime_env.h` 仍保留（同样未被包含，仅供参考）。
+
+### 所有模式都会注入
+
+| 变量 | 取值 | 含义 |
+| --- | --- | --- |
+| `WINEHUA_GRAPHICS_BACKEND` | `shm` / `virgl` | 请求的图形 backend |
+| `WINEHUA_GRAPHICS_ACTIVE` | `shm` / `virgl` | 实际生效的 backend |
+| `WINEHUA_SHM_FALLBACK` | `0` / `1` | 是否回落到了 shm 路径 |
+| `WINEHUA_FRAME_ZERO_COPY` | `0` / `1` | 零拷贝帧路径是否生效 |
+| `WINEHUA_FRAME_TRANSPORT` | 字符串 | 显示传输模式，如 `wl_shm+cpu_copy+gl_upload`、`virgl_texture+surface_queue+external_oes` |
+| `WINEHUA_GUEST_GFX_READY` | `0` / `1` | guest_gfx receiver bundle 是否就绪 |
+| `WINEHUA_GUEST_GFX_MODE` | `mesa-virpipe` / `stock-egl` | guest 3D receiver 模式 |
+| `WINEHUA_GUEST_GFX_DIR` | 路径 | bundle 运行时目录（仅在非空时注入） |
+| `WINEHUA_VIRGL_SOCKET_READY` | `0` / `1` | vtest socket 是否就绪 |
+| `WINEHUA_VIRGL_LIBRARY_READY` | `0` / `1` | `libvirglrenderer.so` 是否就绪 |
+| `WINEHUA_VIRGL_SOCKET` | 路径 | vtest socket 路径（仅在非空时注入；`winewayland.drv` 的 guest probe 也读它） |
+| `WINEHUA_VIRGLRENDERER_LIB` | 路径 | 宿主 virglrenderer 库路径（仅在非空时注入） |
+| `WINEHUA_VIRGL_READY` | `0` / `1` | virgl backend 是否已激活 |
+| `WINEHUA_GRAPHICS_NOTE` | 字符串 | 最近一次错误信息（仅在非空时注入） |
+
+### 仅 virgl 模式注入
+
+| 变量 | 取值 | 含义 |
+| --- | --- | --- |
+| `EGL_PLATFORM` | `wayland` | 强制 Mesa 走 wayland 平台 |
+| `WINEHUA_EGL_LIBRARY_PATH` | 路径 | 指定 guest bundle 内的 `libEGL.so`（`win32u/opengl.c` 读取） |
+| `BOX64_EMULATED_LIBS` | 库名列表 | 让 box64 模拟 guest GL / wayland 相关库 |
+| `LIBGL_DRIVERS_PATH` / `EGL_DRIVERS_PATH` | 路径 | Mesa DRI / EGL driver 搜索路径（目录存在才注入） |
+| `WINEHUA_WAYLAND_READBACK` | `1` | 打开 wayland 帧回读（`winewayland.drv/opengl.c` 读取） |
+| `WINEHUA_GL_STALL_DIAG` | `1` | 打开 GL 卡顿诊断日志 |
+| `WINEHUA_DISPLAY_FPS_FILE` | Windows 路径 | guest 侧 FPS 统计输出文件 |
+| `WINEHUA_VTEST_FRONTBUFFER_LOG` | 路径 | vtest frontbuffer 日志 |
+| `WINEHUA_VTEST_PRESENT` | `surface-queue` | vtest present 模式 |
+| `WINEHUA_ZERO_COPY_READY_DIR` | 路径 | 零拷贝就绪标记目录（`winewayland.drv/opengl.c` 读取） |
+| `VTEST_SOCKET_NAME` | 路径 | guest Mesa virpipe 连接 vtest server 的 socket 名 |
+
+另有 `guestReceiverEnv_` 里由 bundle manifest 带入的追加变量，原样透传。
+
+### 仅宿主侧使用（不注入 guest）
+
+| 变量 | 读取方 | 含义 |
+| --- | --- | --- |
+| `WINEHUA_VIRGL_SYNC_MODE` | `graphics_broker.cpp` / `virgl_child.cpp` | `virgl_test_server` 同步模式，默认 `egl-thread` |
+| `WINEHUA_VIRGL_LOG_PATH` | `virgl_child.cpp` | virgl 子进程日志路径 |
+| `WINEHUA_GRAPHICS_BACKEND` | `graphics_broker.cpp` | 宿主自身也读取，作为请求 backend 的覆盖入口 |
+| `WINEHUA_VIRGLRENDERER_LIB` | `graphics_broker.cpp` | 宿主探测阶段的库路径覆盖 |
+
+### smoke 程序的历史遗留读取
+
+`winehua_graphics_smoke/main.c` 还读取 `WINEHUA_FRAME_PRESENTER`、`WINEHUA_FRAME_DAMAGE_UPLOAD`、`WINEHUA_NATIVE_BUFFER_AVAILABLE`、`WINEHUA_FRAME_FALLBACK`、`WINEHUA_GRAPHICS_FORCE_GL`，当前宿主均不注入，读到恒为空，仅作状态展示。新增变量时以 `AppendWineEnv()` 实际注入项为准。
 
 ## 已完成
 

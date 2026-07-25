@@ -8,6 +8,8 @@
 #include <cstdio>
 
 #undef LOG_TAG
+#undef LOG_DOMAIN
+#define LOG_DOMAIN 0x0000
 #define LOG_TAG "WL_Xdg"
 #include <hilog/log.h>
 
@@ -82,6 +84,19 @@ static void tl_set_min_size(wl_client*, wl_resource* tlRes, int32_t w, int32_t h
     fire_limits_event(sd);
 }
 
+// Wine 最大化时不调 xdg_toplevel.set_maximized, 只把 max_size 设为
+// 工作区尺寸 → compositor 以此推断 maximize 意图, 主动补发 MAXIMIZED
+// configure (否则 Wine 永远等不到最大化确认)。
+// 全屏窗口排除在外: 全屏时 Wine 会把 min/max 设为输出尺寸, 若触发本启发式
+// 会补发一个工作区尺寸的 MAXIMIZED configure, 与 FULLSCREEN configure 打架,
+// 使窗口落入 max+fs 混合态 (实测游戏全屏后 client 变成 1400x900, 画面下移)。
+static bool ShouldInferMaximizeFromMaxSize(WaylandServer* ws, SurfaceData* sd,
+                                           int32_t w, int32_t h, int32_t workH) {
+    return !ws->IsToplevelFullscreen(sd->toplevelId) && !sd->maximized &&
+           w >= ws->outputW_ && h >= workH &&
+           sd->toplevelId != ws->GetDesktopRootToplevelId();
+}
+
 static void tl_set_max_size(wl_client* client, wl_resource* tlRes, int32_t w, int32_t h) {
     auto* td = static_cast<ToplevelData*>(wl_resource_get_user_data(tlRes));
     if (!td || !td->xdgSurface) return;
@@ -94,14 +109,9 @@ static void tl_set_max_size(wl_client* client, wl_resource* tlRes, int32_t w, in
     sd->maxHeight = h;
     sd->hasSizeLimits = true;
 
-    // Wine 最大化时不调 set_maximized, 只设 max_size → 主动发 configure
     auto* ws = WaylandServer::GetInstance();
     int32_t workH = ws->GetWorkAreaHeight();
-    // 全屏窗口排除在外: 全屏时 Wine 会把 min/max 设为输出尺寸, 若触发本启发式
-    // 会补发一个工作区尺寸的 MAXIMIZED configure, 与 FULLSCREEN configure 打架,
-    // 使窗口落入 max+fs 混合态 (实测游戏全屏后 client 变成 1400x900, 画面下移)
-    if (!sd->fullscreen && !sd->maximized && w >= ws->outputW_ && h >= workH &&
-        sd->toplevelId != ws->GetDesktopRootToplevelId()) {
+    if (ShouldInferMaximizeFromMaxSize(ws, sd, w, h, workH)) {
         sd->preMaxW = ws->GetToplevelW(sd->toplevelId);
         sd->preMaxH = ws->GetToplevelH(sd->toplevelId);
         sd->maximized = true;
@@ -132,23 +142,22 @@ static void tl_set_maximized(wl_client* client, wl_resource* tlRes) {
     auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(xdg->wlSurface));
     if (!sd) return;
 
+    auto* ws = WaylandServer::GetInstance();
     // 全屏窗口不接受最大化: MAXIMIZED configure 会与 FULLSCREEN 打架
-    if (sd->fullscreen) {
+    if (ws->IsToplevelFullscreen(sd->toplevelId)) {
         OH_LOG_INFO(LOG_APP, "[XDG] tl_set_maximized tl=%{public}u ignored (fullscreen)", sd->toplevelId);
         return;
     }
-    if (sd->minimized) {
-        WaylandServer::GetInstance()->SetToplevelRestored(sd->toplevelId);
+    if (ws->IsToplevelMinimized(sd->toplevelId)) {
+        ws->SetToplevelRestored(sd->toplevelId);
     }
     if (!sd->maximized) {
-        auto* ws = WaylandServer::GetInstance();
         sd->preMaxW = ws->GetToplevelW(sd->toplevelId);
         sd->preMaxH = ws->GetToplevelH(sd->toplevelId);
         sd->maximized = true;
         ws->SetToplevelMaximized(sd->toplevelId);
     }
     // 发 configure 让 Wine 渲染到工作区尺寸 (排除任务栏)
-    auto* ws = WaylandServer::GetInstance();
     int32_t mw = ws->outputW_, mh = ws->GetWorkAreaHeight();
     wl_array states;
     wl_array_init(&states);
@@ -174,7 +183,7 @@ static void tl_unset_maximized(wl_client* client, wl_resource* tlRes) {
 
     // 全屏窗口不接受 unmaximize: 否则会发出不带 FULLSCREEN 状态的 configure,
     // 把 Wine 的窗口状态机打出全屏
-    if (sd->fullscreen) {
+    if (WaylandServer::GetInstance()->IsToplevelFullscreen(sd->toplevelId)) {
         OH_LOG_INFO(LOG_APP, "[XDG] tl_unset_maximized tl=%{public}u ignored (fullscreen)", sd->toplevelId);
         return;
     }
@@ -203,15 +212,15 @@ static void tl_set_fullscreen(wl_client* client, wl_resource* tlRes, wl_resource
     if (!sd) return;
     auto* ws = WaylandServer::GetInstance();
 
-    if (sd->minimized) {
+    if (ws->IsToplevelMinimized(sd->toplevelId)) {
         ws->SetToplevelRestored(sd->toplevelId);
     }
-    if (!sd->fullscreen) {
+    if (!ws->IsToplevelFullscreen(sd->toplevelId)) {
         sd->preFsW = ws->GetToplevelW(sd->toplevelId);
         sd->preFsH = ws->GetToplevelH(sd->toplevelId);
-        sd->fullscreen = true;
         // 全屏 configure 不含 MAXIMIZED, Wine 会据此清掉 WS_MAXIMIZE;
         // 合成器侧的标志位必须同步清, 否则后续 configure 会持续误带 MAXIMIZED
+        // (fullscreen 生效状态由 SetToplevelFullscreen 写入 ToplevelState, 唯一权威)
         sd->maximized = false;
         ws->SetToplevelFullscreen(sd->toplevelId, true);
         // 全屏置顶 (RaiseToplevel 对全屏窗口跳过任务栏 pin)
@@ -241,10 +250,10 @@ static void tl_unset_fullscreen(wl_client* client, wl_resource* tlRes) {
     auto* xdg = static_cast<XdgSurface*>(wl_resource_get_user_data(td->xdgSurface));
     if (!xdg || !xdg->wlSurface) return;
     auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(xdg->wlSurface));
-    if (!sd || !sd->fullscreen) return;  // 非全屏: 幂等忽略
+    if (!sd) return;
     auto* ws = WaylandServer::GetInstance();
+    if (!ws->IsToplevelFullscreen(sd->toplevelId)) return;  // 非全屏: 幂等忽略
 
-    sd->fullscreen = false;
     ws->SetToplevelFullscreen(sd->toplevelId, false);
     // 恢复全屏前尺寸, 不能用 0,0 (Wine 0,0+state → SWP_NOSIZE → 不resize)
     int32_t w = sd->preFsW > 0 ? sd->preFsW : 0;
@@ -269,7 +278,8 @@ static void tl_set_minimized(wl_client*, wl_resource* tlRes) {
     auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(xdg->wlSurface));
     if (!sd) return;
 
-    sd->minimized = true;
+    // 生效状态唯一权威是 ToplevelState.minimized
+    // (NotifyToplevelMinimized → SetToplevelMinimized 写入, 本处不再存协议侧副本)
     WaylandServer::GetInstance()->NotifyToplevelMinimized(sd->toplevelId, sd->geoX, sd->geoY);
     WaylandServer::GetInstance()->FireToplevelEvent(sd->toplevelId, "minimized");
     OH_LOG_INFO(LOG_APP, "[XDG] tl_set_minimized tl=%{public}u", sd->toplevelId);
@@ -332,7 +342,7 @@ static void xs_get_toplevel(wl_client* client, wl_resource* xsRes, uint32_t id) 
             WaylandServer::GetInstance()->RegisterToplevelResource(sd->toplevelId, tl);
             // PC 模式: created 延迟到首帧 commit (此时才知 wl_shm 格式,
             // ARGB 异型窗口需走子窗口路线而非 ability, 见 surface_commit)
-            if (WaylandServer::GetInstance()->IsDesktopMode()) {
+            if (!WaylandServer::GetInstance()->Policy().OhosWindowPerToplevel()) {
                 WaylandServer::GetInstance()->FireToplevelEvent(sd->toplevelId, "created",
                     "{\"w\":640,\"h\":480}");
             }

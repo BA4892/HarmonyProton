@@ -31,6 +31,7 @@
 
 ### 规划
 - **[UNCERTAINTIES.md](UNCERTAINTIES.md)** — 剩余技术风险和待解决问题
+- **[CPP_REFACTOR_PLAN.md](CPP_REFACTOR_PLAN.md)** — compositor 重构原则、Phase 0-6 执行记录
 
 ## 关键里程碑
 

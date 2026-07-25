@@ -11,28 +11,28 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "compositor/compositor_constants.h"
+#include "compositor/display_policy.h"
+#include "compositor/toplevel_manager.h"
+
+// 前置声明: surface_commit 分段函数的参数类型 (定义在 compositor/surface_data.h,
+// 该头在文件末尾引入 — 本类的签名只需引用, 无需完整定义)
+struct SurfaceData;
+struct ShmCommitInfo;
+#include "compositor/move_grab.h"
+#include "compositor/desktop_compositor.h"
+#include "compositor/input_resolver.h"
+#include "compositor/desktop_root_manager.h"
+#include "plugin_manager.h"  // PromotePendingDesktopRoot → MoveRendererToToplevel
+
 // 最小 Wayland Compositor: wl_compositor + wl_surface + wl_shm
 class WaylandServer {
 public:
-    struct ZeroCopyLayerInfo {
-        uint64_t surfaceKey = 0;
-        uint32_t clientPid = 0;
-        uint32_t surfaceId = 0;
-        uint32_t parentToplevel = 0;
-        int x = 0;
-        int y = 0;
-        int width = 0;
-        int height = 0;
-        uint64_t shmCommitSerial = 0;
-        bool desktopCoordinates = false;
-    };
-
-    // Desktop 模式 zero-copy 遮挡矩形 (桌面坐标):
-    // GL overlay 是在桌面合成帧之上单独绘制的, 不参与 CPU 合成的 z-order,
-    // 需要把 "压在 GL 窗口之上的内容" 以矩形列表交给渲染器重绘回去
-    struct ZeroCopyOccluderRect {
-        int x = 0, y = 0, w = 0, h = 0;
-    };
+    // Re-export types moved to compositor/ (backward compat)
+    using ZeroCopyLayerInfo = ::ZeroCopyLayerInfo;
+    using ZeroCopyOccluderRect = ::ZeroCopyOccluderRect;
+    using SubsurfaceLayer = DesktopCompositor::SubsurfaceLayer;
+    using InputTarget = ::InputTarget;
 
     using StateCb = std::function<void(const char*)>;
     // toplevel 回调: (toplevelId, eventName, jsonData)
@@ -48,17 +48,20 @@ public:
 
     // EglRenderer 调用: 取最新一帧像素 (deprecated, 用 TakeToplevelFrame)
     bool TakeFrame(std::vector<uint8_t>& outPixels, int& w, int& h);
-    // 取指定 toplevel 的最新帧
-    bool TakeToplevelFrame(uint32_t toplevelId, std::vector<uint8_t>& outPixels, int& w, int& h);
+    bool TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, int& w, int& h) {
+        return desktopCompositor_.TakeToplevelFrame(id, out, w, h);
+    }
     bool GetZeroCopyLayerInfo(uint64_t surfaceKey, uint32_t rendererToplevelId,
-                              ZeroCopyLayerInfo& info);
-    void SetSurfaceZeroCopy(uint64_t surfaceKey, bool enabled);
-    // Desktop 模式: 计算覆盖在 zero-copy layer 之上的内容矩形 (桌面坐标),
-    // = z-order 中排在 GL 窗口之后的可见 toplevel + 可见 popup subsurface 层,
-    // 各自与 layer 矩形求交。返回矩形个数 (最多写 maxOut 个)。
-    // 非桌面模式 / layer 不可用时返回 0 (调用方保持 overlay 原样绘制)。
+                              ZeroCopyLayerInfo& info) {
+        return desktopCompositor_.GetZeroCopyLayerInfo(surfaceKey, rendererToplevelId, info);
+    }
+    void SetSurfaceZeroCopy(uint64_t surfaceKey, bool enabled) {
+        desktopCompositor_.SetSurfaceZeroCopy(surfaceKey, enabled);
+    }
     int GetZeroCopyOccluders(uint64_t surfaceKey, uint32_t rendererToplevelId,
-                             ZeroCopyOccluderRect* out, int maxOut);
+                             ZeroCopyOccluderRect* out, int maxOut) {
+        return desktopCompositor_.GetZeroCopyOccluders(surfaceKey, rendererToplevelId, out, maxOut);
+    }
 
     // 状态回调 (首帧到达 -> 通知 ArkTS)
     void SetStateCallback(StateCb cb) { stateCb_ = std::move(cb); }
@@ -70,7 +73,7 @@ public:
     void FireToplevelEvent(uint32_t id, const char* event, const char* jsonData = "{}");
 
     // 生成唯一 toplevel ID
-    uint32_t NextToplevelId() { return nextToplevelId_++; }
+    uint32_t NextToplevelId() { return toplevelMgr_.AllocateToplevelId(); }
 
     // toplevel resource 映射 (用于 SendToplevelClose -> xdg_toplevel_send_close)
     void RegisterToplevelResource(uint32_t toplevelId, wl_resource* tl);
@@ -93,79 +96,45 @@ public:
     void NotifyToplevelResize(uint32_t toplevelId, int32_t w, int32_t h);
     // 设置输出尺寸 (替换硬编码 1280x720)
     void SetOutputSize(int32_t w, int32_t h) { outputW_ = w; outputH_ = h; }
-    int32_t outputW_ = 1280;
-    int32_t outputH_ = 720;
+    int32_t outputW_ = compositor_consts::kDefaultOutputWidth;
+    int32_t outputH_ = compositor_consts::kDefaultOutputHeight;
     int32_t GetWorkAreaHeight();  // 排除任务栏后的可用高度
-    // Desktop 模式: 在合成帧中查找包含 (x,y) 的 toplevel (用于输入路由)
-    uint32_t FindToplevelAt(int x, int y);
-    // Desktop 模式: (x,y) 处的精确输入目标。
-    // 命中 subsurface 菜单层时返回层自己的 wl_surface + 层桌面原点 —
-    // 菜单可伸出父窗口边界, 事件必须 enter 菜单 surface 并用菜单相对坐标,
-    // 否则经父窗口 surface 的越界坐标会被 winewayland 的 motion clamp
-    // (wayland_pointer.c "bring them within bounds") 夹回窗口内, 菜单收不到。
-    // 未命中层时回退 toplevel / desktop root。返回 false = surface 不可用。
-    struct InputTarget {
-        uint32_t toplevelId = 0;         // 事件归属 toplevel (raise/键盘焦点)
-        wl_resource* surface = nullptr;  // pointer enter 目标
-        int originX = 0, originY = 0;    // surface 的桌面原点 (输入坐标换算基)
-        // 桌面坐标 → surface 局部坐标的缩放除数。
-        // 全屏窗口保比例缩放显示, 局部坐标 = (桌面坐标 - origin) / scale; 普通窗口为 1
-        float scale = 1.0f;
-        // true = 该点落在全屏黑边内: 调用方只吞 PRESS (防幻影点击/焦点切换);
-        // MOVE/RELEASE 照常按 origin/scale 透传给全屏窗口 (越界坐标由
-        // winewayland clamp, 吞掉会导致按键状态卡死)
-        bool swallow = false;
-    };
-    bool FindInputTargetAt(int x, int y, InputTarget& out);
-    // surface 指针是否仍存活 (输入注入前的防御校验, 遍历 surfaceResources_)
-    bool IsSurfaceAlive(wl_resource* surface);
+    uint32_t FindToplevelAt(int x, int y) { return inputResolver_.FindToplevelAt(x, y); }
+    bool FindInputTargetAt(int x, int y, InputTarget& out) {
+        return inputResolver_.FindInputTargetAt(x, y, out);
+    }
+    bool IsSurfaceAlive(wl_resource* surface) { return inputResolver_.IsSurfaceAlive(surface); }
     // Desktop 模式: 提到 Z-order 最顶层
     void RaiseToplevel(uint32_t id);
     // 读取 toplevel 桌面坐标 (InputManager 坐标转换用)
     // miss 返回 0 (与旧实现返回值一致), find 语义无插入副作用
-    int GetToplevelX(uint32_t id) {
-        std::lock_guard<std::mutex> lk(toplevelMutex_);
-        auto it = toplevels_.find(id);
-        return it != toplevels_.end() ? it->second.x : 0;
-    }
-    int GetToplevelY(uint32_t id) {
-        std::lock_guard<std::mutex> lk(toplevelMutex_);
-        auto it = toplevels_.find(id);
-        return it != toplevels_.end() ? it->second.y : 0;
-    }
-    int GetToplevelW(uint32_t id) {
-        std::lock_guard<std::mutex> lk(toplevelMutex_);
-        auto it = toplevels_.find(id);
-        return it != toplevels_.end() ? it->second.w : 0;
-    }
-    int GetToplevelH(uint32_t id) {
-        std::lock_guard<std::mutex> lk(toplevelMutex_);
-        auto it = toplevels_.find(id);
-        return it != toplevels_.end() ? it->second.h : 0;
-    }
+    int GetToplevelX(uint32_t id) { return toplevelMgr_.GetToplevelX(id); }
+    int GetToplevelY(uint32_t id) { return toplevelMgr_.GetToplevelY(id); }
+    int GetToplevelW(uint32_t id) { return toplevelMgr_.GetToplevelW(id); }
+    int GetToplevelH(uint32_t id) { return toplevelMgr_.GetToplevelH(id); }
+    // 状态查询 (minimized/fullscreen 权威字段在 ToplevelState, 见 surface_data.h 状态边界注释)
+    bool IsToplevelMinimized(uint32_t id) { return toplevelMgr_.IsToplevelMinimized(id); }
+    bool IsToplevelFullscreen(uint32_t id) { return toplevelMgr_.IsToplevelFullscreen(id); }
     // toplevel/popup 帧的 wl_shm 格式 (0=ARGB8888 有意义 alpha, 1=XRGB8888, 默认 1)
     // EglRenderer 据此决定 alpha 透传或强制不透明 (XRGB 的 X 字节是垃圾)
-    uint32_t GetToplevelShmFormat(uint32_t id) {
-        std::lock_guard<std::mutex> lk(toplevelMutex_);
-        auto it = toplevels_.find(id);
-        return it != toplevels_.end() ? it->second.shmFormat : 1;
-    }
+    uint32_t GetToplevelShmFormat(uint32_t id) { return toplevelMgr_.GetToplevelShmFormat(id); }
     // ARGB 异型窗口的 0/1 剪影掩码 (setWindowMask 用, ArkTS 轮询拉取)
-    struct WindowMask {
-        int w = 0, h = 0;
-        uint64_t hash = 0;
-        std::vector<uint8_t> bits;  // w*h, 每像素 0/1
-        bool dirty = false;
-    };
+    using WindowMask = ToplevelManager::WindowMask;
     // 取掩码: false = 无掩码或无更新; 取走清除 dirty
     bool TakeWindowMask(uint32_t id, int& w, int& h, std::vector<uint8_t>& out);
-    // Desktop 合成模式 (Tablet): 全部 toplevel 合成到一个 root framebuffer
-    void SetDesktopMode(bool on) { desktopMode_ = on; }
-    bool IsDesktopMode() const { return desktopMode_; }
+    // Desktop 合成模式 (Tablet): 全部 toplevel 合成到一个 root framebuffer。
+    // 模式差异的策略查询走 Policy() (display_policy.h); IsDesktopMode 只用于
+    // 模式上报类调用 (给 wine 传环境/标记进程/日志)。
+    void SetDesktopMode(bool on) { policy_ = DisplayPolicy::FromDesktopMode(on); }
+    bool IsDesktopMode() const { return policy_.desktop; }
+    const DisplayPolicy& Policy() const { return policy_; }
     void SetDesktopRootToplevelId(uint32_t id) { desktopRootToplevelId_ = id; }
     uint32_t GetDesktopRootToplevelId() const { return desktopRootToplevelId_; }
-    void SetDesktopRootRecognitionEnabled(bool enabled);
-    void PromotePendingDesktopRoot();
+    void SetDesktopRootRecognitionEnabled(bool enabled) { desktopRootMgr_.SetRecognitionEnabled(enabled); }
+    void PromotePendingDesktopRoot() {
+        uint32_t id = desktopRootMgr_.PromotePending();
+        if (id) PluginManager::GetInstance()->MoveRendererToToplevel(0, id);
+    }
 
     // -- wayland 协议实现 --
     static void compositor_bind(wl_client*, void*, uint32_t, uint32_t);
@@ -225,7 +194,7 @@ public:
     wl_resource* GetSurfaceForToplevel(uint32_t toplevelId);
 
     // 交互式窗口移动 (xdg_toplevel.move) — 由 xdg_shell 和 InputManager 调用
-    bool IsMoveGrabActive() const { return moveGrabToplevelId_ != 0; }
+    bool IsMoveGrabActive() const { return moveGrab_.IsActive(); }
     void StartMoveGrab(uint32_t toplevelId, uint32_t serial);
     void EndMoveGrab();
     bool ProcessMoveGrabMotion(wl_fixed_t wx, wl_fixed_t wy);
@@ -233,6 +202,22 @@ public:
 private:
     WaylandServer() = default;
     void EventLoop();
+
+    // -- surface_commit 分段 (Phase 3B, 实现在 wl_core.cpp) --
+    // 协议语义见各函数定义处注释; ShmCommitInfo 在 surface_data.h
+    bool HandleNullBufferCommit(SurfaceData* sd, wl_resource* surfRes);
+    bool BeginShmAccess(SurfaceData* sd, ShmCommitInfo& fi);
+    void ComputeContentArea(SurfaceData* sd, ShmCommitInfo& fi);
+    void MaintainDeprecatedGlobalFb(const ShmCommitInfo& fi);
+    void UpdateToplevelFrameOnCommit(SurfaceData* sd, wl_resource* surfRes,
+                                     ShmCommitInfo& fi, bool& outFirstCommit);
+    void CheckDesktopRootOnCommit(SurfaceData* sd, ShmCommitInfo& fi, bool isFirstCommit);
+    void UpdateSubsurfaceOnCommit(SurfaceData* sd, wl_resource* surfRes, ShmCommitInfo& fi);
+    void UpdateSubsurfaceLayerOnCommit(SurfaceData* sd, wl_resource* surfRes,
+                                       uint32_t parentId, ShmCommitInfo& fi);
+    void UpdatePopupOnCommit(SurfaceData* sd, wl_resource* surfRes,
+                             SurfaceData* parentSd, ShmCommitInfo& fi);
+    void FinishCommit(SurfaceData* sd, wl_resource* surfRes);
 
     wl_display* display_ = nullptr;
     std::thread thread_;
@@ -244,175 +229,41 @@ private:
     int width_ = 0, height_ = 0;
     std::atomic<bool> dirty_{false};
 
-    // toplevel/popup 聚合状态: 一个 id 一条记录, 全部字段由 toplevelMutex_ 保护。
-    // PC 模式 popup (菜单) 复用 NextToplevelId 命名空间, 只使用
-    // {pixels, w, h, dirty, shmFormat} 子集, 其余字段保持默认值。
-    // 条目存在性不携带语义 (旧实现用 "map 里有没有这个 id" 表达状态),
-    // 语义全部落在显式字段: pixels.empty()=无帧, hasPosition=已定位, …
-    std::mutex toplevelMutex_;
-    struct ToplevelState {
-        // -- 帧数据 (toplevel 与 PC popup 共用) --
-        std::vector<uint8_t> pixels;   // empty() = 尚无帧
-        int w = 0, h = 0;              // content 尺寸 (popup 为显示尺寸)
-        bool dirty = false;
-        uint32_t shmFormat = 1;        // wl_shm format (0=ARGB8888, 1=XRGB8888)
-        // -- 桌面坐标 (仅 toplevel) --
-        bool hasPosition = false;      // 首次 commit 置位 (isFirstCommit 判定 / 移动守卫)
-        int x = 0, y = 0;              // compositor 桌面位置 (含 move grab 偏移)
-        int wineX = 0, wineY = 0;      // Wine 坐标系位置 (首次 commit, 不变)
-        // -- 尺寸上报去重 --
-        int lastReportedW = 0, lastReportedH = 0;
-        // -- 状态标记 --
-        bool minimized = false;        // 桌面合成时跳过最小化窗口
-        bool isBackground = false;     // 渲染层, 不接收输入 (被切换掉的旧 root)
-        // 全屏: 桌面合成时保比例缩放铺满 (黑边填充), 输入经同一变换逆映射。
-        // Wine 全屏窗口可坚持自己的分辨率 (xdg "fullscreen 对任意尺寸兼容"),
-        // 放大铺满输出是 compositor 的职责
-        bool fullscreen = false;
-        // -- ARGB 窗口剪影掩码 --
-        WindowMask mask;               // mask.w==0 = 从未生成
-    };
-    std::unordered_map<uint32_t, ToplevelState> toplevels_;
-    std::unordered_map<uint64_t, wl_resource*> surfaceResources_;
-    std::unordered_set<uint64_t> zeroCopySurfaceKeys_;
-    // 读路径: find 语义, miss 返回 nullptr (杜绝 operator[] 读污染)
-    ToplevelState* FindToplevelLocked(uint32_t id) {
-        auto it = toplevels_.find(id);
-        return it != toplevels_.end() ? &it->second : nullptr;
-    }
-    // 写路径显式建档 (首次 commit / 状态转换等合法创建点)
-    ToplevelState& EnsureToplevelLocked(uint32_t id) { return toplevels_[id]; }
-    // "root 存在则标 dirty" 样板的收敛 (miss 不建档:
-    // 消费端 TakeToplevelFrame 先查 pixels, 孤 dirty 条目不可观测)
-    void MarkDesktopRootDirtyLocked() {
-        if (desktopRootToplevelId_ == 0) return;
-        auto it = toplevels_.find(desktopRootToplevelId_);
-        if (it != toplevels_.end()) it->second.dirty = true;
-    }
-    static bool HasFrame(const ToplevelState& st) { return !st.pixels.empty(); }
+    // toplevel 状态存储已移入 ToplevelManager (compositor/toplevel_manager.h)
+    ToplevelManager toplevelMgr_;
+
+    void MarkDesktopRootDirtyLocked() { desktopRootMgr_.MarkRootDirtyLocked(); }
 
     StateCb stateCb_;
     ToplevelCb toplevelCb_;
     std::atomic<bool> firstFrame_{false};
-    std::atomic<uint32_t> nextToplevelId_{1};
-    std::unordered_map<uint32_t, wl_resource*> toplevelResources_;
-    std::mutex toplevelResMutex_;
 
-    // toplevelId -> wl_surface 映射 (input focus 查找)
-    std::unordered_map<uint32_t, wl_resource*> toplevelSurfaceMap_;
-    std::mutex toplevelSurfaceMutex_;
-
-    // Desktop 合成模式
-    bool desktopMode_ = false;
+    // Desktop 合成模式策略 (唯一模式存储位, DesktopCompositor 持引用随动)
+    DisplayPolicy policy_{};
     uint32_t desktopRootToplevelId_ = 0;
     uint32_t pendingDesktopRootToplevelId_ = 0;
     bool desktopRootRecognitionEnabled_ = true;
-    // 交互式窗口移动 (xdg_toplevel.move)
-    uint32_t moveGrabToplevelId_ = 0;
-    uint32_t moveGrabSerial_ = 0;
-    int32_t moveGrabLastWineX_ = 0, moveGrabLastWineY_ = 0;  // 上一帧 Wine 逻辑坐标
-    // subsurface 合成层 (独立于 per-toplevel 帧缓冲, 避免污染)
-    struct SubsurfaceLayer {
-        wl_resource* surface = nullptr;
-        uint64_t surfaceKey = 0;
-        std::vector<uint8_t> pixels;
-        int x = 0, y = 0, w = 0, h = 0;
-        int localX = 0, localY = 0;
-        uint64_t shmCommitSerial = 0;
-        uint32_t parentToplevel = 0;
-        uint32_t shmFormat = 1;
-        bool opaque = false;
-        int32_t dmgX = 0, dmgY = 0, dmgW = 0, dmgH = 0;  // damage 包围盒
-        int32_t vpDstW = -1, vpDstH = -1;                // viewport destination
-        bool isExternal = false;  // 外部菜单 (任务栏等), 输入坐标需用 Wine 基底
-    };
-    void ResolveSubsurfaceLayerPositionLocked(const SubsurfaceLayer& layer,
-                                              int& x, int& y) const;
-    // 渲染/输入共用的 toplevel 可见性检查 (调用方须已持有 toplevelMutex_)
-    bool IsToplevelVisibleLocked(uint32_t id);
-    std::vector<SubsurfaceLayer> subsurfaceLayers_;
-    /*
-     * PC 多窗口模式 popup (菜单/tooltip/下拉框):
-     * subsurface 不再合成进父 toplevel 像素 (会被窗口边缘裁剪),
-     * 而是登记为伪 toplevel, 由 ArkTS 独立 OHOS 子窗口渲染。
-     * popupId 复用 NextToplevelId() 命名空间, 帧数据存在 toplevels_ 的
-     * ToplevelState 子集中, EglRenderer/InputManager 按现有 per-toplevel 路径工作。
-     */
-    struct PopupRecord {
-        uint32_t popupId = 0;
-        uint32_t parentToplevel = 0;
-        wl_resource* surface = nullptr;  // popup 的 wl_surface (pointer enter 目标)
-        uint64_t surfaceKey = 0;
-        int32_t offX = 0, offY = 0;      // 相对父窗口内容原点 (= subsurfaceX/Y - geoX/Y)
-        int w = 0, h = 0;
-    };
-    std::unordered_map<uint64_t, uint32_t> popupBySurfaceKey_;  // surfaceKey → popupId
-    std::unordered_map<uint32_t, PopupRecord> popups_;          // popupId → 记录
-    // 清除 popup 的帧数据与映射 (toplevelMutex_ 已持有, 不发事件)
-    void RemovePopupDataLocked(uint32_t popupId);
-    // 按 surfaceKey 移除 popup 记录 (toplevelMutex_ 已持有)
-    // 返回 parentToplevel 并出参 popupId; 记录不存在返回 0
-    uint32_t RemovePopupBySurfaceKeyLocked(uint64_t surfaceKey, uint32_t& outPopupId);
-    std::vector<uint32_t> toplevelZOrder_;  // 前景→背景
-    uint64_t desktopRootFrameSerial_ = 0;
-    uint64_t desktopOutputRootFrameSerial_ = 0;
-    uint64_t desktopCompositionSignature_ = 0;
-    bool desktopOutputInitialized_ = false;
+    // 交互式窗口移动 (xdg_toplevel.move) — 已移入 MoveGrabHandler
+    MoveGrabHandler moveGrab_;
+    // 桌面 Root 识别+切换 — 已移入 DesktopRootManager
+    DesktopRootManager desktopRootMgr_{toplevelMgr_, desktopRootToplevelId_,
+                                        pendingDesktopRootToplevelId_,
+                                        desktopRootRecognitionEnabled_,
+                                        outputW_, outputH_,
+                                        [this](uint32_t id, const char* ev, const char* data) {
+                                            FireToplevelEvent(id, ev, data);
+                                        }};
+    // 帧合成 + zero-copy layer 管理 — 已移入 DesktopCompositor
+    DesktopCompositor desktopCompositor_{toplevelMgr_, policy_, desktopRootToplevelId_,
+                                          outputW_, outputH_};
+    // 输入命中裁决 — 已移入 InputResolver
+    InputResolver inputResolver_{toplevelMgr_, desktopCompositor_, desktopRootToplevelId_,
+                                  outputW_, outputH_};
+
+    // 渲染/输入共用的 toplevel 可见性检查 (调用方须已持有锁)
+    bool IsToplevelVisibleLocked(uint32_t id) {
+        return toplevelMgr_.IsToplevelVisibleLocked(id, desktopRootToplevelId_);
+    }
 };
 
-// wl_surface 的每个实例携带的数据
-struct SurfaceData {
-    wl_resource* surface = nullptr;
-    uint64_t surfaceKey = 0;
-    uint32_t clientPid = 0;
-    uint32_t protocolId = 0;
-    wl_resource* pendingBuffer = nullptr;
-    std::vector<wl_resource*> frameCallbacks;
-
-    // per-surface pixel buffer
-    std::vector<uint8_t> pixels;
-    int w = 0, h = 0;
-    bool dirty = false;
-    std::atomic<uint64_t> shmCommitSerial{0};
-
-    // toplevel identity
-    uint32_t toplevelId = 0;
-    bool hasToplevel = false;
-    std::string title;
-    int x = 0, y = 0, winW = 640, winH = 480;
-
-    // xdg_surface window geometry (content area within buffer), 默认全 buffer
-    bool hasWindowGeometry = false;
-    int geoX = 0, geoY = 0, geoW = 0, geoH = 0;
-
-    // subsurface 父子追踪 (用于 popup 菜单合成到父 toplevel)
-    wl_resource* parentSurface = nullptr;     // 父 wl_surface (仅 subsurface)
-    int32_t subsurfaceX = 0, subsurfaceY = 0; // wl_subsurface.set_position
-    bool isSubsurface = false;
-
-    // surface_damage 累积包围盒 (buffer 坐标), 用于裁剪 subsurface 渲染
-    int32_t damageX = 0, damageY = 0, damageW = 0, damageH = 0;
-
-    // wp_viewport destination (实际显示尺寸, -1=未设置/使用 buffer 尺寸)
-    int32_t vpDstW = -1, vpDstH = -1;
-    // wp_viewport source rectangle (buffer 内的真实内容区域, -1=未设置/全 buffer)
-    // Wine popup 的 shm buffer 常按 2 的幂次对齐填充, 真实尺寸经 set_source 给出
-    int32_t vpSrcX = 0, vpSrcY = 0, vpSrcW = -1, vpSrcH = -1;
-
-    // window states
-    // app_id (xdg_toplevel.set_app_id), 用于识别 explorer 桌面
-    std::string appId;
-    bool minimized = false;
-    bool maximized = false;
-    int32_t preMaxW = 0, preMaxH = 0;  // 最大化前尺寸, restore 用
-    bool fullscreen = false;
-    int32_t preFsW = 0, preFsH = 0;    // 全屏前尺寸, unset_fullscreen restore 用
-
-    // xdg_toplevel resize 约束 (0 = 无限制)
-    bool hasSizeLimits = false;
-    int32_t minWidth = 0, minHeight = 0;
-    int32_t maxWidth = 0, maxHeight = 0;
-
-    // wl_surface.set_input_region: true = 空区域 (不接受输入, 穿透点击)
-    bool inputRegionEmpty = false;
-};
+#include "compositor/surface_data.h"  // SurfaceData 已提取至独立头文件

@@ -20,7 +20,8 @@ class DesktopController extends XComponentController {
     if (rootId > 0) {
       try {
         testNapi.resizeRenderer(rootId, rect.surfaceWidth, rect.surfaceHeight);
-        const s = 2.0;
+        // 统一经 getEffectiveScale, 不再硬编码 2.0
+        const s = WineWindowManager.getInstance().getEffectiveScale();
         testNapi.notifyToplevelResize(rootId,
           Math.round(rect.surfaceWidth / s), Math.round(rect.surfaceHeight / s));
       } catch (_) {}

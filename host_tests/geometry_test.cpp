@@ -1,0 +1,109 @@
+// compositor/geometry 纯函数的宿主机单元测试 (make test)。
+// 不依赖 wayland/OHOS SDK, 用宿主 g++ 编译, 目的是把坐标换算这种
+// 历史重灾区逻辑 (全屏/黑边鼠标映射) 变成可离线验证的纯函数。
+#include "compositor/geometry.h"
+#include <cmath>
+#include <cstdio>
+#include <initializer_list>
+
+static int g_checks = 0;
+static int g_failures = 0;
+
+#define CHECK(cond, msg) do { \
+    ++g_checks; \
+    if (!(cond)) { \
+        ++g_failures; \
+        std::printf("FAIL: %s (%s:%d)\n", msg, __FILE__, __LINE__); \
+    } \
+} while (0)
+
+static bool near(double a, double b, double eps) { return std::fabs(a - b) < eps; }
+
+int main()
+{
+    // 1. 同宽高比: 无缩放无黑边
+    {
+        FitRect t;
+        CHECK(ComputeFitRect(1920, 1080, 1920, 1080, t), "same aspect ok");
+        CHECK(near(t.scale, 1.0, 1e-12), "same aspect scale=1");
+        CHECK(t.dstW == 1920 && t.dstH == 1080 && t.offX == 0 && t.offY == 0, "same aspect fill");
+        CHECK(t.srcW == 1920 && t.srcH == 1080, "src recorded");
+    }
+
+    // 2. 宽内容 → 高显示区: 上下黑边 (letterbox)
+    {
+        FitRect t;
+        CHECK(ComputeFitRect(1080, 1920, 1280, 720, t), "letterbox ok");
+        CHECK(t.dstW == 1080, "letterbox width bound");
+        CHECK(t.offX == 0, "letterbox no x offset");
+        CHECK(t.dstH > 0 && t.dstH < 1920, "letterbox dstH shrunk");
+        CHECK(t.offY == (1920 - t.dstH) / 2, "letterbox centered");
+        // 黑边内的点逆映射出内容边界 (输入路径依赖越界坐标触发 clamp)
+        CHECK(FitUnmapY(t, t.offY - 1) < 0, "top bar maps negative");
+        CHECK(FitUnmapY(t, t.offY + t.dstH) >= t.srcH, "bottom bar maps beyond");
+    }
+
+    // 3. 高内容 → 宽显示区: 左右黑边 (pillarbox)
+    {
+        FitRect t;
+        CHECK(ComputeFitRect(1920, 1080, 720, 1280, t), "pillarbox ok");
+        CHECK(t.dstH == 1080 && t.offY == 0, "pillarbox height bound");
+        CHECK(t.offX == (1920 - t.dstW) / 2, "pillarbox centered");
+        CHECK(FitUnmapX(t, t.offX - 1) < 0, "left bar maps negative");
+        CHECK(FitUnmapX(t, t.offX + t.dstW) >= t.srcW, "right bar maps beyond");
+    }
+
+    // 4. 零/负尺寸防御: 计算拒绝 + 映射函数不除零
+    {
+        FitRect t;
+        CHECK(!ComputeFitRect(0, 100, 100, 100, t), "zero rootW rejected");
+        CHECK(!ComputeFitRect(100, 0, 100, 100, t), "zero rootH rejected");
+        CHECK(!ComputeFitRect(100, 100, 0, 100, t), "zero winW rejected");
+        CHECK(!ComputeFitRect(100, 100, 100, -1, t), "negative winH rejected");
+        FitRect z{};
+        CHECK(FitMapDisplayX(z, 10) == 0 && FitMapDisplayY(z, 10) == 0, "zero rect map safe");
+        CHECK(FitUnmapDisplayX(z, 10) == 0.0 && FitUnmapDisplayY(z, 10) == 0.0, "zero rect unmap safe");
+        CHECK(FitSizeDisplayW(z, 10) == 0 && FitSizeDisplayH(z, 10) == 0, "zero rect size safe");
+    }
+
+    // 5. 极端宽高比: dst 至少 1px
+    {
+        FitRect t;
+        CHECK(ComputeFitRect(100, 100, 10000, 1, t), "extreme aspect ok");
+        CHECK(t.dstW == 100 && t.dstH == 1, "extreme aspect clamped to 1px");
+    }
+
+    // 6. 正/逆映射互逆 (数学变体, 严格)
+    {
+        FitRect t;
+        ComputeFitRect(1920, 1080, 1280, 720, t);
+        for (double x : {0.0, 1.5, 639.25, 1279.9}) {
+            CHECK(near(FitUnmapX(t, FitMapX(t, x)), x, 1e-6), "map/unmap X inverse");
+        }
+        for (double y : {0.0, 3.25, 719.9}) {
+            CHECK(near(FitUnmapY(t, FitMapY(t, y)), y, 1e-6), "map/unmap Y inverse");
+        }
+    }
+
+    // 7. 正/逆映射互逆 (取整 dst 变体, 整数截断允许 <1px 误差)
+    {
+        FitRect t;
+        ComputeFitRect(2800, 1840, 1400, 920, t);
+        for (int64_t x : {0, 1, 700, 1399}) {
+            CHECK(near(FitUnmapDisplayX(t, FitMapDisplayX(t, x)), x, 1.0), "display map/unmap X ~1px");
+        }
+        for (int64_t y : {0, 1, 460, 919}) {
+            CHECK(near(FitUnmapDisplayY(t, FitMapDisplayY(t, y)), y, 1.0), "display map/unmap Y ~1px");
+        }
+    }
+
+    // 8. dst 尺寸用 lround 而非截断: 720 * (1000/1280) = 562.5 → 563
+    {
+        FitRect t;
+        ComputeFitRect(1000, 1000, 1280, 720, t);
+        CHECK(t.dstH == 563, "dst rounding is lround, not trunc");
+    }
+
+    std::printf("%d checks, %d failures\n", g_checks, g_failures);
+    return g_failures == 0 ? 0 : 1;
+}

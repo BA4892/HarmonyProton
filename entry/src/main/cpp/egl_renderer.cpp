@@ -1,5 +1,7 @@
 #include "egl_renderer.h"
 #include "graphics_broker.h"
+#include "perf_utils.h"
+#include "shader_utils.h"
 #include "wayland_server.h"
 #include "fps_counter.h"
 #include <algorithm>
@@ -16,6 +18,8 @@
 #include <unistd.h>
 
 #undef LOG_TAG
+#undef LOG_DOMAIN
+#define LOG_DOMAIN 0x0000
 #define LOG_TAG "WL_EGL"
 #include <hilog/log.h>
 
@@ -23,137 +27,9 @@
 static EGLDisplay gSharedDisplay = EGL_NO_DISPLAY;
 static std::once_flag gDisplayOnce;
 
-namespace {
-
-using PerfClock = std::chrono::steady_clock;
-
-static uint64_t PerfNowUs()
-{
-    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
-        PerfClock::now().time_since_epoch()).count());
-}
-
-struct RendererPerfWindow {
-    static constexpr size_t kSamples = 120;
-
-    std::array<uint64_t, kSamples> takeUs{};
-    std::array<uint64_t, kSamples> uploadUs{};
-    std::array<uint64_t, kSamples> swapUs{};
-    std::array<uint64_t, kSamples> totalUs{};
-    size_t count = 0;
-    uint64_t displayed = 0;
-    uint64_t windowDisplayed = 0;
-    uint64_t failedSwaps = 0;
-    uint64_t uploadBytes = 0;
-    uint64_t startedUs = PerfNowUs();
-    uint64_t publishStartedUs = startedUs;
-    uint64_t publishFrames = 0;
-    uint64_t publishSequence = 0;
-
-    void PublishDisplayedFps(uint32_t toplevelId, uint64_t nowUs)
-    {
-        static constexpr const char* kPath =
-            "/data/storage/el2/base/files/.wine/drive_c/windows/temp/winehua_display_fps.txt";
-        const uint64_t elapsedUs = nowUs - publishStartedUs;
-        if (elapsedUs < 1000000) return;
-
-        const double fps = static_cast<double>(publishFrames) * 1000000.0 /
-                           static_cast<double>(std::max<uint64_t>(1, elapsedUs));
-        char tempPath[192];
-        char payload[128];
-        const unsigned long long nextSequence =
-            static_cast<unsigned long long>(publishSequence + 1);
-        const int payloadLength = std::snprintf(
-            payload, sizeof(payload), "%llu %.3f %u\n", nextSequence, fps, toplevelId);
-        std::snprintf(tempPath, sizeof(tempPath), "%s.tmp.%d.%p",
-                      kPath, getpid(), static_cast<void*>(this));
-
-        const int fd = payloadLength > 0 && payloadLength < static_cast<int>(sizeof(payload))
-            ? open(tempPath, O_WRONLY | O_CREAT | O_TRUNC, 0666) : -1;
-        if (fd >= 0)
-        {
-            const ssize_t written = write(fd, payload, static_cast<size_t>(payloadLength));
-            close(fd);
-            if (written == payloadLength && !rename(tempPath, kPath))
-                publishSequence++;
-            else
-                unlink(tempPath);
-        }
-
-        publishFrames = 0;
-        publishStartedUs = nowUs;
-    }
-
-    static uint64_t Percentile(std::array<uint64_t, kSamples> values, size_t count,
-                               unsigned int percentile)
-    {
-        std::sort(values.begin(), values.begin() + count);
-        const size_t index = std::min(count - 1, (count * percentile + 99) / 100 - 1);
-        return values[index];
-    }
-
-    void Add(uint32_t toplevelId, uint64_t take, uint64_t upload, uint64_t swap,
-             uint64_t total, size_t bytes, bool swapOk)
-    {
-        takeUs[count] = take;
-        uploadUs[count] = upload;
-        swapUs[count] = swap;
-        totalUs[count] = total;
-        ++count;
-        if (swapOk)
-        {
-            ++displayed;
-            ++windowDisplayed;
-            ++publishFrames;
-        }
-        uploadBytes += bytes;
-        if (!swapOk) ++failedSwaps;
-
-        const uint64_t nowUs = PerfNowUs();
-        PublishDisplayedFps(toplevelId, nowUs);
-
-        if (count != kSamples) return;
-
-        const double fps = static_cast<double>(windowDisplayed) * 1000000.0 /
-                           static_cast<double>(std::max<uint64_t>(1, nowUs - startedUs));
-        OH_LOG_INFO(LOG_APP,
-                    "[GL-PERF] tl=%{public}u displayed=%{public}llu fps=%{public}.2f "
-                    "upload_bytes=%{public}llu failed_swaps=%{public}llu "
-                    "take_us=%{public}llu/%{public}llu/%{public}llu/%{public}llu "
-                    "upload_us=%{public}llu/%{public}llu/%{public}llu/%{public}llu "
-                    "swap_us=%{public}llu/%{public}llu/%{public}llu/%{public}llu "
-                    "total_us=%{public}llu/%{public}llu/%{public}llu/%{public}llu",
-                    toplevelId, static_cast<unsigned long long>(displayed), fps,
-                    static_cast<unsigned long long>(uploadBytes),
-                    static_cast<unsigned long long>(failedSwaps),
-                    static_cast<unsigned long long>(Percentile(takeUs, count, 50)),
-                    static_cast<unsigned long long>(Percentile(takeUs, count, 95)),
-                    static_cast<unsigned long long>(Percentile(takeUs, count, 99)),
-                    static_cast<unsigned long long>(*std::max_element(takeUs.begin(), takeUs.end())),
-                    static_cast<unsigned long long>(Percentile(uploadUs, count, 50)),
-                    static_cast<unsigned long long>(Percentile(uploadUs, count, 95)),
-                    static_cast<unsigned long long>(Percentile(uploadUs, count, 99)),
-                    static_cast<unsigned long long>(*std::max_element(uploadUs.begin(), uploadUs.end())),
-                    static_cast<unsigned long long>(Percentile(swapUs, count, 50)),
-                    static_cast<unsigned long long>(Percentile(swapUs, count, 95)),
-                    static_cast<unsigned long long>(Percentile(swapUs, count, 99)),
-                    static_cast<unsigned long long>(*std::max_element(swapUs.begin(), swapUs.end())),
-                    static_cast<unsigned long long>(Percentile(totalUs, count, 50)),
-                    static_cast<unsigned long long>(Percentile(totalUs, count, 95)),
-                    static_cast<unsigned long long>(Percentile(totalUs, count, 99)),
-                    static_cast<unsigned long long>(*std::max_element(totalUs.begin(), totalUs.end())));
-
-        count = 0;
-        windowDisplayed = 0;
-        uploadBytes = 0;
-        failedSwaps = 0;
-        startedUs = nowUs;
-    }
-};
-
-} // namespace
-
-float EglRenderer::globalDisplayScale_ = 1.0f;
+using winehua::PerfClock;
+using winehua::PerfNowUs;
+using winehua::RendererPerfWindow;
 
 void EglRenderer::OnVSync(long long timestamp, void* data)
 {
@@ -192,54 +68,10 @@ EGLDisplay EglRenderer::GetSharedDisplay() {
     return gSharedDisplay;
 }
 
-// -- 全屏 quad 着色器 (Wayland ARGB = BGRA 内存序, 像素着色器中 swizzle) --
-static const char* kVS = R"(#version 300 es
-layout(location=0) in vec2 aPos;
-layout(location=1) in vec2 aUV;
-out vec2 vUV;
-void main() { vUV = aUV; gl_Position = vec4(aPos, 0, 1); }
-)";
-
-static const char* kFS = R"(#version 300 es
-precision mediump float;
-in vec2 vUV;
-out vec4 oColor;
-uniform sampler2D uTex;
-uniform float uForceOpaque;
-void main() {
-    vec4 t = texture(uTex, vUV);
-    // uForceOpaque=1: XRGB 帧 (alpha 字节是垃圾, 强制不透明)
-    // uForceOpaque=0: ARGB 帧 (layered/shaped 异型窗口, 透传预乘 alpha)
-    oColor = vec4(t.bgr, uForceOpaque > 0.5 ? 1.0 : t.a);
-}
-)";
-
-static const char* kZeroCopyFS = R"(#version 300 es
-#extension GL_OES_EGL_image_external_essl3 : require
-precision mediump float;
-in vec2 vUV;
-out vec4 oColor;
-uniform samplerExternalOES uTex;
-uniform mat4 uTransform;
-void main() {
-    vec4 coord = uTransform * vec4(vUV, 0.0, 1.0);
-    oColor = texture(uTex, coord.xy);
-}
-)";
-
-static GLuint CompileShader(GLenum type, const char* src) {
-    GLuint s = glCreateShader(type);
-    glShaderSource(s, 1, &src, nullptr);
-    glCompileShader(s);
-    GLint ok = 0;
-    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
-    if (!ok) {
-        char log[1024] = {};
-        glGetShaderInfoLog(s, sizeof(log), nullptr, log);
-        OH_LOG_ERROR(LOG_APP, "[EGL] shader compile: %{public}s", log);
-    }
-    return s;
-}
+using winehua::kFullscreenQuadVS;
+using winehua::kFullscreenQuadFS;
+using winehua::kZeroCopyExternalFS;
+using winehua::CompileShader;
 
 bool EglRenderer::InitZeroCopyConsumer()
 {
@@ -247,8 +79,8 @@ bool EglRenderer::InitZeroCopyConsumer()
         winehua::GraphicsBroker::GetInstance().GetState().active != winehua::GraphicsBackend::Virgl)
         return false;
 
-    GLuint vertex = CompileShader(GL_VERTEX_SHADER, kVS);
-    GLuint fragment = CompileShader(GL_FRAGMENT_SHADER, kZeroCopyFS);
+    GLuint vertex = CompileShader(GL_VERTEX_SHADER, kFullscreenQuadVS);
+    GLuint fragment = CompileShader(GL_FRAGMENT_SHADER, kZeroCopyExternalFS);
     zeroCopyProgram_ = glCreateProgram();
     glAttachShader(zeroCopyProgram_, vertex);
     glAttachShader(zeroCopyProgram_, fragment);
@@ -435,7 +267,7 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
             WaylandServer::ZeroCopyLayerInfo layer;
             uint32_t rendererToplevelId = toplevelId_;
             WaylandServer* server = WaylandServer::GetInstance();
-            if (server->IsDesktopMode())
+            if (server->Policy().RootCompositing())
                 rendererToplevelId = server->GetDesktopRootToplevelId();
             if (server->GetZeroCopyLayerInfo(zeroCopySurfaceKey_, rendererToplevelId, layer))
                 zeroCopyFallbackShmSerial_ = layer.shmCommitSerial;
@@ -478,7 +310,7 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
     WaylandServer::ZeroCopyLayerInfo layer;
     uint32_t rendererToplevelId = toplevelId_;
     WaylandServer* server = WaylandServer::GetInstance();
-    if (server->IsDesktopMode()) rendererToplevelId = server->GetDesktopRootToplevelId();
+    if (server->Policy().RootCompositing()) rendererToplevelId = server->GetDesktopRootToplevelId();
     if (!server->GetZeroCopyLayerInfo(zeroCopySurfaceKey_, rendererToplevelId, layer))
     {
         ReleaseZeroCopyBinding();
@@ -637,8 +469,8 @@ void EglRenderer::RenderLoop() {
                 toplevelId_, swapIntervalDisabled ? "OK" : "FAIL");
 
     // 2. 着色器
-    GLuint vs = CompileShader(GL_VERTEX_SHADER, kVS);
-    GLuint fs = CompileShader(GL_FRAGMENT_SHADER, kFS);
+    GLuint vs = CompileShader(GL_VERTEX_SHADER, kFullscreenQuadVS);
+    GLuint fs = CompileShader(GL_FRAGMENT_SHADER, kFullscreenQuadFS);
     program_ = glCreateProgram();
     glAttachShader(program_, vs);
     glAttachShader(program_, fs);
@@ -778,7 +610,7 @@ void EglRenderer::RenderLoop() {
         uint32_t useToplevel = toplevelId_;
         WaylandServer* ws = WaylandServer::GetInstance();
         // Desktop mode: root toplevel may be recreated, always use current ID
-        if (ws->IsDesktopMode()) useToplevel = ws->GetDesktopRootToplevelId();
+        if (ws->Policy().RootCompositing()) useToplevel = ws->GetDesktopRootToplevelId();
         TryAttachZeroCopySurface(useToplevel);
         const bool zeroCopyGeometryFrame = zeroCopyGeometryDirty_;
         zeroCopyGeometryDirty_ = false;
@@ -863,40 +695,28 @@ void EglRenderer::RenderLoop() {
             height_ = surfH;
         }
 
-        // Letterbox 视口: 保持 Wine 帧宽高比, 居中渲染, 左右或上下黑边
-        if (frameW_ > 0 && frameH_ > 0 && width_ > 0 && height_ > 0) {
-            float frameAspect = (float)frameW_ / frameH_;
-            float surfAspect = (float)width_ / height_;
-            if (surfAspect > frameAspect) {
-                // Surface 比帧更宽 -> 左右黑边
-                vpH_ = height_;
-                vpW_ = (int)(height_ * frameAspect);
-                vpX_ = (width_ - vpW_) / 2;
-                vpY_ = 0;
-            } else {
-                // Surface 比帧更高 -> 上下黑边 (常见: 手机竖屏)
-                vpW_ = width_;
-                vpH_ = (int)(width_ / frameAspect);
-                vpX_ = 0;
-                vpY_ = (height_ - vpH_) / 2;
-            }
-            glViewport(vpX_, vpY_, vpW_, vpH_);
+        // Letterbox 视口: 保持 Wine 帧宽高比, 居中渲染, 左右或上下黑边。
+        // 几何统一由 ComputeFitRect 计算 (与 desktop 合成/输入命中同源;
+        // 历史实现此处独立手写, 截断取整与合成的 lround 不一致曾有 1px 偏差)
+        if (ComputeFitRect(width_, height_, frameW_, frameH_, letterbox_)) {
+            glViewport(letterbox_.offX, letterbox_.offY, letterbox_.dstW, letterbox_.dstH);
         } else {
+            letterbox_ = FitRect{};
             glViewport(0, 0, width_, height_);
         }
 
         // 诊断: 前10帧详细打印 surface -> frame -> viewport 完整映射
         if (loopCount < 10) {
-            int barTop = vpY_;
-            int barBot = height_ - vpY_ - vpH_;
-            int barLeft = vpX_;
-            int barRight = width_ - vpX_ - vpW_;
+            int barTop = letterbox_.offY;
+            int barBot = height_ - letterbox_.offY - letterbox_.dstH;
+            int barLeft = letterbox_.offX;
+            int barRight = width_ - letterbox_.offX - letterbox_.dstW;
             float sA = (float)width_ / height_;
             float fA = frameW_ > 0 && frameH_ > 0 ? (float)frameW_ / frameH_ : 0;
             OH_LOG_INFO(LOG_APP, "[MW-RNDR] diag#%{public}d tl=%{public}u surface=%{public}dx%{public}d(asp=%{public}.2f) frame=%{public}dx%{public}d(asp=%{public}.2f) vp=%{public}dx%{public}d+%{public}d,%{public}d bar=(L%{public}d R%{public}d T%{public}d B%{public}d)",
                         loopCount, useToplevel,
                         width_, height_, sA, frameW_, frameH_, fA,
-                        vpW_, vpH_, vpX_, vpY_,
+                        letterbox_.dstW, letterbox_.dstH, letterbox_.offX, letterbox_.offY,
                         barLeft, barRight, barTop, barBot);
         }
 
@@ -921,7 +741,7 @@ void EglRenderer::RenderLoop() {
         glActiveTexture(GL_TEXTURE0);
 
         if (rendered) {
-            glViewport(vpX_, vpY_, vpW_, vpH_);
+            glViewport(letterbox_.offX, letterbox_.offY, letterbox_.dstW, letterbox_.dstH);
             glUseProgram(program_);
             glBindTexture(GL_TEXTURE_2D, texture_);
             glUniform1i(glGetUniformLocation(program_, "uTex"), 0);
@@ -931,15 +751,11 @@ void EglRenderer::RenderLoop() {
 
         if (zeroCopyHasFrame_ && zeroCopyRegistered_ && frameW_ > 0 && frameH_ > 0 &&
             zeroCopyLayerW_ > 0 && zeroCopyLayerH_ > 0) {
-            const int layerViewportX = vpX_ +
-                static_cast<int>((static_cast<int64_t>(zeroCopyLayerX_) * vpW_) / frameW_);
-            const int layerViewportY = vpY_ +
-                static_cast<int>((static_cast<int64_t>(
-                    frameH_ - zeroCopyLayerY_ - zeroCopyLayerH_) * vpH_) / frameH_);
-            const int layerViewportW = std::max(1, static_cast<int>(
-                (static_cast<int64_t>(zeroCopyLayerW_) * vpW_) / frameW_));
-            const int layerViewportH = std::max(1, static_cast<int>(
-                (static_cast<int64_t>(zeroCopyLayerH_) * vpH_) / frameH_));
+            // 帧内坐标 → surface 视口: 与 letterbox 同一映射 (GL 坐标系 Y 向上, 翻转)
+            const int layerViewportX = FitMapDisplayX(letterbox_, zeroCopyLayerX_);
+            const int layerViewportY = FitMapDisplayY(letterbox_, frameH_ - zeroCopyLayerY_ - zeroCopyLayerH_);
+            const int layerViewportW = std::max(1, FitSizeDisplayW(letterbox_, zeroCopyLayerW_));
+            const int layerViewportH = std::max(1, FitSizeDisplayH(letterbox_, zeroCopyLayerH_));
             glViewport(layerViewportX, layerViewportY, layerViewportW, layerViewportH);
             glUseProgram(zeroCopyProgram_);
             glBindTexture(GL_TEXTURE_EXTERNAL_OES, zeroCopyTexture_);
@@ -954,7 +770,7 @@ void EglRenderer::RenderLoop() {
             // 本 context 从不开启 GL_BLEND: 重绘就是不透明覆盖, 无需混合,
             // 也不要加混合 —— 目标就是盖住 overlay, 不是与它融合。
             // PC 模式不需要: GL 内容画在各自窗口内, 层序由系统合成器保证。
-            if (ws->IsDesktopMode() && rendered) {
+            if (ws->Policy().RootCompositing() && rendered) {
                 // 32 上限: 遮挡源 = 上层窗口 + popup 层, 真实场景个位数;
                 // 超出的部分不重绘 (该区域 GL 内容会透出), 比动态扩容简单且够用
                 static constexpr int kMaxOccluders = 32;
@@ -975,14 +791,10 @@ void EglRenderer::RenderLoop() {
                     for (int i = 0; i < occluderCount; ++i) {
                         const auto& r = occluders[i];
                         // 桌面帧像素坐标 → surface 视口 (与 layer 同一 letterbox 映射)
-                        const int vx = vpX_ + static_cast<int>(
-                            (static_cast<int64_t>(r.x) * vpW_) / frameW_);
-                        const int vy = vpY_ + static_cast<int>(
-                            (static_cast<int64_t>(frameH_ - r.y - r.h) * vpH_) / frameH_);
-                        const int vw = std::max(1, static_cast<int>(
-                            (static_cast<int64_t>(r.w) * vpW_) / frameW_));
-                        const int vh = std::max(1, static_cast<int>(
-                            (static_cast<int64_t>(r.h) * vpH_) / frameH_));
+                        const int vx = FitMapDisplayX(letterbox_, r.x);
+                        const int vy = FitMapDisplayY(letterbox_, frameH_ - r.y - r.h);
+                        const int vw = std::max(1, FitSizeDisplayW(letterbox_, r.w));
+                        const int vh = std::max(1, FitSizeDisplayH(letterbox_, r.h));
                         // 桌面纹理 UV 子区域 (纹理第 0 行 = 帧顶部, v 无需翻转)
                         const float u0 = static_cast<float>(r.x) / frameW_;
                         const float u1 = static_cast<float>(r.x + r.w) / frameW_;

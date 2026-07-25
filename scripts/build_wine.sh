@@ -28,12 +28,12 @@ build_native_tools() {
         if [ "$HOST_OS" = "Darwin" ]; then
             export FREETYPE_CFLAGS="$("$PKG_CONFIG_BIN" --cflags freetype2)"
             export FREETYPE_LIBS="$("$PKG_CONFIG_BIN" --libs freetype2)"
-            "$WINE_SRC/configure" --enable-archs=x86_64 --disable-tests \
+            "$CONFIGURE_BIN" --srcdir="$WINE_SRC" --enable-archs=x86_64 --disable-tests \
                 --without-x --without-alsa --without-opengl --without-vulkan
         else
             export FREETYPE_CFLAGS="-I/usr/include/freetype2"
             export FREETYPE_LIBS="-lfreetype"
-            "$WINE_SRC/configure" --enable-win64 --disable-tests \
+            "$CONFIGURE_BIN" --srcdir="$WINE_SRC" --enable-win64 --disable-tests \
                 --without-x --without-alsa --without-opengl --without-vulkan
         fi
     fi
@@ -101,7 +101,7 @@ build_ohos_unix() {
         LDFLAGS="-fuse-ld=lld --sysroot=$SYSROOT --target=$TARGET -L$SYSROOT_EXT_LIB" \
         PKG_CONFIG="$pkg_config" \
         PKG_CONFIG_PATH="$SYSROOT_EXT_PC" \
-        "$WINE_SRC/configure" \
+        "$CONFIGURE_BIN" --srcdir="$WINE_SRC" \
             --host=x86_64-linux-ohos \
             --enable-archs=i386,x86_64 \
             --prefix=/opt/winehua \
@@ -192,6 +192,15 @@ build_wineserver() {
 
 # ---- main ----
 log "=== 构建 Wine ==="
+
+# 从 configure.ac 重新生成 configure 到构建目录 (不污染源码树)
+# 我们的 configure.ac 新增了 wineohos.drv 等模块的 WINE_CONFIG_MAKEFILE
+CONFIGURE_BIN="$BUILD_DIR/configure"
+if [ ! -x "$CONFIGURE_BIN" ] || [ "$WINE_SRC/configure.ac" -nt "$CONFIGURE_BIN" ]; then
+    log "--- 重新生成 configure (autoconf) ---"
+    (cd "$BUILD_DIR" && autoconf -I "$WINE_SRC" -o "$CONFIGURE_BIN" "$WINE_SRC/configure.ac")
+    chmod +x "$CONFIGURE_BIN"
+fi
 
 build_native_tools
 build_ohos_unix

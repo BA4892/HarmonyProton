@@ -8,7 +8,9 @@
 #include <fcntl.h>
 #include <errno.h>
 
+#undef LOG_DOMAIN
 #undef LOG_TAG
+#define LOG_DOMAIN 0x0000
 #define LOG_TAG "WL_Input"
 #include <hilog/log.h>
 
@@ -113,7 +115,7 @@ wl_fixed_t InputManager::CoordTransform(double px, double py, uint32_t tl,
                                          wl_fixed_t* outX, wl_fixed_t* outY) {
     auto* r = PluginManager::GetInstance()->GetRendererForToplevel(tl);
     // Desktop 模式 fallback: root 切换后可能用旧 ID 查 renderer
-    if (!r && WaylandServer::GetInstance()->IsDesktopMode()) {
+    if (!r && WaylandServer::GetInstance()->Policy().RootCompositing()) {
         uint32_t rootId = WaylandServer::GetInstance()->GetDesktopRootToplevelId();
         if (rootId != tl) r = PluginManager::GetInstance()->GetRendererForToplevel(rootId);
     }
@@ -124,26 +126,22 @@ wl_fixed_t InputManager::CoordTransform(double px, double py, uint32_t tl,
     }
     int surfW = r->GetWidth();
     int surfH = r->GetHeight();
-    int fw = r->GetFrameWidth();
-    int fh = r->GetFrameHeight();
-    int vpX = r->GetVpX();
-    int vpY = r->GetVpY();
-    int vpW = r->GetVpW();
-    int vpH = r->GetVpH();
+    const FitRect& lb = r->GetLetterbox();
 
-    if (surfW <= 0 || surfH <= 0 || fw <= 0 || fh <= 0 || vpW <= 0 || vpH <= 0) {
+    if (surfW <= 0 || surfH <= 0 || lb.dstW <= 0 || lb.dstH <= 0) {
         *outX = 0; *outY = 0;
         return wl_fixed_from_int(0);
     }
 
-    // Letterbox 坐标映射: (px - viewport_offset) / viewport_size * frame_size
-    wl_fixed_t wx = wl_fixed_from_double((px - vpX) * fw / vpW);
-    wl_fixed_t wy = wl_fixed_from_double((py - vpY) * fh / vpH);
+    // Letterbox 逆映射 (geometry.h 统一实现): 物理像素 → 去黑边 → 按帧尺寸缩放
+    // 注意用取整后 dst 尺寸的变体 — 与 glViewport 实际显示的整数像素严格一致
+    wl_fixed_t wx = wl_fixed_from_double(FitUnmapDisplayX(lb, px));
+    wl_fixed_t wy = wl_fixed_from_double(FitUnmapDisplayY(lb, py));
     *outX = wx; *outY = wy;
 
     OH_LOG_DEBUG(LOG_APP, "[Input] CoordTransform px=(%{public}.0f,%{public}.0f) vp=(%{public}d,%{public}d %{public}dx%{public}d)"
                  " surf=%{public}dx%{public}d frame=%{public}dx%{public}d → wine=(%{public}.0f,%{public}.0f)",
-                 px, py, vpX, vpY, vpW, vpH, surfW, surfH, fw, fh,
+                 px, py, lb.offX, lb.offY, lb.dstW, lb.dstH, surfW, surfH, lb.srcW, lb.srcH,
                  wl_fixed_to_double(wx), wl_fixed_to_double(wy));
     return wx;
 }
@@ -296,7 +294,7 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
     // wl_surface, 必须 enter 它并用层相对坐标 — 经父窗口 surface 的越界
     // 坐标会被 winewayland 的 motion clamp 夹回窗口内, 菜单伸出部分点不中)
     wl_resource* targetSurf = nullptr;
-    if (ws->IsDesktopMode() && tl != ws->GetDesktopRootToplevelId()) {
+    if (ws->Policy().CompositorRoutesInput() && tl != ws->GetDesktopRootToplevelId()) {
         CoordTransform(px, py, ws->GetDesktopRootToplevelId(), &wx, &wy);
         WaylandServer::InputTarget target;
         if (ws->FindInputTargetAt(wl_fixed_to_int(wx), wl_fixed_to_int(wy), target)) {
@@ -306,8 +304,9 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
             if (target.swallow && action == ACT_PRESS) return;
             tl = target.toplevelId;
             targetSurf = target.surface;
-            // 桌面坐标 → surface 局部坐标。target.scale > 1 表示全屏窗口
-            // 保比例放大显示, 局部坐标需按同一缩放除回来
+            // 桌面坐标 → surface 局部坐标 (即 geometry.h 的 FitUnmapX/Y;
+            // target.origin/scale 由 InputResolver 的 ComputeFitRect 给出)。
+            // target.scale > 1 表示全屏窗口保比例放大显示, 局部坐标需按同一缩放除回来
             const double localX = (wl_fixed_to_double(wx) - target.originX) / target.scale;
             const double localY = (wl_fixed_to_double(wy) - target.originY) / target.scale;
             wx = wl_fixed_from_double(localX);
@@ -456,7 +455,7 @@ void InputManager::SendKeyEvent(uint32_t tl, int evdevCode, bool pressed) {
 
     // 键盘 enter 管理: 立即设置状态防止重复 enter (参考旧代码)
     // 桌面模式: 键盘事件永远发到 root, 不应覆盖点击建立的子窗口焦点
-    if (pressed && !WaylandServer::GetInstance()->IsDesktopMode()
+    if (pressed && !WaylandServer::GetInstance()->Policy().CompositorRoutesInput()
         && (!keyboardEntered_.load() || keyboardFocusedToplevel_.load() != tl)) {
         wl_resource* surf = WaylandServer::GetInstance()->GetSurfaceForToplevel(tl);
         if (surf) {

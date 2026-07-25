@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <condition_variable>
 #include <mutex>
+#include "compositor/geometry.h"
 
 struct OH_NativeImage;
 
@@ -32,14 +33,8 @@ public:
     int GetHeight() const { return height_; }
     int GetFrameWidth() const { return frameW_; }
     int GetFrameHeight() const { return frameH_; }
-    // Letterbox viewport (保持 Wine 帧宽高比居中渲染的视口)
-    int GetVpX() const { return vpX_; }
-    int GetVpY() const { return vpY_; }
-    int GetVpW() const { return vpW_; }
-    int GetVpH() const { return vpH_; }
-
-    static void SetGlobalDisplayScale(float s) { globalDisplayScale_ = s; }
-    static float GetGlobalDisplayScale() { return globalDisplayScale_; }
+    // Letterbox 适配矩形 (保持 Wine 帧宽高比居中渲染的视口, 输入坐标换算用)
+    const FitRect& GetLetterbox() const { return letterbox_; }
 
 private:
     void RenderLoop();
@@ -100,7 +95,7 @@ private:
     int frameW_ = 0, frameH_ = 0;  // Wine 帧内容尺寸 (坐标转换)
     bool frameArgb_ = false;       // 当前帧是 ARGB8888 (layered/shaped 异型窗口, 透传 alpha)
     int texW_ = 0, texH_ = 0;      // 上次上传的纹理尺寸 (用于避免每帧 glTexImage2D)
-    int vpX_ = 0, vpY_ = 0, vpW_ = 0, vpH_ = 0;  // Letterbox 视口 (保持宽高比)
+    FitRect letterbox_;  // Letterbox 适配矩形 (ComputeFitRect, 保持宽高比)
     int bufW_ = 0, bufH_ = 0;  // 上次 SET_BUFFER_GEOMETRY 的值, 避免重复调用
     int lastLoggedW_ = 0, lastLoggedH_ = 0;  // 上次输出 resize 日志时的 surface 尺寸
     std::thread thread_;
@@ -111,6 +106,4 @@ private:
     std::atomic<long long> vsyncPeriodNs_{16666667};
 
     uint32_t toplevelId_ = 0;
-
-    static float globalDisplayScale_;
 };

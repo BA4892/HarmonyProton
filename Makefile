@@ -207,6 +207,20 @@ hap: assemble
 	@ls -lh $(ROOT)/entry/build/default/outputs/default/entry-default-signed.hap 2>/dev/null || true
 
 # ============================================================
+# test: 宿主机单元测试 (纯函数, 不依赖 OHOS SDK, 用宿主 g++ 编译)
+# ============================================================
+HOST_TEST_DIR := $(BUILD_DIR)/host_tests
+
+.PHONY: test
+test:
+	@mkdir -p $(HOST_TEST_DIR)
+	g++ -std=c++17 -Wall -Wextra -I $(ROOT)/entry/src/main/cpp \
+	    -o $(HOST_TEST_DIR)/geometry_test \
+	    $(ROOT)/host_tests/geometry_test.cpp \
+	    $(ROOT)/entry/src/main/cpp/compositor/geometry.cpp
+	$(HOST_TEST_DIR)/geometry_test
+
+# ============================================================
 # clean
 # ============================================================
 .PHONY: clean

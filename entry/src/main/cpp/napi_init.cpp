@@ -1,4 +1,5 @@
 #include <napi/native_api.h>
+#include "fs_utils.h"
 #include "wayland_server.h"
 #include "plugin_manager.h"
 #include "input_manager.h"
@@ -30,6 +31,8 @@
 #include <dlfcn.h>
 
 #undef LOG_TAG
+#undef LOG_DOMAIN
+#define LOG_DOMAIN 0x0000
 #define LOG_TAG "WL_NAPI"
 #include <hilog/log.h>
 
@@ -168,28 +171,11 @@ static napi_value CheckWinePrefix(napi_env env, napi_callback_info info) {
 }
 
 // -- NAPI: resetWinePrefix -- 一键清空 files/.wine 目录
-static void RmDir(const char* path) {
-    DIR* d = opendir(path);
-    if (!d) return;
-    dirent* e;
-    while ((e = readdir(d))) {
-        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
-        std::string full = std::string(path) + "/" + e->d_name;
-        struct stat st;
-        if (stat(full.c_str(), &st) == 0) {
-            if (S_ISDIR(st.st_mode)) RmDir(full.c_str());
-            else unlink(full.c_str());
-        }
-    }
-    closedir(d);
-    rmdir(path);
-}
-
 static napi_value ResetWinePrefix(napi_env env, napi_callback_info info) {
     OH_LOG_INFO(LOG_APP, "[NAPI] resetWinePrefix called");
     KillAllProcesses();
     const char* prefix = WINE_PREFIX;
-    RmDir(prefix);
+    winehua::RemoveDir(prefix);
     mkdir(prefix, 0755);
     OH_LOG_INFO(LOG_APP, "[NAPI] resetWinePrefix: %{public}s cleared and recreated", prefix);
     return nullptr;
@@ -367,7 +353,7 @@ static napi_value DestroyRenderer(napi_env env, napi_callback_info info) {
     return nullptr;
 }
 
-// -- NAPI: setDisplayScale -- (传入设备 densityPixels, 供渲染层计算 viewport)
+// -- NAPI: setOutputSize --
 static napi_value SetOutputSize(napi_env env, napi_callback_info info) {
     size_t argc = 2;
     napi_value args[2];
@@ -380,14 +366,11 @@ static napi_value SetOutputSize(napi_env env, napi_callback_info info) {
     return nullptr;
 }
 
+// 已无效: C++ 坐标换算不使用 display scale (letterbox 由 renderer viewport 推导,
+// globalDisplayScale_ 只写不读已删除)。保留导出仅为兼容 ArkTS 侧调用, 收到直接忽略。
 static napi_value SetDisplayScale(napi_env env, napi_callback_info info) {
-    size_t argc = 1;
-    napi_value args[1];
-    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-    double scale;
-    napi_get_value_double(env, args[0], &scale);
-    EglRenderer::SetGlobalDisplayScale((float)scale);
-    OH_LOG_INFO(LOG_APP, "[MW-NAPI] setDisplayScale = %{public}.2f", scale);
+    (void)env;
+    (void)info;
     return nullptr;
 }
 
