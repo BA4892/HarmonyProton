@@ -7,6 +7,68 @@
 > code. Update it whenever a conclusion, gate result, commit, HAP, or primary
 > blocker changes.
 
+## 0. Visual correctness ledger and non-regression rule
+
+As of 2026-07-27, **no archived Heaven artifact is a known-good rollback-free
+baseline**. The user continuously observes backward camera-angle jumps on the
+currently installed frame-identity trace build and on every archived candidate
+listed in sections 19-24. A package seen around 12:40 was once reported as not
+jumping, but it was replaced before its HAP hash, source state, runtime hashes,
+profile, and continuous visual verdict were archived. It is therefore
+`UNKNOWN-NOT-RECOVERABLE`, not a valid baseline and not evidence that a later
+candidate fixed the issue.
+
+This exposed a process failure: performance improvements, sparse screenshot
+checks, and temporary visual observations were allowed to advance without
+first creating an immutable correctness milestone. From now on:
+
+1. `KNOWN_GOOD` requires an archived signed HAP, HAP/wine-data/runtime DLL
+   hashes, main and all changed submodule commits, exact profile/environment,
+   machine-readable logs, Cube `angleRegressions=0`, and the user's continuous
+   Heaven verdict.
+2. A candidate without all of that is `UNKNOWN`, even if one observation looks
+   correct. User-observed rollback immediately marks it `REJECTED`.
+3. No newer package may replace a `KNOWN_GOOD` device install until its archive
+   and restore command have been verified.
+4. Correctness and performance are separate gates. FPS, monotonic present
+   serials, unique hashes, and low-rate screenshots cannot prove that camera
+   motion is rollback-free.
+5. Every root-cause boundary, rejected hypothesis, HAP identity, visual verdict,
+   and next experiment is added here and committed before the next behavior
+   change.
+
+### 2026-07-27 current incident state
+
+    installed diagnostic HAP:
+      15e501b8333e0e20eac5b346f35159bf89aeed50af3c85437d6ee9289ea85d74
+    archive:
+      D:\MyProject\winehua-logs\manual\heaven-frame-identity-trace-20260727-021445
+    source:
+      main e5392f9, DXVK 5232285, Mesa 353e6c5, virglrenderer 59228165
+    status:
+      REJECTED-user-observed-continuous-camera-rollback
+
+The first exact trace proved that DXVK draw-boundary Camera UBO hashes do not
+replay an older generation, while Host present serials are monotonic and source
+images 388/390 alternate in order. Those facts rule out simple old-camera byte
+replay and final SurfaceQueue re-publication, but they do not yet associate a
+DXVK frame with the Host command that rendered a particular source image.
+
+The missing identity path is now defined precisely:
+
+    DXVK client VkCommandBuffer
+      -> Wine client wrapper / unwrapped Guest VkCommandBuffer
+      -> Mesa Venus VkCommandBuffer / vn_object id
+      -> virglrenderer cmdId / Host command execution
+      -> source image id
+      -> present serial
+
+The next candidate adds diagnostic-only Wine and Mesa records under
+`WINEHUA_DXVK_TRACE_CAMERA=1`. It must not change queue, fence, descriptor,
+upload, image, or present behavior. The first non-monotonic generation in this
+joined trace determines the next code fix; broad synchronization experiments,
+frame dropping, and performance fast paths remain blocked until then.
+
 ### 2026-07-26 Managed DXVK runtime contract and checkpoint
 
 The product default for every Wine launch entry is now `dxvk_legacy` (DXVK
