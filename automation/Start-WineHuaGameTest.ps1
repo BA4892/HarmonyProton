@@ -2,7 +2,7 @@
 param(
     [ValidateSet('dxvk_legacy', 'wined3d')]
     [string]$D3DBackend = 'dxvk_legacy',
-    [ValidateSet('baseline', 'direct-fence-wait', 'no-remote-sync', 'no-dynamic-flush', 'fence-feedback', 'shadow-none', 'shadow-trace', 'shadow-to-host-explicit', 'shadow-precise', 'shadow-precise-single-ring', 'shadow-precise-sync-submit', 'shadow-precise-strong-ring', 'shadow-precise-legacy-host-sync', 'shadow-precise-strong-ring-trace', 'shadow-precise-strong-ring-perf', 'shadow-precise-strong-ring-async-present', 'shadow-precise-strong-ring-fence-poll', 'shadow-precise-strong-ring-mailbox', 'shadow-precise-direct-fence', 'shadow-precise-retain-shmem', 'shadow-precise-cpu-upload', 'shadow-precise-dirty-ring', 'shadow-precise-dirty-ring-perf', 'shadow-precise-dirty-ring-no-merge', 'shadow-precise-dirty-ring-no-upload', 'shadow-precise-dirty-ring-no-upload-fast', 'shadow-precise-dirty-ring-inline-upload', 'shadow-precise-dirty-ring-inline-upload-serialized','shadow-precise-dirty-ring-inline-upload-descriptor-serialized', 'shadow-precise-dirty-ring-frame-assoc-trace')]
+    [ValidateSet('baseline', 'direct-fence-wait', 'no-remote-sync', 'no-dynamic-flush', 'fence-feedback', 'shadow-none', 'shadow-trace', 'shadow-to-host-explicit', 'shadow-precise', 'shadow-precise-single-ring', 'shadow-precise-sync-submit', 'shadow-precise-strong-ring', 'shadow-precise-legacy-host-sync', 'shadow-precise-strong-ring-trace', 'shadow-precise-strong-ring-perf', 'shadow-precise-strong-ring-async-present', 'shadow-precise-strong-ring-fence-poll', 'shadow-precise-strong-ring-mailbox', 'shadow-precise-direct-fence', 'shadow-precise-retain-shmem', 'shadow-precise-cpu-upload', 'shadow-precise-dirty-ring', 'shadow-precise-dirty-ring-perf', 'shadow-precise-dirty-ring-no-merge', 'shadow-precise-dirty-ring-no-upload', 'shadow-precise-dirty-ring-no-upload-fast', 'shadow-precise-dirty-ring-inline-upload', 'shadow-precise-dirty-ring-inline-upload-serialized','shadow-precise-dirty-ring-inline-upload-descriptor-serialized', 'shadow-precise-dirty-ring-frame-assoc-trace', 'shadow-precise-dirty-ring-present-image-trace')]
     [string]$PerfProfile = 'shadow-precise-strong-ring',
     [ValidateSet('', 'heaven-dx11')]
     [string]$GamePreset = '',
@@ -71,6 +71,14 @@ if ($GamePreset -eq 'heaven-dx11') {
 if ($PerfProfile -eq 'shadow-precise-dirty-ring-frame-assoc-trace' -and
     -not $D3DEnvironment.ContainsKey('WINEHUA_DXVK_TRACE_CAMERA')) {
     $D3DEnvironment['WINEHUA_DXVK_TRACE_CAMERA'] = '1'
+}
+if ($PerfProfile -eq 'shadow-precise-dirty-ring-present-image-trace') {
+    if (-not $D3DEnvironment.ContainsKey('WINEHUA_DXVK_TRACE_PRESENT_IMAGE')) {
+        $D3DEnvironment['WINEHUA_DXVK_TRACE_PRESENT_IMAGE'] = '1'
+    }
+    if (-not $D3DEnvironment.ContainsKey('DXVK_LOG_LEVEL')) {
+        $D3DEnvironment['DXVK_LOG_LEVEL'] = 'info'
+    }
 }
 
 $environmentPairs = @($D3DEnvironment.GetEnumerator() | Sort-Object { [string]$_.Key })

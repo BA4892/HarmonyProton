@@ -77,15 +77,22 @@ const char* PresentModeName(VkPresentModeKHR mode)
     return mode == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : "fifo";
 }
 
-bool TraceFrameOrder()
+bool TracePresentStages()
 {
     const char* trace = std::getenv("VKR_WINEHUA_SHADOW_TRACE");
     return trace && trace[0] == '1' && !trace[1];
 }
 
+bool TraceFrameOrder()
+{
+    if (TracePresentStages()) return true;
+    const char* trace = std::getenv("WINEHUA_VKR_TRACE_PRESENT_IMAGE");
+    return trace && trace[0] == '1' && !trace[1];
+}
+
 void TracePresentStage(const char* stage, uint32_t serial, uint64_t sourceImage)
 {
-    if (!TraceFrameOrder()) return;
+    if (!TracePresentStages()) return;
     OH_LOG_INFO(LOG_APP,
                 "[VENUS-TRACE][NCP] serial=%{public}u stage=%{public}s "
                 "source=0x%{public}llx timestamp=%{public}llu",

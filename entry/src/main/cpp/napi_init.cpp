@@ -135,13 +135,16 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
         !strcmp(profile, "shadow-precise-dirty-ring-inline-upload-descriptor-serialized");
     const bool preciseDirtyFrameAssocTrace =
         !strcmp(profile, "shadow-precise-dirty-ring-frame-assoc-trace");
+    const bool preciseDirtyPresentImageTrace =
+        !strcmp(profile, "shadow-precise-dirty-ring-present-image-trace");
     const bool preciseDirtyInlineUpload =
         !strcmp(profile, "shadow-precise-dirty-ring-inline-upload") ||
         preciseDirtyDescriptorSerialized || preciseDirtyFrameAssocTrace;
     const bool preciseDirtyInlineUploadSerialized =
         !strcmp(profile, "shadow-precise-dirty-ring-inline-upload-serialized");
     const bool preciseDirtyRing =
-        !strcmp(profile, "shadow-precise-dirty-ring");
+        !strcmp(profile, "shadow-precise-dirty-ring") ||
+        preciseDirtyPresentImageTrace;
     const bool trace = !strcmp(profile, "shadow-trace") || preciseStrongTrace;
     const bool explicitToHost = !strcmp(profile, "shadow-to-host-explicit");
     const bool deferShmemUnref = !strcmp(profile, "shadow-precise-retain-shmem");
@@ -179,6 +182,7 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
         legacyHostSync ? "legacy-host-sync" :
         preciseDirtyDescriptorSerialized ? "inline-gpu-upload-descriptor-serialized" :
         preciseDirtyFrameAssocTrace ? "inline-gpu-upload-frame-assoc-trace" :
+        preciseDirtyPresentImageTrace ? "present-image-trace" :
         cpuShadowUpload ? "cpu-upload" :
         preciseDirtyInlineUploadSerialized ? "inline-gpu-upload-serialized" :
         preciseDirtyInlineUpload ? "inline-gpu-upload" :

@@ -1247,6 +1247,7 @@ export class SmokeRunner {
           this.perfProfile === 'shadow-precise-dirty-ring-inline-upload-serialized' ||
           this.perfProfile === 'shadow-precise-dirty-ring-inline-upload-descriptor-serialized' ||
           this.perfProfile === 'shadow-precise-dirty-ring-frame-assoc-trace' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-present-image-trace' ||
           this.perfProfile === 'shadow-precise-dirty-ring-perf' ||
           this.perfProfile === 'shadow-precise-strong-ring-trace' ||
           this.perfProfile === 'shadow-precise-strong-ring-perf' ||
@@ -1274,6 +1275,7 @@ export class SmokeRunner {
           this.perfProfile === 'shadow-precise-dirty-ring-inline-upload-serialized' ||
           this.perfProfile === 'shadow-precise-dirty-ring-inline-upload-descriptor-serialized' ||
           this.perfProfile === 'shadow-precise-dirty-ring-frame-assoc-trace' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-present-image-trace' ||
           this.perfProfile === 'shadow-precise-dirty-ring-perf' ||
             this.perfProfile === 'shadow-precise-strong-ring-trace' ||
             this.perfProfile === 'shadow-precise-strong-ring-perf' ||
@@ -1286,6 +1288,8 @@ export class SmokeRunner {
             smokeEnvironment['VN_WINEHUA_PERF_SUMMARY'] = '1';
           if (this.perfProfile === 'shadow-precise-direct-fence')
             smokeEnvironment['VN_WINEHUA_DIRECT_FENCE_WAIT'] = '1';
+          if (this.perfProfile === 'shadow-precise-dirty-ring-present-image-trace')
+            smokeEnvironment['WINEHUA_DXVK_TRACE_PRESENT_IMAGE'] = '1';
           if (this.perfProfile === 'shadow-precise-retain-shmem')
             smokeEnvironment['VN_WINEHUA_DEFER_SHMEM_UNREF'] = '1';
         }

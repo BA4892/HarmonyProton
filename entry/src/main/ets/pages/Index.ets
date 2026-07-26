@@ -422,6 +422,7 @@ struct Index {
       this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload-serialized' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload-descriptor-serialized' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-frame-assoc-trace' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-present-image-trace' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-perf' ||
       this.perfProfileText === 'shadow-precise-strong-ring-trace' ||
       this.perfProfileText === 'shadow-precise-strong-ring-perf' ||
@@ -451,6 +452,7 @@ struct Index {
       this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload-serialized' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload-descriptor-serialized' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-frame-assoc-trace' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-present-image-trace' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-perf' ||
         this.perfProfileText === 'shadow-precise-strong-ring-trace' ||
         this.perfProfileText === 'shadow-precise-strong-ring-perf' ||
@@ -465,6 +467,8 @@ struct Index {
         environment['VN_WINEHUA_DIRECT_FENCE_WAIT'] = '1';
       if (this.perfProfileText === 'shadow-precise-dirty-ring-frame-assoc-trace')
         environment['WINEHUA_DXVK_TRACE_CAMERA'] = '1';
+      if (this.perfProfileText === 'shadow-precise-dirty-ring-present-image-trace')
+        environment['WINEHUA_DXVK_TRACE_PRESENT_IMAGE'] = '1';
       if (this.perfProfileText === 'shadow-precise-retain-shmem')
         environment['VN_WINEHUA_DEFER_SHMEM_UNREF'] = '1';
     }

@@ -241,6 +241,7 @@ bool IsAllowedHostEnv(const std::string& key)
            key == "WINEHUA_VKR_TRACE_CAPTURE" ||
            key == "WINEHUA_VKR_TRACE_CAPTURE_LIMIT" ||
            key == "WINEHUA_VKR_TRACE_UBO_IDENTITY" ||
+           key == "WINEHUA_VKR_TRACE_PRESENT_IMAGE" ||
            key == "VKR_WINEHUA_SHADOW_FROM_HOST" ||
            key == "VKR_WINEHUA_SHADOW_TRACE" ||
            key == "WINEHUA_VKR_PRESENT_STAGE_TRACE" ||
@@ -428,6 +429,7 @@ extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainPr
         const bool precise = config.shadowMode == "precise" || preciseDirty;
         const bool frameAssocTrace =
             config.shadowTrace == "inline-gpu-upload-frame-assoc-trace";
+        const bool presentImageTrace = config.shadowTrace == "present-image-trace";
         const bool captureTrace = config.shadowTrace == "1" || frameAssocTrace;
         const bool noGpuUploadFast =
             config.shadowTrace == "no-gpu-upload-fast";
@@ -468,6 +470,8 @@ extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainPr
                (captureTrace ? "20000" : "512") +
            "|__env=WINEHUA_VKR_TRACE_UBO_IDENTITY=" +
                (frameAssocTrace ? "focused" : "0") +
+           "|__env=WINEHUA_VKR_TRACE_PRESENT_IMAGE=" +
+               (presentImageTrace ? "1" : "0") +
            "|__env=WINEHUA_VKR_TRACE_PIPELINE=" +
                (captureTrace ? "1" : "0") +
            "|__env=VKR_WINEHUA_SHADOW_FROM_HOST=" + fromHostMode +
