@@ -1,5 +1,6 @@
 #include "desktop_root_manager.h"
 #include "toplevel_manager.h"
+#include "compositor_constants.h"
 #include "compositor/surface_data.h"
 #include <hilog/log.h>
 
@@ -81,7 +82,7 @@ DesktopRootManager::CheckRootLocked(SurfaceData* sd, bool isFirstCommit,
     CheckRootResult result;
     if (!isFirstCommit) return result;
 
-    if (sd->appId != "explorer.exe.desktop-shell") return result;
+    if (sd->appId != compositor_consts::kAppIdExplorerDesktopShell) return result;
 
     // 空 title 的 desktop-shell 是非活跃的辅助窗口, 永远不作为 root 候选。
     // (真 desktop 总会被 set_desktop_window_title 设置非空 title)

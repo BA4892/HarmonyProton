@@ -53,9 +53,12 @@ add_library(entry SHARED
     shader_utils.cpp
     string_utils.cpp
     input_manager.cpp
+    pointer_extras.cpp
     xdg_shell.cpp
     xdg-shell-protocol.c
     viewporter-server-protocol.c
+    pointer-warp-v1-protocol.c
+    pointer-constraints-unstable-v1-protocol.c
 )
 
 target_link_libraries(entry PUBLIC

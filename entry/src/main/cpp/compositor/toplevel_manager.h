@@ -47,6 +47,15 @@ public:
         bool minimized = false;        // 桌面合成时跳过最小化窗口
         bool isBackground = false;     // 渲染层, 不接收输入 (被切换掉的旧 root)
         bool fullscreen = false;
+        // -- 全屏辅助 --
+        // ZC 游戏 (画面在 zero-copy GL 层) 全屏后 buffer 被 Wine 扩到输出尺寸,
+        // 但游戏内部分辨率不变, 输入逆映射须用全屏前尺寸; SHM 游戏 buffer 即
+        // 画面, 直接用 w/h。选择逻辑是 geometry.h 的纯函数, 两侧共用。
+        int32_t preFsW = 0, preFsH = 0;  // 全屏前内容尺寸, SetToplevelFullscreen 快照
+        // app_id 前缀 "explorer.exe" (含 desktop-shell/taskbar): 显示模式切换会
+        // 把 explorer 窗口意外标成全屏 (winewayland 按位置推断 fullscreen),
+        // 全屏扫描两遍遍历用它让游戏优先于这类伴随窗口
+        bool isExplorerWindow = false;
         // -- ARGB 窗口剪影掩码 --
         WindowMask mask;               // mask.w==0 = 从未生成
     };
@@ -136,6 +145,9 @@ public:
     void MapToplevelSurface(uint32_t id, wl_resource* surf);
     void UnmapToplevelSurface(uint32_t id);
     wl_resource* GetSurfaceForToplevel(uint32_t id);
+    // 反查 (warp 门控/锚点换算: wine 侧请求只带 wl_surface)。
+    // 线性扫描, 表很小且只在低频路径用 (warp 请求/约束析构)
+    uint32_t FindToplevelBySurface(wl_resource* surf);
     size_t ToplevelSurfaceCount() const { return toplevelSurfaceMap_.size(); }
 
     // 异型窗口掩码

@@ -80,6 +80,10 @@ public:
     // -- 辅助: 物理像素 → Wine 逻辑坐标映射 (供 FindToplevelAt 等使用) --
     wl_fixed_t CoordTransform(double px, double py, uint32_t tl, wl_fixed_t* outX, wl_fixed_t* outY);
 
+    // 指针 warp 锚点 (wp_pointer_warp_v1 请求 / lock hint → PointerExtras 调入,
+    // Wayland 线程)。sx/sy 是 wine 的 surface 局部坐标。
+    void OnPointerWarp(wl_resource* surface, double sx, double sy);
+
 private:
     InputManager() = default;
 
@@ -146,4 +150,30 @@ private:
     // 窗口可见性 (鸿蒙侧最小化时抑制输入)
     std::mutex visibleMutex_;
     std::unordered_map<uint32_t, bool> toplevelVisible_;
+
+    /*
+     * 指针 warp 状态 (DirectInput 类老游戏: wine dinput warp_check 每 ~10ms
+     * SetCursorPos 回窗口中心, 再读两次 GetCursorPos 差值作相对位移 —
+     * dlls/dinput/mouse.c)。没有 warp 通道时回中只在 wineserver 内生效,
+     * 下一个绝对 motion 又把光标拽回设备位置 → dinput 增量 = 位置-中心
+     * → 游戏光标被甩到边缘 (实测: 屏幕中间一小块映射为游戏全屏幕)。
+     *
+     * warpActive_=true 时用户输入不再是绝对定位, 而是增量源:
+     *   逻辑位置 = warp 锚点 + 用户输入增量的累加。
+     * 这正是硬件光标在普通 compositor 里的工作方式 (weston: 光标位置是
+     * compositor 侧状态, 输入设备只产生 delta); 我们的触屏/鼠标都经 ArkTS
+     * 以绝对坐标送达, 所以 warp 后必须自己把绝对流拆成增量。
+     * desktop 模式锚点/输入都在桌面坐标空间; PC 模式在窗口局部坐标空间。
+     * 仅 ZC 游戏激活 (OnPointerWarp 里门控): SHM 游戏读绝对坐标, 激活反破坏映射。
+     */
+    std::mutex warpMutex_;
+    bool warpActive_ = false;
+    wl_resource* warpSurface_ = nullptr;           // 哪个 surface 激活了 warp (NULL=无)
+    double warpLogicalX_ = 0, warpLogicalY_ = 0;   // 逻辑指针位置
+    double lastUserX_ = 0, lastUserY_ = 0;         // 上一次用户输入 (增量基准)
+    bool hasLastUser_ = false;
+    // warp 共用的坐标处理 (warpMutex_ 已持有): 输入用户坐标, 输出逻辑坐标
+    // (并更新增量基准)。warpSurface_ 非 NULL 时仅对该 surface 生效
+    void ApplyWarpLogicLocked(wl_resource* surface, double userX, double userY,
+                              bool isPress, double& outX, double& outY);
 };

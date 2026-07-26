@@ -328,6 +328,13 @@ void WaylandServer::SetToplevelFullscreen(uint32_t id, bool on) {
         st.x = 0;
         st.y = 0;
     }
+    if (on) {
+        // 快照全屏前内容尺寸: Wine 回 configure 后 buffer 可能扩为输出尺寸,
+        // 但 ZC 游戏内部分辨率不变, 输入逆映射须用全屏前尺寸
+        // (input_resolver 全屏分支, 选择逻辑见 geometry.h)
+        if (st.preFsW == 0 && st.w > 0) st.preFsW = st.w;
+        if (st.preFsH == 0 && st.h > 0) st.preFsH = st.h;
+    }
     // 不变式守卫 (ToplevelManager 头注释): 全屏 toplevel 锚定 (0,0)
     MW_ASSERT(!on || !st.hasPosition || (st.x == 0 && st.y == 0),
               "fullscreen toplevel must be anchored at (0,0)");

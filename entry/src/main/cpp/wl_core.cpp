@@ -10,7 +10,9 @@
 #include "seat.h"
 #include "input_manager.h"
 #include "plugin_manager.h"
+#include "pointer_extras.h"
 #include "compositor/compositor_utils.h"
+#include "compositor/compositor_constants.h"
 #include "include/viewporter-server-protocol.h"
 #include <algorithm>
 #include <cstring>
@@ -697,7 +699,7 @@ void WaylandServer::CheckDesktopRootOnCommit(SurfaceData* sd, ShmCommitInfo& fi,
     if (!Policy().RootCompositing() || !sd->hasToplevel || sd->toplevelId == desktopRootToplevelId_) return;
 
     // 任务栏身份登记 (app_id 在 xdg_toplevel 创建时已设置, 首次 commit 即有值)
-    if (sd->appId == "explorer.exe.taskbar") {
+    if (sd->appId == compositor_consts::kAppIdExplorerTaskbar) {
         if (taskbarId_ != sd->toplevelId) {
             OH_LOG_INFO(LOG_APP, "[MW] taskbar registered: #%{public}u (was #%{public}u)",
                         sd->toplevelId, taskbarId_);
@@ -707,6 +709,10 @@ void WaylandServer::CheckDesktopRootOnCommit(SurfaceData* sd, ShmCommitInfo& fi,
     DesktopRootManager::CheckRootResult cr;
     {
         auto lk = toplevelMgr_.Lock();
+        // explorer 窗口语义标记 (app_id 前缀, 普通 explorer 窗口无后缀):
+        // 全屏扫描时游戏优先于 explorer 伴随窗口 (见 desktop_compositor.cpp)
+        if (auto* st = toplevelMgr_.FindToplevelLocked(sd->toplevelId))
+            st->isExplorerWindow = (sd->appId.rfind(compositor_consts::kAppIdExplorerPrefix, 0) == 0);
         cr = desktopRootMgr_.CheckRootLocked(sd, isFirstCommit, fi.contentW, fi.contentH);
         MarkDesktopRootDirtyLocked();
     }
@@ -1022,4 +1028,7 @@ extern "C" void RegisterWlCoreGlobals(wl_display* display) {
     wl_global_create(display, &wl_subcompositor_interface, 1, self, WaylandServer::subcompositor_bind);
     wl_global_create(display, &wp_viewporter_interface, 1, self, WaylandServer::viewporter_bind);
     wl_global_create(display, &wl_output_interface, 3, self, WaylandServer::output_bind);
+    // dinput 老游戏的指针扩展 (warp 回中/指针约束; relative 故意不注册,
+    // 见 pointer_extras.h 头注释)
+    PointerExtras::GetInstance()->Register(display);
 }

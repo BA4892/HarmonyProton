@@ -28,26 +28,28 @@ static void tl_resource_destroy(wl_resource* r) {
 }
 static void tl_set_parent(wl_client*, wl_resource*, wl_resource*) {}
 static void tl_set_title(wl_client*, wl_resource* tlRes, const char* title) {
-    OH_LOG_INFO(LOG_APP, "[XDG] title=%{public}s", title ? title : "(null)");
     auto* td = static_cast<ToplevelData*>(wl_resource_get_user_data(tlRes));
     if (!td || !td->xdgSurface) return;
     auto* xdg = static_cast<XdgSurface*>(wl_resource_get_user_data(td->xdgSurface));
     if (!xdg || !xdg->wlSurface) return;
     auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(xdg->wlSurface));
     if (!sd) return;
+    OH_LOG_INFO(LOG_APP, "[XDG] title tl=%{public}u %{public}s",
+                sd->toplevelId, title ? title : "(null)");
     sd->title = title ? title : "";
     char json[512];
     snprintf(json, sizeof(json), "{\"title\":\"%s\"}", sd->title.c_str());
     WaylandServer::GetInstance()->FireToplevelEvent(sd->toplevelId, "title", json);
 }
 static void tl_set_app_id(wl_client*, wl_resource* tlRes, const char* appId) {
-    OH_LOG_INFO(LOG_APP, "[XDG] app_id=%{public}s", appId ? appId : "(null)");
     auto* td = static_cast<ToplevelData*>(wl_resource_get_user_data(tlRes));
     if (!td || !td->xdgSurface) return;
     auto* xdg = static_cast<XdgSurface*>(wl_resource_get_user_data(td->xdgSurface));
     if (!xdg || !xdg->wlSurface) return;
     auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(xdg->wlSurface));
     if (!sd) return;
+    OH_LOG_INFO(LOG_APP, "[XDG] app_id tl=%{public}u %{public}s",
+                sd->toplevelId, appId ? appId : "(null)");
     sd->appId = appId ? appId : "";
 }
 static void tl_show_window_menu(wl_client*, wl_resource*, wl_resource*, uint32_t, int32_t, int32_t) {}

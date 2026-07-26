@@ -104,6 +104,11 @@ public:
         return inputResolver_.FindInputTargetAt(x, y, out);
     }
     bool IsSurfaceAlive(wl_resource* surface) { return inputResolver_.IsSurfaceAlive(surface); }
+    // warp 补偿门控/锚点换算 (wp_pointer_warp_v1 → InputManager::OnPointerWarp)
+    bool IsSurfaceFromZcGame(wl_resource* surface) { return inputResolver_.IsZcGameSurface(surface); }
+    bool SurfaceLocalToDesktop(wl_resource* surface, double lx, double ly, double& dx, double& dy) {
+        return inputResolver_.SurfaceLocalToDesktop(surface, lx, ly, dx, dy);
+    }
     // Desktop 模式: 提到 Z-order 最顶层
     void RaiseToplevel(uint32_t id);
     // 读取 toplevel 桌面坐标 (InputManager 坐标转换用)

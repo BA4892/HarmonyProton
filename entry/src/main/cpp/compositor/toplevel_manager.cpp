@@ -105,6 +105,14 @@ wl_resource* ToplevelManager::GetSurfaceForToplevel(uint32_t id) {
     return it != toplevelSurfaceMap_.end() ? it->second : nullptr;
 }
 
+uint32_t ToplevelManager::FindToplevelBySurface(wl_resource* surf) {
+    if (!surf) return 0;
+    std::lock_guard<std::mutex> lk(toplevelSurfaceMutex_);
+    for (const auto& [id, s] : toplevelSurfaceMap_)
+        if (s == surf) return id;
+    return 0;
+}
+
 bool ToplevelManager::TakeWindowMask(uint32_t id, int& w, int& h, std::vector<uint8_t>& out) {
     auto lk = Lock();
     auto it = toplevels_.find(id);

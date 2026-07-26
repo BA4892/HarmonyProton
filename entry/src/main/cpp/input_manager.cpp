@@ -4,6 +4,7 @@
 #include "wayland_server.h"
 #include <chrono>
 #include <atomic>
+#include <cmath>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -144,6 +145,67 @@ wl_fixed_t InputManager::CoordTransform(double px, double py, uint32_t tl,
                  px, py, lb.offX, lb.offY, lb.dstW, lb.dstH, surfW, surfH, lb.srcW, lb.srcH,
                  wl_fixed_to_double(wx), wl_fixed_to_double(wy));
     return wx;
+}
+
+// ========================================================================
+//  指针 warp (wp_pointer_warp_v1) — Wayland 线程调用
+// ========================================================================
+
+void InputManager::OnPointerWarp(wl_resource* surface, double sx, double sy) {
+    auto* ws = WaylandServer::GetInstance();
+    // warp 补偿仅对 ZC 游戏 (PAL2 等 dinput 相对模式) 生效:
+    // ZC 游戏 warp_check ~10ms 回中 + dinput 读差值 → 必须补偿;
+    // SHM 游戏 (红警2 等) 读绝对坐标 — 激活会破坏绝对映射, 必须放过。
+    if (!ws->IsSurfaceFromZcGame(surface)) {
+        OH_LOG_INFO(LOG_APP, "[Input] WARP skip: surf=%{public}p not ZC game (SHM)",
+                    static_cast<void*>(surface));
+        return;
+    }
+    double lx = sx, ly = sy;
+    if (ws->IsDesktopMode()) {
+        // 锚点换到桌面坐标空间, 与 SendPointerEvent 桌面分支的输入空间一致
+        if (!ws->SurfaceLocalToDesktop(surface, sx, sy, lx, ly)) {
+            OH_LOG_WARN(LOG_APP, "[Input] WARP anchor failed: surf=%{public}p not mapped",
+                        static_cast<void*>(surface));
+            return;
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lk(warpMutex_);
+        warpLogicalX_ = lx;
+        warpLogicalY_ = ly;
+        warpActive_ = true;
+        warpSurface_ = surface;
+    }
+    static uint32_t sWarpN = 0;
+    if (++sWarpN % 120 == 1)
+        OH_LOG_INFO(LOG_APP, "[Input] WARP anchor logical=(%{public}.1f,%{public}.1f) desktop=%{public}d n=%{public}u",
+                    lx, ly, ws->IsDesktopMode() ? 1 : 0, sWarpN);
+}
+
+// warpMutex_ 已持有。
+// MOVE/PRESS 一致走 warp 补偿: 输出构造位置 (锚点+增量), wineserver 光标
+// 不再被设备绝对位置拽走 → dinput 差分 = 真实位移, 点击命中也正确。
+// PRESS 不重置 warp 状态 — 点击后 MOVE 继续补偿。
+void InputManager::ApplyWarpLogicLocked(wl_resource* surface, double userX,
+                                        double userY, bool isPress,
+                                        double& outX, double& outY) {
+    bool warpForThisSurface = warpActive_ && warpSurface_ &&
+                              (warpSurface_ == surface);
+    if (warpForThisSurface && hasLastUser_) {
+        // 增量模式: 用户输入只提供 delta, 锚点在 warp 位置
+        outX = warpLogicalX_ + (userX - lastUserX_);
+        outY = warpLogicalY_ + (userY - lastUserY_);
+    } else {
+        outX = userX;
+        outY = userY;
+        if (!isPress) warpActive_ = false;
+    }
+    warpLogicalX_ = outX;
+    warpLogicalY_ = outY;
+    lastUserX_ = userX;
+    lastUserY_ = userY;
+    hasLastUser_ = true;
 }
 
 // ========================================================================
@@ -296,8 +358,22 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
     wl_resource* targetSurf = nullptr;
     if (ws->Policy().CompositorRoutesInput() && tl != ws->GetDesktopRootToplevelId()) {
         CoordTransform(px, py, ws->GetDesktopRootToplevelId(), &wx, &wy);
+        // warp/增量模式 (dinput 游戏 SetCursorPos 回中, 见 input_manager.h 尾部):
+        // warpActive_ 时用户输入只提供 delta, 逻辑位置 = warp 锚点 + 增量累加。
+        // 补偿在桌面坐标空间做, 与 OnPointerWarp 的锚点空间一致
+        double logicalX = wl_fixed_to_double(wx);
+        double logicalY = wl_fixed_to_double(wy);
+        {
+            // 用当前事件 toplevel 的真实 surface 做 warp 归属判定:
+            // 从游戏切到桌面时焦点可能还停在游戏 surface, warp 不能误生效
+            wl_resource* warpTestSurface = ws->GetSurfaceForToplevel(tl);
+            std::lock_guard<std::mutex> lk(warpMutex_);
+            ApplyWarpLogicLocked(warpTestSurface, logicalX, logicalY,
+                                 action == ACT_PRESS, logicalX, logicalY);
+        }
         WaylandServer::InputTarget target;
-        if (ws->FindInputTargetAt(wl_fixed_to_int(wx), wl_fixed_to_int(wy), target)) {
+        if (ws->FindInputTargetAt(static_cast<int>(lround(logicalX)),
+                                  static_cast<int>(lround(logicalY)), target)) {
             // 全屏黑边: 只吞 PRESS (防幻影点击/焦点切换)。MOVE/RELEASE 照常透传 —
             // 越界坐标由 winewayland 的 motion clamp 夹回窗口边缘;
             // 吞掉 RELEASE 会让 pressedButtons_ 永不清位 (按键卡死)
@@ -307,17 +383,28 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
             // 桌面坐标 → surface 局部坐标 (即 geometry.h 的 FitUnmapX/Y;
             // target.origin/scale 由 InputResolver 的 ComputeFitRect 给出)。
             // target.scale > 1 表示全屏窗口保比例放大显示, 局部坐标需按同一缩放除回来
-            const double localX = (wl_fixed_to_double(wx) - target.originX) / target.scale;
-            const double localY = (wl_fixed_to_double(wy) - target.originY) / target.scale;
+            const double localX = (logicalX - target.originX) / target.scale;
+            const double localY = (logicalY - target.originY) / target.scale;
             wx = wl_fixed_from_double(localX);
             wy = wl_fixed_from_double(localY);
         } else {
             // 目标 surface 不可用: 退回旧路径 (父窗口相对坐标)
-            wx -= wl_fixed_from_int(ws->GetToplevelX(tl));
-            wy -= wl_fixed_from_int(ws->GetToplevelY(tl));
+            wx = wl_fixed_from_double(logicalX - ws->GetToplevelX(tl));
+            wy = wl_fixed_from_double(logicalY - ws->GetToplevelY(tl));
         }
     } else {
         CoordTransform(px, py, tl, &wx, &wy);
+        // PC 模式: warp 补偿在窗口局部坐标空间 (锚点 = wine 的 surface 局部坐标)
+        double logicalX = wl_fixed_to_double(wx);
+        double logicalY = wl_fixed_to_double(wy);
+        {
+            wl_resource* warpTestSurface = ws->GetSurfaceForToplevel(tl);
+            std::lock_guard<std::mutex> lk(warpMutex_);
+            ApplyWarpLogicLocked(warpTestSurface, logicalX, logicalY,
+                                 action == ACT_PRESS, logicalX, logicalY);
+        }
+        wx = wl_fixed_from_double(logicalX);
+        wy = wl_fixed_from_double(logicalY);
     }
 
     // MOVE 是高频路径 (hover 移动 ~125Hz), 全量日志会刷爆 hilog → 抽样 120:1;

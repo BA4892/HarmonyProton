@@ -102,6 +102,14 @@ void DesktopCompositor::RemoveZeroCopyKeyLocked(uint64_t surfaceKey)
     zeroCopySurfaceKeys_.erase(surfaceKey);
 }
 
+bool DesktopCompositor::HasZeroCopyLayerForToplevelLocked(uint32_t id) const
+{
+    for (const auto& layer : subsurfaceLayers_)
+        if (layer.parentToplevel == id && zeroCopySurfaceKeys_.count(layer.surfaceKey))
+            return true;
+    return false;
+}
+
 void DesktopCompositor::ResolveSubsurfaceLayerPositionLocked(
     const SubsurfaceLayer& layer, int& x, int& y) const
 {
@@ -150,6 +158,8 @@ bool DesktopCompositor::GetZeroCopyLayerInfo(uint64_t surfaceKey, uint32_t rende
                 info.height = layer.vpDstH > 0 ? layer.vpDstH : layer.h;
                 info.shmCommitSerial = layer.shmCommitSerial;
                 info.desktopCoordinates = true;
+                if (const auto* pst = tmgr_.FindToplevelLocked(layer.parentToplevel))
+                    info.fullscreen = pst->fullscreen;
                 return info.width > 0 && info.height > 0;
             }
             return false;
@@ -175,6 +185,7 @@ bool DesktopCompositor::GetZeroCopyLayerInfo(uint64_t surfaceKey, uint32_t rende
         if (const auto* st = tmgr_.FindToplevelLocked(sd->toplevelId)) {
             info.x = st->x;
             info.y = st->y;
+            info.fullscreen = st->fullscreen;
         }
         info.desktopCoordinates = true;
         return info.width > 0 && info.height > 0;
@@ -327,15 +338,24 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
         uint32_t fullscreenId = 0;
         FitRect transform;
         bool hasFullscreen = false;
+        // ZC 游戏 (画面在 zero-copy GL 层): 全屏独占输出, 见下方填黑分支
+        bool isZcGame = false;
         int fullscreenX = 0, fullscreenY = 0;
+        // 两遍扫描: pass 0 跳过 explorer 窗口 (显示模式切换会把 explorer 伴随
+        // 窗口意外标成全屏并压到游戏之上, 游戏优先); pass 1 接受它兜底
+        for (int pass = 0; pass < 2 && fullscreenId == 0; ++pass) {
         for (auto zit = tmgr_.toplevelZOrder().rbegin(); zit != tmgr_.toplevelZOrder().rend(); ++zit) {
             const auto* zst = tmgr_.FindToplevelLocked(*zit);
             if (!zst || !zst->fullscreen || !tmgr_.IsToplevelVisibleLocked(*zit, desktopRootToplevelId_)) continue;
+            if (pass == 0 && zst->isExplorerWindow) continue;
             fullscreenId = *zit;
             fullscreenX = zst->x;
             fullscreenY = zst->y;
             hasFullscreen = ComputeFitRect(rootW, rootH, zst->w, zst->h, transform);
+            if (!zst->isExplorerWindow)
+                isZcGame = HasZeroCopyLayerForToplevelLocked(*zit);
             break;
+        }
         }
 
         bool fullscreenContentCovered = false;
@@ -414,6 +434,9 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
 
         for (uint32_t childId : tmgr_.toplevelZOrder()) {
             if (!tmgr_.IsToplevelVisibleLocked(childId, desktopRootToplevelId_)) continue;
+            // ZC 游戏全屏: 独占输出, 跳过其它 toplevel — 它们的 SHM 内容
+            // (explorer 桌面等) 不是游戏画面, 画上只会在黑边区残留杂色
+            if (isZcGame && childId != fullscreenId) continue;
             auto* cst = tmgr_.FindToplevelLocked(childId);
             if (!cst) continue;
             auto& childPx = cst->pixels;
@@ -422,6 +445,17 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
             int posX = cst->x;
             int posY = cst->y;
             if (childId == fullscreenId && hasFullscreen) {
+                if (isZcGame) {
+                    // ZC 游戏: 整幅填黑, 跳过 SHM BlitScaled — 其 SHM 内容是
+                    // explorer 桌面而非游戏画面, 实际画面由 GL ZC 层渲染
+                    // (egl_renderer zeroCopyFullscreen_ 路径)。
+                    // 必须填不透明黑 0xFF000000, 不能图省事 memset 0:
+                    // 渲染 context 不开 GL_BLEND 时 alpha=0 恰好无害, 但那是
+                    // 隐式依赖 — 一旦以后给桌面纹理开混合, 黑边就会变透明
+                    std::fill_n(reinterpret_cast<uint32_t*>(composited.data()),
+                                composited.size() / 4, 0xFF000000u);
+                    continue;
+                }
                 auto fillBlackRect = [&](int fx, int fy, int fw, int fh) {
                     if (fw <= 0 || fh <= 0) return;
                     for (int row = fy; row < fy + fh; ++row)

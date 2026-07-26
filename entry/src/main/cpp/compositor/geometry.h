@@ -37,3 +37,20 @@ inline int FitSizeDisplayW(const FitRect& t, int64_t w) { return t.srcW > 0 ? st
 inline int FitSizeDisplayH(const FitRect& t, int64_t h) { return t.srcH > 0 ? static_cast<int>(h * t.dstH / t.srcH) : 0; }
 inline double FitUnmapDisplayX(const FitRect& t, double px) { return t.dstW > 0 ? (px - t.offX) * t.srcW / t.dstW : 0.0; }
 inline double FitUnmapDisplayY(const FitRect& t, double py) { return t.dstH > 0 ? (py - t.offY) * t.srcH / t.dstH : 0.0; }
+
+// 全屏输入逆映射的内容尺寸选择 (渲染侧全屏几何的镜像):
+// - ZC 游戏 (toplevel 带 zero-copy GL 层): 全屏后 buffer 被 Wine 扩到输出尺寸,
+//   但画面是 GL 层按游戏内部分辨率渲染的 → 用 preFs (全屏前尺寸 = 游戏分辨率)
+// - SHM 游戏: buffer 即画面, 扩到输出尺寸后内容填满整个 buffer → 用 buffer 尺寸
+// preFs 无效或与 buffer 同尺寸时两种解释等价, 恒用 buffer。
+// hasZeroCopyLayer 由调用方遍历合成层得到 (非纯函数部分, 故作参数传入)。
+inline void SelectFullscreenContentSize(int32_t preFsW, int32_t preFsH,
+                                        int32_t bufW, int32_t bufH,
+                                        bool hasZeroCopyLayer,
+                                        int& outW, int& outH)
+{
+    const bool usePreFs = hasZeroCopyLayer && preFsW > 0 && preFsH > 0 &&
+                          (preFsW != bufW || preFsH != bufH);
+    outW = usePreFs ? preFsW : bufW;
+    outH = usePreFs ? preFsH : bufH;
+}

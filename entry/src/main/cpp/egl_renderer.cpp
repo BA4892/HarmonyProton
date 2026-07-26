@@ -119,12 +119,14 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
         else
         {
             if (zeroCopyLayerX_ != layer.x || zeroCopyLayerY_ != layer.y ||
-                zeroCopyLayerW_ != layer.width || zeroCopyLayerH_ != layer.height)
+                zeroCopyLayerW_ != layer.width || zeroCopyLayerH_ != layer.height ||
+                zeroCopyFullscreen_ != (layer.fullscreen && server->Policy().RootCompositing()))
                 zeroCopyGeometryDirty_ = true;
             zeroCopyLayerX_ = layer.x;
             zeroCopyLayerY_ = layer.y;
             zeroCopyLayerW_ = layer.width;
             zeroCopyLayerH_ = layer.height;
+            zeroCopyFullscreen_ = layer.fullscreen && server->Policy().RootCompositing();
             if (zeroCopyFallbackPending_ &&
                 layer.shmCommitSerial > zeroCopyFallbackShmSerial_)
             {
@@ -320,6 +322,7 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
     zeroCopyLayerY_ = layer.y;
     zeroCopyLayerW_ = layer.width;
     zeroCopyLayerH_ = layer.height;
+    zeroCopyFullscreen_ = layer.fullscreen && server->Policy().RootCompositing();
     width = zeroCopySourceW_;
     height = zeroCopySourceH_;
     zeroCopyHasFrame_ = true;
@@ -751,11 +754,32 @@ void EglRenderer::RenderLoop() {
 
         if (zeroCopyHasFrame_ && zeroCopyRegistered_ && frameW_ > 0 && frameH_ > 0 &&
             zeroCopyLayerW_ > 0 && zeroCopyLayerH_ > 0) {
-            // 帧内坐标 → surface 视口: 与 letterbox 同一映射 (GL 坐标系 Y 向上, 翻转)
-            const int layerViewportX = FitMapDisplayX(letterbox_, zeroCopyLayerX_);
-            const int layerViewportY = FitMapDisplayY(letterbox_, frameH_ - zeroCopyLayerY_ - zeroCopyLayerH_);
-            const int layerViewportW = std::max(1, FitSizeDisplayW(letterbox_, zeroCopyLayerW_));
-            const int layerViewportH = std::max(1, FitSizeDisplayH(letterbox_, zeroCopyLayerH_));
+            int layerViewportX, layerViewportY, layerViewportW, layerViewportH;
+            if (zeroCopyFullscreen_) {
+                // ZC 游戏全屏: 层内容保比例缩放进桌面帧的显示区, 而非按帧比例
+                // 映射 — 全屏后 buffer 被 Wine 扩到输出尺寸, 但层几何仍是游戏
+                // 内部分辨率, 直接映射会把画面缩到左上角一块。CPU 侧整帧已填黑
+                // (TakeToplevelFrame ZC 分支), 这里的 letterbox 与 SHM 全屏同效
+                FitRect zcFit;
+                if (ComputeFitRect(letterbox_.dstW, letterbox_.dstH,
+                                   zeroCopyLayerW_, zeroCopyLayerH_, zcFit)) {
+                    layerViewportX = letterbox_.offX + zcFit.offX;
+                    layerViewportY = letterbox_.offY + zcFit.offY;
+                    layerViewportW = zcFit.dstW;
+                    layerViewportH = zcFit.dstH;
+                } else {
+                    layerViewportX = letterbox_.offX;
+                    layerViewportY = letterbox_.offY;
+                    layerViewportW = letterbox_.dstW;
+                    layerViewportH = letterbox_.dstH;
+                }
+            } else {
+                // 帧内坐标 → surface 视口: 与 letterbox 同一映射 (GL 坐标系 Y 向上, 翻转)
+                layerViewportX = FitMapDisplayX(letterbox_, zeroCopyLayerX_);
+                layerViewportY = FitMapDisplayY(letterbox_, frameH_ - zeroCopyLayerY_ - zeroCopyLayerH_);
+                layerViewportW = std::max(1, FitSizeDisplayW(letterbox_, zeroCopyLayerW_));
+                layerViewportH = std::max(1, FitSizeDisplayH(letterbox_, zeroCopyLayerH_));
+            }
             glViewport(layerViewportX, layerViewportY, layerViewportW, layerViewportH);
             glUseProgram(zeroCopyProgram_);
             glBindTexture(GL_TEXTURE_EXTERNAL_OES, zeroCopyTexture_);
@@ -770,7 +794,8 @@ void EglRenderer::RenderLoop() {
             // 本 context 从不开启 GL_BLEND: 重绘就是不透明覆盖, 无需混合,
             // 也不要加混合 —— 目标就是盖住 overlay, 不是与它融合。
             // PC 模式不需要: GL 内容画在各自窗口内, 层序由系统合成器保证。
-            if (ws->Policy().RootCompositing() && rendered) {
+            // ZC 全屏不需要: 层覆盖整幅桌面, 重绘只会盖掉游戏画面
+            if (!zeroCopyFullscreen_ && ws->Policy().RootCompositing() && rendered) {
                 // 32 上限: 遮挡源 = 上层窗口 + popup 层, 真实场景个位数;
                 // 超出的部分不重绘 (该区域 GL 内容会透出), 比动态扩容简单且够用
                 static constexpr int kMaxOccluders = 32;

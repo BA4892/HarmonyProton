@@ -21,6 +21,7 @@ struct ZeroCopyLayerInfo {
     int height = 0;
     uint64_t shmCommitSerial = 0;
     bool desktopCoordinates = false;
+    bool fullscreen = false;  // 所属 toplevel 全屏: GL 层保比例缩放铺满视口 (ZC 游戏)
 };
 
 struct ZeroCopyOccluderRect {
@@ -111,6 +112,10 @@ public:
     // -- 只读 accessors --
     const std::vector<SubsurfaceLayer>& subsurfaceLayers() const { return subsurfaceLayers_; }
     const std::unordered_set<uint64_t>& zeroCopySurfaceKeys() const { return zeroCopySurfaceKeys_; }
+
+    // toplevel 是否有 zero-copy GL 层 (ZC 游戏判定: 全屏渲染/输入映射分流用,
+    // 调用方须已持有 tmgr mutex)
+    bool HasZeroCopyLayerForToplevelLocked(uint32_t id) const;
 
 private:
     ToplevelManager& tmgr_;

@@ -83,6 +83,7 @@ private:
     bool zeroCopyHasFrame_ = false;
     bool zeroCopyFallbackPending_ = false;
     bool zeroCopyGeometryDirty_ = false;
+    bool zeroCopyFullscreen_ = false;  // 所属 toplevel 全屏: ZC 层保比例铺满显示区
     uint32_t zeroCopyConsecutiveFailures_ = 0;
     float zeroCopyTransform_[16] = {
         1, 0, 0, 0,
