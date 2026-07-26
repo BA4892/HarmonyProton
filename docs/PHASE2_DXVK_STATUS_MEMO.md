@@ -175,6 +175,29 @@ verdict, and continuous Heaven verdict. A visually passing candidate may not be
 overwritten until its restore command is recorded and verified. This rule is a
 release-process requirement, not optional investigation bookkeeping.
 
+The full `WineHuaUbo` log is now machine-analyzed by
+`automation/analyze_heaven_ubo.py`; the report is archived as
+`wine-ubo-analysis.json`. For frames 119..2967, binding 4 has 2,079 unique
+full-range hashes across 2,849 records, 770 immediate repeats, and zero
+non-adjacent old-hash replays. Binding 3 has 2,825 unique hashes and no
+immediate repeats. The Guest-side UBO source therefore does not show the
+reported backward frame replay. Binding 4 rotates through only 32 physical
+slices and reuses one within one or two frames 936 times. That is not itself a
+Vulkan violation because the private upload command has conservative
+`ALL_COMMANDS -> TRANSFER -> ALL_COMMANDS` barriers and executes on the same
+queue, but it makes exact Host buffer/offset/generation proof the next P0.
+
+The next trace must join, without changing synchronization:
+
+    Host descriptor buffer + absolute offset + binding 3/4 hash
+      -> dirty snapshot selected for a concrete submit
+      -> private vkCmdUpdateBuffer target offset + hash
+      -> Guest command buffers in that same Host submit
+
+Do not infer correctness from descriptor-time `shadow == host`: inline upload
+intentionally defers the Host mapped copy, and the Host buffer is populated by
+the private transfer command immediately before the Guest submit.
+
 ### 2026-07-27 full command identity attempt and namespace correction
 
 The first Wine/Mesa bridge candidate is archived and was run on the physical
