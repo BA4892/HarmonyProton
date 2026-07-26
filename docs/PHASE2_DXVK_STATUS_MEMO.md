@@ -1388,3 +1388,68 @@ The rebuilt and installed HAP was verified with a clean process restart and
 `C:\smoke\x64\winehua_d3d_switch_cube.exe`: 80-87 FPS, increasing frame and
 angle values, `regress=0`, and no surface-type change warning. Existing
 uncommitted DXVK/Heaven investigation files remain separate from this fix.
+
+## 17. 2026-07-26 Heaven regression reset and artifact rule
+
+The previous frame-order conclusion was too broad. Monotonic NCP present
+serials and NativeImage timestamps prove that the compositor does not publish
+an older SurfaceQueue buffer again. They do **not** prove that the Guest
+rendered camera state is monotonic. The user continues to observe camera-angle
+rollback in Heaven, including the latest clean process run.
+
+The package described by the user as smooth at approximately 12:40 was not
+archived as a HAP. The nearest retained metadata is:
+
+    D:\MyProject\winehua-logs\automation\phase2-20260726-130728\artifact.json
+    HAP SHA-256:       50d4e0610e55678d4ac7b82422bfc34e279059cc236ab92ac0705cb5f8a93544
+    wine-data SHA-256: 6bd3c6ca3e0ffeda9ed63d652d8e1b92fd72cfaa097d5190074b4a2a510449ca
+    main commit:       ef6e1a6f87005d3d79bdc8addba01044913818ea
+
+The metadata is not a replaceable artifact and therefore cannot be treated as
+an available known-good package. The recorded 12:33
+`shadow-precise-dirty-ring-no-upload-fast` Cube run proves only Cube ordering;
+it is not evidence that the same HAP passed a continuous Heaven camera test.
+
+Fresh A/B results reset the investigation:
+
+* `shadow-precise-dirty-ring-no-upload-fast` still rolls back visibly after
+  GPU upload is disabled.
+* Disabling the batch `vkFlushMappedMemoryRanges` path added after 12:40 does
+  not remove the rollback.
+* The retained 09:32 Guest payload and the current payload contain identical
+  x64 DXVK `dxgi.dll`/`d3d11.dll` and Guest Mesa `libgallium-25.0.1.so`
+  binaries. A changed DXVK or Guest Mesa binary is not the current split.
+* Present serial and NativeImage timestamp traces remain useful, but only to
+  exclude Host compositor replay.
+
+The P0 diagnostic is now a continuous, low-overhead camera-buffer trace. The
+candidate is Heaven pass 0, descriptor binding 1, DXVK resource slot 161,
+144 bytes. Each frame must correlate:
+
+    DXVK frame + Guest buffer handle/offset + camera hash/words
+      -> Venus Host buffer/memory + dirty generation + copied hash
+      -> queue submit + present serial + NativeImage timestamp
+
+Interpretation is strict:
+
+1. If the DXVK camera words themselves move backward, investigate the game's
+   constant-buffer update sequence, DXVK dynamic-buffer slice reuse, and Guest
+   CPU publication ordering.
+2. If DXVK camera words are monotonic but the Host hash is older, fix Venus
+   shadow dirty-range lifetime, mapped-memory visibility, or submit ordering.
+3. If both hashes are monotonic, correlate the rendered attachment with the
+   same submit before revisiting presentation. Do not drop frames or mask the
+   visual rollback.
+
+Artifact discipline is now a release-blocking rule for every visual-ordering
+milestone:
+
+* Archive the signed HAP itself, its SHA-256, embedded `wine-data.zip`, Guest
+  DLL/ICD hashes, Host renderer hashes, main/submodule commits, and binary
+  dirty diffs.
+* Archive the exact launch profile and environment, continuous Heaven evidence,
+  Cube frame-order result, logs, and screenshots/video in the same run folder.
+* Create a local milestone commit after the evidence passes. A configuration
+  note or Cube-only result is not sufficient to mark Heaven fixed.
+* Never overwrite the only passing HAP; retain at least the current passing
+  artifact and the immediately previous comparison artifact.
