@@ -424,7 +424,9 @@ extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainPr
         const bool explicitToHost = config.shadowMode == "to-host-explicit";
         const bool preciseDirty = config.shadowMode == "precise-dirty";
         const bool precise = config.shadowMode == "precise" || preciseDirty;
-        const bool captureTrace = config.shadowTrace == "1";
+        const bool frameAssocTrace =
+            config.shadowTrace == "inline-gpu-upload-frame-assoc-trace";
+        const bool captureTrace = config.shadowTrace == "1" || frameAssocTrace;
         const bool noGpuUploadFast =
             config.shadowTrace == "no-gpu-upload-fast";
         const bool noGpuUpload = config.shadowTrace == "no-gpu-upload" ||
@@ -437,7 +439,7 @@ extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainPr
             config.shadowTrace == "inline-gpu-upload-descriptor-serialized";
         const bool inlineGpuUpload =
             config.shadowTrace == "inline-gpu-upload" || serializedGpuUpload ||
-            descriptorSerialized;
+            descriptorSerialized || frameAssocTrace;
         const bool perfSummary = config.shadowTrace == "perf" ||
             config.shadowTrace == "no-gpu-upload" || inlineGpuUpload ||
             descriptorSerialized;
@@ -449,7 +451,7 @@ extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainPr
             (precise ? "precise" : config.shadowMode);
         const std::string toHostMode = explicitToHost || (precise && !preciseDirty)
             ? "explicit" : "full";
-        const std::string sampledTrace = precise ? "0" : "1";
+        const std::string sampledTrace = precise && !frameAssocTrace ? "0" : "1";
         std::string entryParams = config.helperPath + "|" + config.socketPath +
             "|__env=LD_LIBRARY_PATH=" + config.libraryPath +
             "|__env=VTEST_USE_GLES=1" +

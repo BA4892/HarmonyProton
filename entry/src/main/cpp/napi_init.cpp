@@ -133,8 +133,11 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
         !strcmp(profile, "shadow-precise-dirty-ring-no-upload-fast");
     const bool preciseDirtyDescriptorSerialized =
         !strcmp(profile, "shadow-precise-dirty-ring-inline-upload-descriptor-serialized");
+    const bool preciseDirtyFrameAssocTrace =
+        !strcmp(profile, "shadow-precise-dirty-ring-frame-assoc-trace");
     const bool preciseDirtyInlineUpload =
-        !strcmp(profile, "shadow-precise-dirty-ring-inline-upload") || preciseDirtyDescriptorSerialized;
+        !strcmp(profile, "shadow-precise-dirty-ring-inline-upload") ||
+        preciseDirtyDescriptorSerialized || preciseDirtyFrameAssocTrace;
     const bool preciseDirtyInlineUploadSerialized =
         !strcmp(profile, "shadow-precise-dirty-ring-inline-upload-serialized");
     const bool preciseDirtyRing =
@@ -175,6 +178,7 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
     const char* shadowSelector =
         legacyHostSync ? "legacy-host-sync" :
         preciseDirtyDescriptorSerialized ? "inline-gpu-upload-descriptor-serialized" :
+        preciseDirtyFrameAssocTrace ? "inline-gpu-upload-frame-assoc-trace" :
         cpuShadowUpload ? "cpu-upload" :
         preciseDirtyInlineUploadSerialized ? "inline-gpu-upload-serialized" :
         preciseDirtyInlineUpload ? "inline-gpu-upload" :
