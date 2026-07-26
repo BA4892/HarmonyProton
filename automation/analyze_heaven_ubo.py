@@ -11,6 +11,7 @@ from pathlib import Path
 RECORD_RE = re.compile(
     r"WineHuaUbo: winPid=(?P<pid>\d+) recording=(?P<recording>\d+) "
     r"frame=(?P<frame>\d+) pass=(?P<pass_id>\d+) guestCmd=(?P<cmd>0x[0-9a-f]+) "
+    r"(?:descriptorSet=(?P<descriptor_set>0x[0-9a-f]+) )?"
     r"binding=(?P<binding>\d+) resourceSlot=(?P<slot>\w+) "
     r"descriptorType=(?P<descriptor_type>\d+) stages=(?P<stages>0x[0-9a-f]+) "
     r"writtenHandle=(?P<handle>0x[0-9a-f]+) "

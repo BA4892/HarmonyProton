@@ -2258,3 +2258,59 @@ The replacement run is valid only if all of these are observed together:
     watched-descriptor record count is zero
     no watch-overflow or bound-descriptor trace limit
     current Guest/Host command alignment has zero mismatch
+
+## 27. 2026-07-27 valid bind-time run and exact descriptor-set identity
+
+The replacement physical-device run is valid and archived:
+
+    archive:
+      D:\MyProject\winehua-logs\manual\heaven-bound-ubo-20260727-055932
+    HAP SHA-256:
+      15ffdf34d5327dd07e80041ef36a84a5385fccb76e326327983ae888f62d6658
+    wine-data SHA-256:
+      14a440b143de7a867199f9f5a56820b4734843f69493e27992b4b783591e7120
+    source:
+      main 3fb0f91, virglrenderer b815f4c9, DXVK c665707,
+      Mesa db8f4de, Wine 9978980
+    process identity:
+      Unix PID 55937, Windows PID 240
+
+The trace contract passed. Guest and Host both recorded 1,035 submitted command
+buffers with zero sequence mismatch, and 140 DXVK frames mapped to a Host
+submit. The focused Host trace recorded 50,000 `bound-descriptor` events,
+12,404 `watched-update` events, zero `watched-descriptor` events and no watch
+overflow. The bound-descriptor trace reached its explicit limit only after the
+target frame window had begun.
+
+The first heuristic analysis reported 27/36 matching updates for binding 3 and
+24/37 for binding 4. Those mismatches are not root-cause evidence. A single
+reused command buffer contained hundreds of descriptor-set binds, while the
+analyzer indexed candidates only by `(cmdId, binding)` and then selected the
+candidate whose hash looked best. It did not know which descriptor set the
+target draw actually bound. No synchronization or rendering behavior may be
+changed from that heuristic result.
+
+The next diagnostic closes this single missing identity without changing
+rendering:
+
+    DXVK target draw VkDescriptorSet handle
+      -> Guest Mesa raw descriptor handle and vn object id
+      -> Host bound-descriptor setId
+      -> binding 3/4 physical slice
+      -> last pre-submit watched-update hash
+
+DXVK now includes the actual graphics descriptor-set handle in every
+`WineHuaUbo` record. Guest Mesa logs each graphics
+`vkCmdBindDescriptorSets` raw handle, command-buffer object id and descriptor
+object id when `WINEHUA_DXVK_TRACE_CAMERA=1`. Analyzer schema 2 accepts only the
+exact Guest object id matching the DXVK handle and the frame command id. It no
+longer falls back to any descriptor candidate selected from the command buffer.
+
+Decision after the exact run:
+
+1. Exact set identity plus stale last-upload hash proves a descriptor
+   update/bind/lifetime defect and authorizes a narrowly scoped fix there.
+2. Exact set identity plus matching binding 3/4 hashes closes the camera UBO
+   and shadow-upload hypothesis. Investigation then moves to the next
+   frame-global buffer or command-generation input, without another broad wait,
+   frame drop, present reorder or global synchronization experiment.
