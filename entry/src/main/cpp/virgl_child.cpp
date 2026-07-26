@@ -245,6 +245,11 @@ bool IsAllowedHostEnv(const std::string& key)
            key == "WINEHUA_VKR_PRESENT_STAGE_TRACE" ||
            key == "VKR_WINEHUA_PERF_SUMMARY" ||
            key == "VKR_WINEHUA_GPU_UPLOAD" ||
+           key == "VKR_WINEHUA_GPU_UPLOAD_INLINE" ||
+           key == "VKR_WINEHUA_GPU_UPLOAD_SERIALIZE" ||
+           key == "VKR_WINEHUA_DESCRIPTOR_UPDATE_SERIALIZE" ||
+           key == "VKR_WINEHUA_SHADOW_DIRTY_LIST" ||
+           key == "VKR_WINEHUA_BATCH_FLUSH" ||
            key == "VKR_WINEHUA_SHADOW_MSYNC" ||
            key == "VKR_WINEHUA_SHADOW_SUBMIT_UNMAP_LARGE" ||
            key == "VKR_WINEHUA_SHADOW_MERGE_RANGES" ||
@@ -420,11 +425,24 @@ extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainPr
         const bool preciseDirty = config.shadowMode == "precise-dirty";
         const bool precise = config.shadowMode == "precise" || preciseDirty;
         const bool captureTrace = config.shadowTrace == "1";
-        const bool noGpuUpload = config.shadowTrace == "no-gpu-upload" ||
+        const bool noGpuUploadFast =
             config.shadowTrace == "no-gpu-upload-fast";
+        const bool noGpuUpload = config.shadowTrace == "no-gpu-upload" ||
+            noGpuUploadFast;
+        const bool serializedGpuUpload =
+            config.shadowTrace == "inline-gpu-upload-serialized";
+        const char* descriptorEnv = getenv("VKR_WINEHUA_DESCRIPTOR_UPDATE_SERIALIZE");
+        const bool descriptorSerialized =
+            (descriptorEnv && descriptorEnv[0] == 49 && !descriptorEnv[1]) ||
+            config.shadowTrace == "inline-gpu-upload-descriptor-serialized";
+        const bool inlineGpuUpload =
+            config.shadowTrace == "inline-gpu-upload" || serializedGpuUpload ||
+            descriptorSerialized;
         const bool perfSummary = config.shadowTrace == "perf" ||
-            config.shadowTrace == "no-gpu-upload";
+            config.shadowTrace == "no-gpu-upload" || inlineGpuUpload ||
+            descriptorSerialized;
         const bool cpuShadowUpload = config.shadowTrace == "cpu-upload";
+        const bool legacyHostSync = config.shadowTrace == "legacy-host-sync";
         const char* mergeRanges = getenv("VKR_WINEHUA_SHADOW_MERGE_RANGES");
         if (!mergeRanges || !mergeRanges[0]) mergeRanges = "1";
         const std::string fromHostMode = explicitToHost ? "full" :
@@ -453,7 +471,17 @@ extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainPr
             "|__env=VKR_WINEHUA_PERF_SUMMARY=" +
                (perfSummary ? "1" : "0") +
             "|__env=VKR_WINEHUA_GPU_UPLOAD=" +
-               (noGpuUpload || cpuShadowUpload ? "0" : (captureTrace ? "1" : "auto")) +
+               (noGpuUpload || cpuShadowUpload || legacyHostSync ? "0" : (captureTrace ? "1" : "auto")) +
+            "|__env=VKR_WINEHUA_GPU_UPLOAD_INLINE=" +
+               (inlineGpuUpload ? "1" : "0") +
+            "|__env=VKR_WINEHUA_GPU_UPLOAD_SERIALIZE=" +
+               (serializedGpuUpload ? "1" : "0") +
+            "|__env=VKR_WINEHUA_DESCRIPTOR_UPDATE_SERIALIZE=" +
+               (descriptorSerialized ? "1" : "0") +
+            "|__env=VKR_WINEHUA_SHADOW_DIRTY_LIST=" +
+               (legacyHostSync ? "0" : "1") +
+            "|__env=VKR_WINEHUA_BATCH_FLUSH=" +
+               (legacyHostSync || noGpuUploadFast ? "0" : "1") +
             "|__env=VKR_WINEHUA_SHADOW_MERGE_RANGES=" + mergeRanges +
             "|__env=WINEHUA_VKR_PRESENT_STAGE_TRACE=" +
                (captureTrace ? "1" : "0") +

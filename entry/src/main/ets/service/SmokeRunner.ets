@@ -1239,9 +1239,13 @@ export class SmokeRunner {
           this.perfProfile === 'shadow-precise-single-ring' ||
           this.perfProfile === 'shadow-precise-sync-submit' ||
           this.perfProfile === 'shadow-precise-strong-ring' ||
+          this.perfProfile === 'shadow-precise-legacy-host-sync' ||
           this.perfProfile === 'shadow-precise-dirty-ring' ||
           this.perfProfile === 'shadow-precise-dirty-ring-no-upload' ||
           this.perfProfile === 'shadow-precise-dirty-ring-no-upload-fast' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-inline-upload' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-inline-upload-serialized' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-inline-upload-descriptor-serialized' ||
           this.perfProfile === 'shadow-precise-dirty-ring-perf' ||
           this.perfProfile === 'shadow-precise-strong-ring-trace' ||
           this.perfProfile === 'shadow-precise-strong-ring-perf' ||
@@ -1261,9 +1265,13 @@ export class SmokeRunner {
             smokeEnvironment['VN_PERF'] =
               'no_fence_feedback,no_query_feedback,no_async_queue_submit';
           if (this.perfProfile === 'shadow-precise-strong-ring' ||
+            this.perfProfile === 'shadow-precise-legacy-host-sync' ||
             this.perfProfile === 'shadow-precise-dirty-ring' ||
           this.perfProfile === 'shadow-precise-dirty-ring-no-upload' ||
           this.perfProfile === 'shadow-precise-dirty-ring-no-upload-fast' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-inline-upload' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-inline-upload-serialized' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-inline-upload-descriptor-serialized' ||
           this.perfProfile === 'shadow-precise-dirty-ring-perf' ||
             this.perfProfile === 'shadow-precise-strong-ring-trace' ||
             this.perfProfile === 'shadow-precise-strong-ring-perf' ||

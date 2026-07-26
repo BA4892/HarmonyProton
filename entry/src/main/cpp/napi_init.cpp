@@ -124,11 +124,19 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
         !strcmp(profile, "shadow-precise-strong-ring-trace");
     const bool preciseStrongPerf =
         !strcmp(profile, "shadow-precise-strong-ring-perf");
+    const bool legacyHostSync =
+        !strcmp(profile, "shadow-precise-legacy-host-sync");
     const bool preciseDirtyPerf = !strcmp(profile, "shadow-precise-dirty-ring-perf");
     const bool preciseDirtyNoMerge = !strcmp(profile, "shadow-precise-dirty-ring-no-merge");
     const bool preciseDirtyNoUpload = !strcmp(profile, "shadow-precise-dirty-ring-no-upload");
     const bool preciseDirtyNoUploadFast =
         !strcmp(profile, "shadow-precise-dirty-ring-no-upload-fast");
+    const bool preciseDirtyDescriptorSerialized =
+        !strcmp(profile, "shadow-precise-dirty-ring-inline-upload-descriptor-serialized");
+    const bool preciseDirtyInlineUpload =
+        !strcmp(profile, "shadow-precise-dirty-ring-inline-upload") || preciseDirtyDescriptorSerialized;
+    const bool preciseDirtyInlineUploadSerialized =
+        !strcmp(profile, "shadow-precise-dirty-ring-inline-upload-serialized");
     const bool preciseDirtyRing =
         !strcmp(profile, "shadow-precise-dirty-ring");
     const bool trace = !strcmp(profile, "shadow-trace") || preciseStrongTrace;
@@ -145,9 +153,10 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
     const bool precise = !strcmp(profile, "shadow-precise") ||
         !strcmp(profile, "shadow-precise-single-ring") ||
         !strcmp(profile, "shadow-precise-sync-submit") ||
-        (!strcmp(profile, "shadow-precise-strong-ring") || preciseStrongTrace ||
+        (!strcmp(profile, "shadow-precise-strong-ring") || legacyHostSync || preciseStrongTrace ||
          preciseStrongPerf || preciseDirtyRing || preciseDirtyPerf || preciseDirtyNoMerge || preciseDirtyNoUpload ||
-         preciseDirtyNoUploadFast) ||
+         preciseDirtyNoUploadFast || preciseDirtyInlineUpload ||
+         preciseDirtyInlineUploadSerialized) ||
         asyncPresent ||
         pollPresent ||
         mailboxPresent ||
@@ -155,33 +164,47 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
         deferShmemUnref ||
         cpuShadowUpload;
     const char* mode = (preciseDirtyRing || preciseDirtyPerf || preciseDirtyNoUpload ||
-                        preciseDirtyNoUploadFast || preciseDirtyNoMerge) ? "precise-dirty" : precise ? "precise" : skip ? "none" :
+                        preciseDirtyNoUploadFast || preciseDirtyInlineUpload ||
+                        preciseDirtyInlineUploadSerialized ||
+                        preciseDirtyNoMerge) ? "precise-dirty" : precise ? "precise" : skip ? "none" :
         (explicitToHost ? "to-host-explicit" : "full");
     setenv("VKR_WINEHUA_SHADOW_FROM_HOST", mode, 1);
     /* Preserve the precise shadow contract while carrying one diagnostic
      * selector through the existing graphics-broker IPC. The child converts
-     * this selector back to trace=0 and GPU upload=0 before vtest starts. */
-    setenv("VKR_WINEHUA_SHADOW_TRACE",
-           cpuShadowUpload ? "cpu-upload" :
-           (preciseDirtyNoUpload ? "no-gpu-upload" :
-            preciseDirtyNoUploadFast ? "no-gpu-upload-fast" :
-            (preciseStrongPerf || preciseDirtyPerf || preciseDirtyNoMerge ? "perf" : (trace ? "1" : "0"))), 1);
+     * this selector to the concrete renderer flags before vtest starts. */
+    const char* shadowSelector =
+        legacyHostSync ? "legacy-host-sync" :
+        preciseDirtyDescriptorSerialized ? "inline-gpu-upload-descriptor-serialized" :
+        cpuShadowUpload ? "cpu-upload" :
+        preciseDirtyInlineUploadSerialized ? "inline-gpu-upload-serialized" :
+        preciseDirtyInlineUpload ? "inline-gpu-upload" :
+        preciseDirtyNoUpload ? "no-gpu-upload" :
+        preciseDirtyNoUploadFast ? "no-gpu-upload-fast" :
+        (preciseStrongPerf || preciseDirtyPerf || preciseDirtyNoMerge) ? "perf" :
+        trace ? "1" : "0";
+    setenv("VKR_WINEHUA_SHADOW_TRACE", shadowSelector, 1);
     setenv("VKR_WINEHUA_SHADOW_MERGE_RANGES", preciseDirtyNoMerge ? "0" : "1", 1);
     setenv("VKR_WINEHUA_GPU_UPLOAD_WAIT", waitShadowUpload ? "1" : "0", 1);
+    setenv("VKR_WINEHUA_DESCRIPTOR_UPDATE_SERIALIZE",
+           preciseDirtyDescriptorSerialized ? "1" : "0", 1);
     setenv("VN_WINEHUA_DEFER_SHMEM_UNREF", deferShmemUnref ? "1" : "0", 1);
     const char* presentMode = mailboxPresent ? "mailbox" :
         (asyncPresent ? "fifo-async" : (pollPresent ? "fifo-poll" : "fifo"));
     setenv("WINEHUA_VENUS_PRESENT_MODE", presentMode, 1);
     OH_LOG_INFO(LOG_APP,
                 "[NAPI] host shadow profile=%{public}s mode=%{public}s "
-                "trace=%{public}s perf_summary=%{public}s "
+                "trace=%{public}s selector=%{public}s perf_summary=%{public}s "
                 "gpu_upload=%{public}s upload_wait=%{public}s "
-                "defer_shmem_unref=%{public}s present_mode=%{public}s",
-                profile, mode, trace ? "1" : "0",
-                (preciseStrongPerf || preciseDirtyPerf || preciseDirtyNoMerge || preciseDirtyNoUpload) ? "1" : "0",
-                (preciseDirtyNoUpload || preciseDirtyNoUploadFast) ? "0" :
+                "descriptor_serialize=%{public}s defer_shmem_unref=%{public}s "
+                "present_mode=%{public}s",
+                profile, mode, trace ? "1" : "0", shadowSelector,
+                (preciseStrongPerf || preciseDirtyPerf || preciseDirtyNoMerge ||
+                 preciseDirtyNoUpload || preciseDirtyInlineUpload ||
+                 preciseDirtyInlineUploadSerialized) ? "1" : "0",
+                (legacyHostSync || preciseDirtyNoUpload || preciseDirtyNoUploadFast) ? "0" :
                     (cpuShadowUpload ? "cpu" : "auto"),
                 waitShadowUpload ? "1" : "0",
+                preciseDirtyDescriptorSerialized ? "1" : "0",
                 deferShmemUnref ? "1" : "0", presentMode);
 
     napi_value result;

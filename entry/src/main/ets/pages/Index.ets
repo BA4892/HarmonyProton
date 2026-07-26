@@ -414,9 +414,13 @@ struct Index {
       this.perfProfileText === 'shadow-precise-single-ring' ||
       this.perfProfileText === 'shadow-precise-sync-submit' ||
       this.perfProfileText === 'shadow-precise-strong-ring' ||
+      this.perfProfileText === 'shadow-precise-legacy-host-sync' ||
       this.perfProfileText === 'shadow-precise-dirty-ring' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-no-upload' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-no-upload-fast' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload-serialized' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload-descriptor-serialized' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-perf' ||
       this.perfProfileText === 'shadow-precise-strong-ring-trace' ||
       this.perfProfileText === 'shadow-precise-strong-ring-perf' ||
@@ -438,9 +442,13 @@ struct Index {
         environment['VN_PERF'] =
           'no_fence_feedback,no_query_feedback,no_async_queue_submit';
       if (this.perfProfileText === 'shadow-precise-strong-ring' ||
+        this.perfProfileText === 'shadow-precise-legacy-host-sync' ||
         this.perfProfileText === 'shadow-precise-dirty-ring' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-no-upload' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-no-upload-fast' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload-serialized' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload-descriptor-serialized' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-perf' ||
         this.perfProfileText === 'shadow-precise-strong-ring-trace' ||
         this.perfProfileText === 'shadow-precise-strong-ring-perf' ||

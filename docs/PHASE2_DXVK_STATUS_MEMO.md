@@ -1508,3 +1508,226 @@ Checkpoint and evidence:
 Every future passing milestone must archive the exact HAP, embedded/runtime DLL
 hashes, profile/environment, logs, Heaven evidence, and Cube angle result before
 any newer package is deployed.
+
+
+## 19. 2026-07-26 inline-upload candidate rejected
+
+The user repeatedly confirmed visible Heaven camera-angle rollback with the
+installed inline-upload candidate. It is now a failed baseline, not a passing
+milestone:
+
+    profile: shadow-precise-dirty-ring-inline-upload
+    HAP SHA-256:
+      9aa4428b403433975f50db72d47631686e03c6133b9ed5acdc8f070bc608dece
+    archive:
+      D:\MyProject\winehua-logs\manual\heaven-inline-upload-20260726-221238
+
+The archived `artifact.json` is marked
+`FAIL-user-observed-camera-rollback`. Screenshot sampling that did not catch a
+short rollback is not evidence of correctness. Guest camera hashes being
+unique is also insufficient: uniqueness excludes exact byte replay but does
+not prove that decoded camera motion is monotonic or that one rendered frame
+uses one coherent constant-buffer generation.
+
+A code audit found that queue-ordered `vkCmdUpdateBuffer` does not yet remove
+the original mapped-memory hazard. `vkr_device_memory_flush_shadow_range`
+currently copies every Guest flush directly into `mem->host_map` immediately.
+The later queue-submit path records a snapshot upload and has both pre- and
+post-transfer barriers, but the earlier CPU `memcpy` can already overwrite
+Host memory still consumed by an older GPU submission. The latest cumulative
+profile confirms that this path remains active:
+
+    shadow bytes copied through mapped Host memory: about 40.3 GB
+    queue-ordered upload bytes:               about 13.8 GB
+    safely skipped Host-copy bytes:           about 1.63 GB
+
+The working root cause is therefore refined to **immediate Host mapped-memory
+overwrite before queue ordering**, not missing SurfaceQueue ordering and not a
+missing post-upload Vulkan barrier.
+
+The next correctness A/B must:
+
+1. Snapshot Guest flush contents outside the live Host VkDeviceMemory.
+2. Defer writes to the real Host buffer until the private upload command is
+   ordered between prior GPU work and the matching Guest submissions.
+3. Prove every dirty byte is covered by transfer-destination buffers. Any
+   uncovered range must use an explicitly synchronized correctness fallback;
+   it must not silently restore the immediate unsafe memcpy.
+4. Decode the camera data or continuously analyze scene motion. Hash
+   uniqueness, present serials, timestamps, and sparse screenshots are only
+   supporting evidence.
+5. Archive the signed HAP, hashes, exact source state, profile, logs, continuous
+   Heaven evidence, and Cube angle result before calling the candidate fixed.
+
+The unbuilt bound-buffer dirty-list optimization is not eligible for deployment
+yet. Audit found two lifecycle bugs in the working tree: `bound_buffers` is not
+initialized at memory creation, and dirty-list removal incorrectly reinitializes
+that independent list. It must be fixed and separately gated so the first
+deferred-copy correctness A/B is not confounded by a performance-path change.
+
+
+## 20. 2026-07-26 deferred Host-copy correctness candidate
+
+A new candidate was built, archived before installation, and overwrite-installed:
+
+    profile: shadow-precise-dirty-ring-inline-upload
+    HAP SHA-256:
+      fa5b6d848a90a9c467b36112f747a0220777bef00afd4a0d14ede4027ddb04c7
+    wine-data SHA-256:
+      541e9fb6c3492d1cd1210d2edb00573e09b57a34700235817892efccbf2b68ef
+    archive:
+      D:\MyProject\winehua-logs\manual\heaven-deferred-shadow-20260726-225828
+
+This candidate snapshots Guest flush contents separately and does not copy them
+immediately into live Host VkDeviceMemory. Fully covered buffer ranges are
+published only through the queue-ordered upload command. An uncovered deferred
+range uses an internal same-queue idle wait before the CPU fallback.
+
+The physical-device run confirmed:
+
+    WineHua shadow GPU upload inline-submit enabled
+    shadow_copies=0
+    shadow_bytes=0
+    deferred Host-copy queue-wait fallback count=0
+    Heaven materials, geometry, and lighting complete
+    HUD approximately 20 FPS
+
+Fifty display frames captured at a 303 ms median interval covered about 15
+seconds and two Heaven scenes. The similarity-order check found zero frames
+that were materially closer to an older history frame than to the immediately
+preceding frame. Frames 30-32 are the normal scene fade. This is supporting
+evidence only: the artifact remains
+`TESTING-AUTO-50-PASS-USER-PENDING` until the user confirms that short
+full-rate camera rollback is absent.
+
+The current Heaven child diagnostic string still says
+`WINEHUA_PERF_PROFILE=shadow-precise-strong-ring` because
+`AppendStableDesktopDxvkEnv` overwrites only the label after the selected host
+profile has already reached the NCP. The live renderer nevertheless proves the
+inline path is active. Source has been adjusted to preserve the selected label;
+that diagnostic-only change is not present in the archived candidate HAP.
+
+Performance work remains separate. The bound-buffer fast iteration is still
+disabled, and the current dominant measured cost is upload command preparation
+and object-table buffer scanning. Do not enable it until Heaven correctness and
+Cube ordering are both accepted.
+
+
+## 21. 2026-07-26 deferred Host-copy candidate rejected
+
+The user confirmed that Heaven still continuously shows camera-angle rollback
+with the installed deferred-copy candidate. It is therefore rejected:
+
+    profile: shadow-precise-dirty-ring-inline-upload
+    HAP SHA-256:
+      fa5b6d848a90a9c467b36112f747a0220777bef00afd4a0d14ede4027ddb04c7
+    archive:
+      D:\MyProject\winehua-logs\manual\heaven-deferred-shadow-20260726-225828
+    status:
+      FAIL-user-observed-camera-rollback
+
+The 50-frame screenshot result in section 20 was a low-rate supporting check,
+not a correctness gate. It sampled the display at about 3.3 FPS and could miss
+a short rollback between samples. It must never be used to overrule continuous
+full-rate observation.
+
+The deferred Host-copy experiment still proves one useful negative result: the
+rollback survives after immediate CPU writes to live Host mapped memory are
+removed (`shadow_copies=0`, `shadow_bytes=0`, and no uncovered-range fallback).
+That mapped-memory overwrite was a real hazard, but it is not the complete root
+cause of the visible rollback.
+
+The next P0 is no longer another broad shadow-upload A/B. Build an exact
+per-present frame association across these boundaries:
+
+    DXVK frame and decoded view/projection state
+      -> Guest VkQueueSubmit sequence and command-buffer generation
+      -> renderer execution sequence and exact dynamic-buffer generations
+      -> source swapchain image generation
+      -> NCP copy-complete generation
+      -> displayed NativeImage timestamp
+
+For each presented frame, record all Heaven pass-0 dynamic uniform bindings,
+especially slots 163 and 164, rather than one hash. A valid record must prove
+that one draw consumed a coherent set of generations and that the source image
+was not reused before the NCP copy fence completed. The result must distinguish:
+
+1. Camera/view data itself moves backward.
+2. One draw combines constant blocks from different Guest generations.
+3. Renderer executes an older buffer generation for a newer Guest submit.
+4. The Vulkan source image is overwritten or reused before the present copy
+   completes.
+5. The final SurfaceQueue re-publishes an old image (already less likely from
+   monotonic serial/timestamp evidence).
+
+No performance fast path, frame dropping, or 60-minute gate may proceed until
+this trace identifies the boundary of the first generation regression and both
+Heaven continuous observation and Cube `angleRegressions=0` pass on the exact
+same archived HAP.
+
+## 22. 2026-07-27 descriptor-update serialization A/B
+
+The first descriptor-serialization artifact cannot be evaluated:
+
+    HAP SHA-256:
+      fad3600f19ba0054f74da3f2b44d30776ff67aebe54d815618d5ae49d4d
+    archive:
+      D:\MyProject\winehua-logs\manual\heaven-descriptor-serialized-20260727-0038
+    status:
+      INVALID-profile-selector-not-propagated
+
+The NAPI process received the requested profile, but NativeChildProcess does
+not reliably inherit arbitrary process environment. The renderer therefore
+started with `VKR_WINEHUA_DESCRIPTOR_UPDATE_SERIALIZE=0`, and no
+`WineHua descriptor update queue wait` record appeared. Installing an artifact
+is not proof that its controlled variable was active.
+
+The selector is now carried through the existing explicit graphics-broker IPC:
+
+    SetHostShadowProfile
+      -> VKR_WINEHUA_SHADOW_TRACE=inline-gpu-upload-descriptor-serialized
+      -> NativeChildProcess config.shadowTrace
+      -> VKR_WINEHUA_DESCRIPTOR_UPDATE_SERIALIZE=1
+
+The replacement artifact was built successfully and archived before install:
+
+    HAP SHA-256:
+      aa92506e7d0579fa29470dacb046703df949eb4d8f1d61bed90480273900b3e9
+    wine-data SHA-256:
+      9d791950b65302d4cdb2b67968bff4aecd16a151523e2279b2eb0f8493b67c4e
+    archive:
+      D:\MyProject\winehua-logs\manual\heaven-descriptor-serialized-valid-20260727-005103
+    status:
+      TESTING-runtime-proven-user-verdict-pending
+
+This is a diagnostic A/B only. It keeps the inline queue-ordered upload path
+and calls `QueueWaitIdle` on every Host queue immediately before each Host
+`vkUpdateDescriptorSets`. It must prove all three runtime facts before any
+visual verdict is accepted:
+
+    VKR_WINEHUA_DESCRIPTOR_UPDATE_SERIALIZE=1
+    WineHua descriptor update queue wait count=...
+    VKR_WINEHUA_GPU_UPLOAD_SERIALIZE=0
+
+If continuous Heaven rollback disappears, the product fix is descriptor-set
+generation/lifetime retirement, not permanent global queue-idle waits. If it
+remains, descriptor-update overlap is excluded and the next trace must join the
+executed dynamic-buffer generation to the source swapchain image and final
+present serial.
+
+From this point onward, every visual milestone is processed in this order:
+
+1. Archive the actual signed HAP, hashes, source/submodule state, and profile.
+2. Install only that archived hash and prove the controlled variable in logs.
+3. Record automatic evidence and the user's continuous visual verdict.
+4. Update this memo and make a local checkpoint commit before replacing it.
+
+Sparse screenshots, unique Guest hashes, and successful installation never
+override a missing runtime proof or a continuous user-observed rollback.
+
+The physical-device run has now proven the controlled variable. NAPI logged
+`selector=inline-gpu-upload-descriptor-serialized` and
+`descriptor_serialize=1`; NCP logged inline upload enabled, upload serialization
+disabled, and descriptor serialization enabled. The Host log contains repeated
+successful queue waits and still reports `shadow_copies=0` / `shadow_bytes=0`.
+The visual result remains pending the user's continuous full-rate observation.

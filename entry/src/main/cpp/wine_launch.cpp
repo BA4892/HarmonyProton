@@ -248,6 +248,17 @@ static bool IsWineserverSocketReady(const std::string& prefix) {
     return found;
 }
 
+static std::string FindLaunchEnvironmentValue(const LaunchParams& params,
+                                              const char* key)
+{
+    const std::string prefix = std::string(key) + "=";
+    for (auto it = params.envStrs.rbegin(); it != params.envStrs.rend(); ++it) {
+        if (it->rfind(prefix, 0) == 0)
+            return it->substr(prefix.size());
+    }
+    return {};
+}
+
 static void AppendStableDesktopDxvkEnv(std::vector<std::string>& env,
                                        const LaunchParams& params)
 {
@@ -259,6 +270,23 @@ static void AppendStableDesktopDxvkEnv(std::vector<std::string>& env,
      * it with the product default below. */
     const char* shadowTrace = getenv("VKR_WINEHUA_SHADOW_TRACE");
     const bool guestPerf = shadowTrace && !strcmp(shadowTrace, "perf");
+    std::string selectedProfile =
+        FindLaunchEnvironmentValue(params, "WINEHUA_PERF_PROFILE");
+    if (selectedProfile.empty()) {
+        if (shadowTrace && !strcmp(shadowTrace, "inline-gpu-upload-descriptor-serialized"))
+            selectedProfile = "shadow-precise-dirty-ring-inline-upload-descriptor-serialized";
+        else if (shadowTrace && !strcmp(shadowTrace, "inline-gpu-upload-serialized"))
+            selectedProfile = "shadow-precise-dirty-ring-inline-upload-serialized";
+        else if (shadowTrace && !strcmp(shadowTrace, "inline-gpu-upload"))
+            selectedProfile = "shadow-precise-dirty-ring-inline-upload";
+        else if (shadowTrace && !strcmp(shadowTrace, "no-gpu-upload-fast"))
+            selectedProfile = "shadow-precise-dirty-ring-no-upload-fast";
+        else if (shadowTrace && !strcmp(shadowTrace, "no-gpu-upload"))
+            selectedProfile = "shadow-precise-dirty-ring-no-upload";
+        else
+            selectedProfile = guestPerf ? "shadow-precise-strong-ring-perf"
+                                        : "shadow-precise-strong-ring";
+    }
 
     /* Explorer-launched programs inherit the desktop process environment and
      * bypass Index.d3dLaunchEnvironment(). Keep the product-correct settings
@@ -269,10 +297,11 @@ static void AppendStableDesktopDxvkEnv(std::vector<std::string>& env,
     env.push_back("DXVK_LOG_LEVEL=warn");
     env.push_back("DXVK_LOG_PATH=C:\\windows\\temp");
     env.push_back("BOX64_DYNAREC_WEAKBARRIER=0");
-    env.push_back(std::string("WINEHUA_PERF_PROFILE=") +
-                  (guestPerf ? "shadow-precise-strong-ring-perf"
-                             : "shadow-precise-strong-ring"));
+    env.push_back("WINEHUA_PERF_PROFILE=" + selectedProfile);
     env.push_back("DXVK_WINEHUA_PRECISE_SHADOW=1");
+    if (selectedProfile == "shadow-precise-dirty-ring-inline-upload-descriptor-serialized") {
+        env.push_back("VKR_WINEHUA_DESCRIPTOR_UPDATE_SERIALIZE=1");
+    }
     env.push_back("VN_WINEHUA_STRONG_RING_BARRIER=1");
     if (guestPerf) {
         env.push_back("VN_WINEHUA_PERF_SUMMARY=1");
@@ -312,10 +341,26 @@ static void PrepareDesktopSessionGraphicsEnv(const LaunchParams& params)
 
 static void AppendDesktopD3dEntryEnv(std::string& entryParams, const LaunchParams& params)
 {
+    /* Explorer is launched directly through NCP during desktop bootstrap and
+     * therefore does not pass through the process broker. NCP children do not
+     * inherit the session environment reliably, so carry the same base
+     * Wine/Wayland/VirGL environment that was built for broker launches.
+     * Audio and WINESERVERSOCKET are intentionally filtered by
+     * AppendMissingEntryParamsEnvOverrides; their per-process descriptors are
+     * installed by WineChild after the fd list is applied. */
     std::vector<std::string> env;
+    /* Refresh the graphics portion immediately before spawning Explorer.
+     * params.envStrs was assembled before wineboot and the VirGL receiver
+     * finished starting, so it may still contain a stale SHM fallback. */
+    winehua::GraphicsBroker::GetInstance().AppendWineEnv(env);
     AppendD3dBackendEnv(env, params.d3dBackend, params.winehuaBin);
     AppendStableDesktopDxvkEnv(env, params);
     AppendMissingEntryParamsEnvOverrides(entryParams, env);
+
+    /* Fill in the remaining stable baseline values (HOME, prefix, loader
+     * paths, etc.) without allowing that early snapshot to replace the fresh
+     * graphics state above. */
+    AppendMissingEntryParamsEnvOverrides(entryParams, params.envStrs);
 }
 
 static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
