@@ -24,8 +24,6 @@ DXVK_SUBMIT_RE = re.compile(
     r"WineHuaDxvkSubmit: winPid=(\d+) recording=(\d+) "
     r"execCmd=(0x[0-9a-f]+) frameCount=(\d+) frames=\[([^]]*)\]"
 )
-
-
 def integer(value):
     return int(value, 16) if value.startswith("0x") else int(value)
 
@@ -116,6 +114,27 @@ def parse_host_submits(path):
     return selected_ctx, sessions[selected_ctx]
 
 
+def parse_host_binds(path):
+    binds = collections.defaultdict(list)
+    with path.open("r", encoding="utf-8", errors="replace") as source:
+        for order, line in enumerate(source):
+            if "WineHuaCapture: bind-descriptor" not in line:
+                continue
+            fields = parse_fields(line)
+            timestamp_match = TIMESTAMP_RE.search(line)
+            if not timestamp_match or not {"cmdId", "setId"}.issubset(fields):
+                continue
+            cmd_id = integer(fields["cmdId"])
+            binds[cmd_id].append({
+                "timestamp": int(timestamp_match.group(1)),
+                "order": order,
+                "setId": integer(fields["setId"]),
+                "firstSet": integer(fields.get("firstSet", "0")),
+                "setIndex": integer(fields.get("setIndex", "0")),
+            })
+    return binds
+
+
 def align_submit_sequences(guest, host):
     mapping = {}
     guest_index = 0
@@ -174,6 +193,8 @@ def parse_host_ubo(path, minimum_timestamp):
                 "submit", "submitGeneration", "binding", "bufferId",
                 "memoryId", "absoluteOffset", "bytes", "hashBytes",
                 "descriptorRange", "descriptorOffset", "bufferMemoryOffset",
+                "descriptorSequence", "setId", "arrayElement", "type",
+                "updateOffset", "updateBytes", "capacity",
             ):
                 if key in fields:
                     fields[key] = integer(fields[key])
@@ -212,6 +233,92 @@ def build_host_indices(phases):
     for item in phases["update"]:
         updates[item.get("bufferId")].append(item)
     return descriptors, flushes, ranges, updates
+
+
+def build_focused_indices(phases):
+    descriptors = collections.defaultdict(list)
+    updates = collections.defaultdict(list)
+    for item in phases["watched-descriptor"]:
+        descriptors[(item.get("setId"), item.get("binding"))].append(item)
+    for item in phases["watched-update"]:
+        updates[(item.get("bufferId"), item.get("absoluteOffset"),
+                 item.get("bytes"))].append(item)
+    for items in descriptors.values():
+        items.sort(key=lambda item: (
+            item.get("submitGeneration", 0),
+            item.get("descriptorSequence", 0), item["timestamp"]))
+    for items in updates.values():
+        items.sort(key=lambda item: (item.get("submit", 0), item["timestamp"]))
+    return descriptors, updates
+
+
+def previous_submit_timestamps(host_submits):
+    previous = {}
+    last_by_command = {}
+    for item in host_submits:
+        previous[id(item)] = last_by_command.get(item["cmdId"])
+        last_by_command[item["cmdId"]] = item["timestamp"]
+    return previous
+
+
+def bound_sets_for_submit(bind_events, host_item, previous_timestamp):
+    events = [item for item in bind_events.get(host_item["cmdId"], [])
+              if item["timestamp"] <= host_item["timestamp"] and
+              (previous_timestamp is None or
+               item["timestamp"] > previous_timestamp)]
+    if not events:
+        prior = [item for item in bind_events.get(host_item["cmdId"], [])
+                 if item["timestamp"] <= host_item["timestamp"]]
+        if prior:
+            latest_order = prior[-1]["order"]
+            events = [item for item in prior
+                      if item["order"] >= latest_order - 16]
+    result = []
+    seen = set()
+    for item in reversed(events):
+        if item["setId"] not in seen:
+            seen.add(item["setId"])
+            result.append(item["setId"])
+    return result
+
+
+def join_focused_binding(record, host_item, previous_timestamp, bind_events,
+                         focused_descriptors, focused_updates):
+    expected_hash = record["hash"][2:]
+    size = record["bytes"]
+    set_ids = bound_sets_for_submit(bind_events, host_item, previous_timestamp)
+    candidates = []
+    for set_id in set_ids:
+        descriptor_events = [item for item in focused_descriptors.get(
+            (set_id, record["binding"]), [])
+            if item.get("submitGeneration", 0) <= host_item["submit"]]
+        if not descriptor_events:
+            continue
+        descriptor = descriptor_events[-1]
+        update_events = [item for item in focused_updates.get((
+            descriptor.get("bufferId"), descriptor.get("absoluteOffset"),
+            size), []) if item.get("submit", 0) <= host_item["submit"]]
+        latest_update = update_events[-1] if update_events else None
+        hash_match = bool(
+            latest_update and latest_update.get("sourceHash") == expected_hash)
+        candidates.append({
+            "setId": set_id,
+            "descriptor": descriptor,
+            "latestUpdate": latest_update,
+            "latestUpdateHashMatch": hash_match,
+            "latestUpdateHashMismatch": bool(latest_update and not hash_match),
+        })
+    candidates.sort(key=lambda item: (
+        item["latestUpdateHashMatch"], bool(item["latestUpdate"]),
+        item["descriptor"].get("submitGeneration", 0),
+    ), reverse=True)
+    return {
+        "commandId": host_item["cmdId"],
+        "boundSetCount": len(set_ids),
+        "boundSetIdsFirst64": set_ids[:64],
+        "candidateCount": len(candidates),
+        "best": candidates[0] if candidates else None,
+    }
 
 
 def join_binding(record, host_submit, descriptors, flushes, ranges, updates):
@@ -289,23 +396,30 @@ def main():
     parser.add_argument("--wine-identity", type=Path, required=True)
     parser.add_argument("--host-assoc", type=Path, required=True)
     parser.add_argument("--host-ubo", type=Path, required=True)
+    parser.add_argument("--host-bind", type=Path)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
     identity = parse_wine_identity(args.wine_identity)
     selected_ctx, host_submits = parse_host_submits(args.host_assoc)
+    bind_events = parse_host_binds(args.host_bind or args.host_ubo)
     alignment, alignment_mismatches = align_submit_sequences(
         identity["guestSubmits"], host_submits)
     frame_host_submit = {}
+    frame_host_item = {}
     for frame, item in identity["frameGuestIndex"].items():
         host = alignment.get(item["guestIndex"])
         if host:
             frame_host_submit[frame] = host["submit"]
+            frame_host_item[frame] = host
 
     phases, limits = parse_host_ubo(args.host_ubo, host_submits[0]["timestamp"])
     host_indices = build_host_indices(phases)
+    focused_indices = build_focused_indices(phases)
+    previous_timestamps = previous_submit_timestamps(host_submits)
     wine_ubo = parse_wine_ubo(args.wine_ubo)
     results = {3: [], 4: []}
+    focused_results = {3: [], 4: []}
     failures = []
     for frame, bindings in sorted(wine_ubo.items()):
         host_submit = frame_host_submit.get(frame)
@@ -328,6 +442,16 @@ def main():
                            or joined["exactUpdateHashMismatch"]):
                 failures.append({"binding": binding, **item})
 
+            host_item = frame_host_item[frame]
+            focused = join_focused_binding(
+                record, host_item, previous_timestamps[id(host_item)],
+                bind_events, *focused_indices)
+            focused_item = {
+                "frame": frame, "hostSubmit": host_submit,
+                "hash": record["hash"], "joined": focused,
+            }
+            focused_results[binding].append(focused_item)
+
     binding_summary = {}
     for binding, items in results.items():
         joined = [item["joined"] for item in items if item["joined"]]
@@ -344,6 +468,24 @@ def main():
             "joinSamplesFirst10": items[:10],
         }
 
+    focused_summary = {}
+    for binding, items in focused_results.items():
+        joins = [item["joined"] for item in items]
+        best = [item["best"] for item in joins if item["best"]]
+        focused_summary[str(binding)] = {
+            "framesWithHostSubmit": len(items),
+            "framesWithBoundSet": sum(bool(item["boundSetCount"])
+                                      for item in joins),
+            "framesWithDescriptorCandidate": len(best),
+            "framesWithWatchedUpdate": sum(bool(item["latestUpdate"])
+                                           for item in best),
+            "framesWithExpectedLastUpdateHash": sum(
+                item["latestUpdateHashMatch"] for item in best),
+            "framesWithStaleLastUpdateHash": sum(
+                item["latestUpdateHashMismatch"] for item in best),
+            "joinSamplesFirst10": items[:10],
+        }
+
     report = {
         "schemaVersion": 1,
         "selectedUnixPid": identity["selectedPid"],
@@ -355,8 +497,11 @@ def main():
         "alignmentMismatchesFirst20": alignment_mismatches[:20],
         "frameToHostSubmitCount": len(frame_host_submit),
         "hostTraceCounts": {key: len(value) for key, value in phases.items()},
+        "hostBindCommandBufferCount": len(bind_events),
+        "hostBindEventCount": sum(len(items) for items in bind_events.values()),
         "traceLimits": limits,
         "bindings": binding_summary,
+        "focusedBindings": focused_summary,
         "suspiciousJoinCount": len(failures),
         "suspiciousJoinsFirst20": failures[:20],
     }

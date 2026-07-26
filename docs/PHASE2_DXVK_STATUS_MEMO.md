@@ -2113,3 +2113,80 @@ invalid unless it proves all of the following before logs are analyzed:
 The purpose is to locate the first generation regression. It is not a product
 performance profile, and visual smoothness under trace overhead is not an
 acceptance criterion.
+
+## 25. 2026-07-27 rollback remains open and focused UBO checkpoint
+
+The user has confirmed that every candidate installed after the previously
+reported smooth run still shows a backward camera-angle jump in continuous
+Heaven observation. There is currently no accepted known-good package. A clock
+time such as "the 12:40 package" is not a recoverable version and must not be
+used as a rollback boundary unless its HAP hash, source commits, runtime payload
+hash and profile are all archived.
+
+This exposed a process failure: some important visual observations were not
+immediately closed with a memo update and source/artifact checkpoint. From this
+point onward, every correctness experiment must record before replacement:
+
+    signed HAP SHA-256 and archived HAP
+    embedded wine-data SHA-256
+    main and all changed submodule commits plus dirty summary
+    exact Host profile and effective runtime selector proof
+    automatic result plus continuous full-rate user verdict
+    restore command for the last accepted artifact
+
+No sparse screenshot, FPS number, install timestamp or source-only change may
+be called a fix. A visual PASS is valid only on the exact archived hash and is
+committed to this memo before another artifact is installed.
+
+The current evidence still rejects broad synchronization guesses. Camera UBO
+hashes do not replay on the DXVK side, 9,243 Guest/Host command occurrences
+align with zero mismatch, Host present serials remain monotonic, descriptor
+queue-idle A/B did not remove the rollback, and the shadow-generation mutex
+recorded zero contention. Do not repeat queue-wide waits, frame dropping,
+present reordering or broad shadow-copy changes without new contradictory data.
+
+The remaining UBO question is exact and bounded:
+
+    actual descriptor set bound by the frame command
+      -> binding 3/4 physical buffer and exact subrange
+      -> last Host vkCmdUpdateBuffer covering that subrange before draw
+      -> exact 48/1536-byte FNV-1a64 hash equals the DXVK frame hash
+
+The first broad Host trace could prove binding 4 only in an early window. It
+hit 200,000-record limits and merged the 48-byte Camera update into larger
+chunks. The first focused draft was also insufficient: the archived broad log
+contains 1,262 distinct `(binding, buffer, offset)` watches and as many as 128
+offsets on one buffer, so a fixed 16-watch array would silently lose evidence.
+
+virglrenderer commit `26277cc8` implements the corrected diagnostic without
+changing rendering or synchronization behavior:
+
+    WINEHUA_VKR_TRACE_UBO_IDENTITY=focused
+    per-buffer watches allocated only for focused binding 3/4 ranges
+    capacity 256, atomically published; overflow is explicit, never silent
+    watched-descriptor records only physical mapping transitions
+    watched-update hashes the exact 48/1536-byte subrange inside merged upload
+    unchanged update hashes are suppressed to avoid trace-induced slowdown
+    generic descriptor/range/update spam remains disabled in focused mode
+
+`automation/analyze_heaven_host_ubo.py` now also joins Host command-buffer
+descriptor-set binds to `watched-descriptor` and `watched-update`. It reports
+missing coverage as unknown, not PASS. A stale result requires a concrete
+frame whose draw-time physical slice has a last pre-draw upload hash different
+from the DXVK hash. If every covered binding 3/4 frame matches and there is no
+watch/trace overflow, UBO/shadow is closed and investigation moves to draw-time
+descriptor-set selection, other frame-global constant/storage buffers, or
+command-buffer recording generation. No further UBO synchronization behavior
+will be changed without that evidence.
+
+Checkpoint build and retest commands:
+
+    docker exec winehua-master-ext4 bash -lc \
+      'cd /data/src/winehua && make native NATIVE_ARCH=arm64-v8a'
+    docker exec winehua-master-ext4 bash -lc \
+      'cd /data/src/winehua && make hap NATIVE_ARCH=arm64-v8a'
+
+The native build passed and the AArch64 libvirglrenderer contains the
+`watched-descriptor` and `watched-update` markers. The signed HAP identity and
+physical-device result are intentionally pending and must be appended only
+after artifact validation and the actual run.

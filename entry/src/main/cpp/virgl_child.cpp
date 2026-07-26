@@ -467,7 +467,7 @@ extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainPr
            "|__env=WINEHUA_VKR_TRACE_CAPTURE_LIMIT=" +
                (captureTrace ? "20000" : "512") +
            "|__env=WINEHUA_VKR_TRACE_UBO_IDENTITY=" +
-               (frameAssocTrace ? "1" : "0") +
+               (frameAssocTrace ? "focused" : "0") +
            "|__env=WINEHUA_VKR_TRACE_PIPELINE=" +
                (captureTrace ? "1" : "0") +
            "|__env=VKR_WINEHUA_SHADOW_FROM_HOST=" + fromHostMode +
