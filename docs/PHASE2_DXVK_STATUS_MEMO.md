@@ -7,6 +7,56 @@
 > code. Update it whenever a conclusion, gate result, commit, HAP, or primary
 > blocker changes.
 
+### 2026-07-26 Managed DXVK runtime contract and checkpoint
+
+The product default for every Wine launch entry is now `dxvk_legacy` (DXVK
+1.10.3). This applies to the desktop `LaunchClient` path, Explorer/file-manager
+launches, `runWineProgram`, and the legacy `runWineExe` N-API entry. An explicit
+`d3dBackend: "wined3d"` remains the compatibility fallback.
+
+DXVK is a managed runtime overlay and is deliberately not copied into
+`C:\\windows\\system32` or `C:\\windows\\syswow64`:
+
+    files/wine/dxvk/legacy/x64/{d3d11.dll,dxgi.dll}
+    files/wine/dxvk/legacy/x86/{d3d11.dll,dxgi.dll}
+
+Each Wine child receives the same inherited environment:
+
+    WINEDLLPATH=<managed x64>:<managed x86>:<Wine builtin paths>
+    WINEDLLDIR0=<managed x64>
+    WINEDLLDIR1=<managed x86>
+    WINEDLLOVERRIDES=d3d11=n;dxgi=n
+
+This means a game started from Explorer or the App file manager resolves the
+managed native D3D11/DXGI pair when it creates a D3D11 device, and descendants
+inherit the selection. A Wine program started outside the WineHua App (for
+example through `hdc shell`) is not a supported launch boundary because it has
+no Wine prefix, broker, Wayland, or managed environment.
+
+Every Wine child now logs the selected backend, DXVK version, override, search
+path, and presence of both x64/x86 DLL pairs. The 2026-07-26 physical-device
+regression confirmed:
+
+    x64 DXVK smoke: PASS, feature level 11.0
+    D3D11 cube: PASS, 555 frames, angle regressions 0, about 80 FPS
+    loaded modules: .../wine/dxvk/legacy/x64/d3d11.dll and dxgi.dll
+    CPU full-frame readback/upload: 0/0
+
+The complete `dxvk` suite is still reported FAIL only because the existing x86
+test exceeds its 180-second timeout; the x64 path and runtime relocation did
+not regress. Checkpoint commit:
+
+    3f6bf02 checkpoint: default DXVK runtime and diagnostics
+
+Performance work remains measurement-first. The current VirGL/SurfaceQueue
+trace shows one GPU copy, approximately 14 us fence wait, 0.60 ms acquire,
+0.88 ms submit, and 0.94 ms queue/present work at roughly 82 FPS. The next
+experiment must split DXVK/Heaven frame time into fence, IPC, Host Vulkan,
+shadow scan/memcpy, upload, submit, and present before changing synchronization.
+Only after that split should we A/B device-side fence wait, dirty-allocation
+tracking, and safe submit batching. Do not disable barriers, merge unknown
+shadow gaps, or loosen fence lifetime for an unmeasured FPS gain.
+
 ### 2026-07-23 Heaven pipeline-create replay isolation (current)
 
 The captured Heaven material replay still fails at `vkCreateGraphicsPipelines`
