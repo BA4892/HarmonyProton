@@ -555,15 +555,35 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         winehua::virgl_ipc::SurfaceQueryReply reply;
         const uint64_t nowUs = NowUs();
+        std::vector<const Entry*> candidates;
+        candidates.reserve(surfaces_.size());
         for (const auto& [surfaceKey, entry] : surfaces_)
         {
             static_cast<void>(surfaceKey);
             if (!entry.info.surfaceId ||
                 (!(entry.info.flags & winehua::virgl_ipc::kSurfaceAttached) &&
-                 nowUs - entry.lastPresentUs > 2000000) ||
-                reply.count == winehua::virgl_ipc::kMaxSurfaces)
+                 nowUs - entry.lastPresentUs > 2000000))
                 continue;
-            reply.surfaces[reply.count++] = entry.info;
+            candidates.push_back(&entry);
+        }
+
+        // unordered_map iteration is deliberately unspecified. Returning that
+        // order made the main compositor bind a different live surface after a
+        // restart when multiple Wine/Explorer clients were present. Prefer the
+        // surface that most recently submitted a frame, with deterministic
+        // serial/key tie breakers for startup races.
+        std::sort(candidates.begin(), candidates.end(),
+                  [](const Entry* a, const Entry* b) {
+                      if (a->lastPresentUs != b->lastPresentUs)
+                          return a->lastPresentUs > b->lastPresentUs;
+                      if (a->info.serial != b->info.serial)
+                          return a->info.serial > b->info.serial;
+                      return a->info.surfaceKey > b->info.surfaceKey;
+                  });
+        for (const Entry* entry : candidates)
+        {
+            if (reply.count == winehua::virgl_ipc::kMaxSurfaces) break;
+            reply.surfaces[reply.count++] = entry->info;
         }
         return reply;
     }
