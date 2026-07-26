@@ -198,6 +198,13 @@ Do not infer correctness from descriptor-time `shadow == host`: inline upload
 intentionally defers the Host mapped copy, and the Host buffer is populated by
 the private transfer command immediately before the Guest submit.
 
+This identity trace is implemented in virglrenderer commit `a4bd4f26` and is
+enabled only by `WINEHUA_VKR_TRACE_UBO_IDENTITY=1`. The App sets it only for
+`shadow-precise-dirty-ring-frame-assoc-trace`. It records bounded
+`descriptor`, `flush`, `upload-range`, and actual `update` phases using the
+same FNV-1a64 convention as the DXVK `WineHuaUbo` record. It adds no wait,
+barrier, dirty-state mutation, descriptor mutation, or queue-order change.
+
 ### 2026-07-27 full command identity attempt and namespace correction
 
 The first Wine/Mesa bridge candidate is archived and was run on the physical
