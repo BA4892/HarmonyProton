@@ -69,6 +69,49 @@ upload, image, or present behavior. The first non-monotonic generation in this
 joined trace determines the next code fix; broad synchronization experiments,
 frame dropping, and performance fast paths remain blocked until then.
 
+### 2026-07-27 full command identity attempt and namespace correction
+
+The first Wine/Mesa bridge candidate is archived and was run on the physical
+device:
+
+    archive:
+      D:\MyProject\winehua-logs\manual\heaven-full-command-identity-20260727-0235
+    HAP SHA-256:
+      006c80f2dda71275dad3bde59d47846d58bb580cd73e6cc2ca8577aee53b308e
+    wine-data SHA-256:
+      b19b402b00147f6a181906851e743964c1eeb0261935b71fd89b5c871813d054
+    runtime Venus ICD SHA-256:
+      fab2daba0567c30acb5966c4fc6bdc7cdb38694577b5e93f9a806a285ce72ac1
+    runtime winevulkan.so SHA-256:
+      9748545784b1592acbcd73f6963a29408207893eab2d95cafeac2a6cc635388f
+
+Attempt 1 reached only the launcher and is invalid. Attempt 2 entered the
+benchmark and captured 399 DXVK camera frames, 4,137 Guest Mesa queue command
+entries, the same 4,137 Host queue command entries, 398 source transitions,
+and 398 advancing presents. Guest Mesa and Host queue command-ID sequences
+match exactly with zero missing, inserted, or reordered entries. This rules out
+Venus transport reordering of the decoded command-object sequence.
+
+The attempted frame join also exposed a trace-design defect: raw handles and
+`cmdId` values are namespace-local, command-buffer objects are reset and reused,
+and DXVK logging and Guest submit logging occur on different threads. A bare
+`frame -> handle -> cmdId` match can therefore associate a frame with the wrong
+recording generation and falsely report a submit/present regression. No root
+cause or behavioral fix may be inferred from that ambiguous join.
+
+The replacement trace must record:
+
+    DXVK Windows PID + recording generation + ordered frame list
+      -> Wine Unix PID + client/Guest handle mapping
+      -> Mesa Unix PID + Guest handle + object id
+      -> Host renderer ctx_id + cmdId + source image + present serial
+
+DXVK records the generation at the actual submission-thread `vkQueueSubmit`
+boundary, so command-list batching, object reuse, and cross-thread log ordering
+are explicit. Host queue and source-transition records include `ctx_id`, matching
+the existing present record. These are diagnostic-only fields; the candidate
+does not change rendering, synchronization, upload, queue, or present behavior.
+
 ### 2026-07-26 Managed DXVK runtime contract and checkpoint
 
 The product default for every Wine launch entry is now `dxvk_legacy` (DXVK
