@@ -1731,3 +1731,41 @@ The physical-device run has now proven the controlled variable. NAPI logged
 disabled, and descriptor serialization enabled. The Host log contains repeated
 successful queue waits and still reports `shadow_copies=0` / `shadow_bytes=0`.
 The visual result remains pending the user's continuous full-rate observation.
+
+## 23. 2026-07-27 submit-generation descriptor A/B
+
+The fully serialized descriptor candidate proved that its selector and Host
+wait were active, but it is not a useful visual A/B. The physical-device
+presenter measured only approximately 2.2 FPS because Heaven issued tens of
+thousands of descriptor updates and the diagnostic waited the queue before
+every call. It is retained in the archive but marked:
+
+    SUPERSEDED-diagnostic-too-slow
+
+The replacement keeps the same product path and diagnostic selector, but waits
+at most once for each observed Host queue-submit generation. The first
+descriptor update after a submit waits every device queue; subsequent updates
+skip until the global submit generation changes. This preserves the intended
+overlap exclusion without single-stepping every descriptor write.
+
+    HAP SHA-256:
+      4c6b5ae6cf444e9766f3af116fbb2de3c16f9510908f5830e36f1f36e450a4ae
+    wine-data SHA-256:
+      6fa8c8c2751b7babe5ec71e06c237682f554ad4c16fc98c436a3afd89a96ead1
+    archive:
+      D:\MyProject\winehua-logs\manual\heaven-descriptor-submit-generation-20260727-012618
+    status:
+      ARCHIVED-READY-FOR-INSTALL
+
+Acceptance requires increasing `submit_generation` values in Host descriptor
+wait logs, far fewer waits than descriptor updates, recovered present FPS, and
+the user's continuous Heaven rollback verdict. A visual change without those
+runtime facts is invalid.
+
+The physical-device replacement run has passed its runtime proof. NCP enabled
+descriptor serialization without upload serialization. Host wait records show
+strictly increasing submit generations; a representative sample reached wait
+5640 at submit generation 8372 with result zero. Presenter cadence recovered
+from about 2.2 FPS to roughly 6-8 FPS. This remains slower than the 20+ FPS
+product path, but is sufficient to distinguish ordinary low cadence from an
+actual backward camera jump. The user verdict is still pending.
