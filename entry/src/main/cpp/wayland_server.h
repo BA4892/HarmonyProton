@@ -109,8 +109,11 @@ public:
     bool SurfaceLocalToDesktop(wl_resource* surface, double lx, double ly, double& dx, double& dy) {
         return inputResolver_.SurfaceLocalToDesktop(surface, lx, ly, dx, dy);
     }
-    // Desktop 模式: 提到 Z-order 最顶层
-    void RaiseToplevel(uint32_t id);
+    // Desktop 模式: 提到 Z-order 最顶层。
+    // userInitiated=true 仅用于用户显式操作路径 (ArkTS 任务栏/窗口点击),
+    // 会对已 fullscreen 的目标重新取全屏优先级号; tl_set_fullscreen 等
+    // 批处理路径必须保持默认 false。见 ToplevelState::fsPriority 注释
+    void RaiseToplevel(uint32_t id, bool userInitiated = false);
     // 读取 toplevel 桌面坐标 (InputManager 坐标转换用)
     // miss 返回 0 (与旧实现返回值一致), find 语义无插入副作用
     int GetToplevelX(uint32_t id) { return toplevelMgr_.GetToplevelX(id); }

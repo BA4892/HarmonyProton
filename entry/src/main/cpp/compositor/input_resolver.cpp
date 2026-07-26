@@ -46,33 +46,40 @@ bool InputResolver::FindInputTargetAt(int x, int y, InputTarget& out)
         const auto* rootSt = tmgr_.FindToplevelLocked(rootId);
         const int rootW = (rootSt && rootSt->w > 0) ? rootSt->w : outputW_;
         const int rootH = (rootSt && rootSt->h > 0) ? rootSt->h : outputH_;
-        // 两遍扫描与渲染侧 (TakeToplevelFrame) 同序: pass 0 跳过 explorer 窗口,
-        // 多窗口同时全屏时游戏优先; pass 1 接受 explorer 兜底。
-        // 命中任一候选即在循环体内 return, pass 1 只在 pass 0 无候选时执行
-        for (int pass = 0; pass < 2; ++pass) {
-        for (auto zit = tmgr_.toplevelZOrder().rbegin(); zit != tmgr_.toplevelZOrder().rend(); ++zit) {
-            const auto* zst = tmgr_.FindToplevelLocked(*zit);
-            if (!zst || !zst->fullscreen || !tmgr_.IsToplevelVisibleLocked(*zit, desktopRootToplevelId_)) continue;
-            if (pass == 0 && zst->isExplorerWindow) continue;
-            // 逆变换尺寸必须与渲染一致: ZC 游戏用全屏前尺寸 (游戏分辨率),
-            // SHM 游戏用实际 buffer 尺寸 (geometry.h SelectFullscreenContentSize)
-            int contentW = 0, contentH = 0;
+        // 全屏目标选取与渲染侧 (TakeToplevelFrame) 同规则: 可见全屏窗口中取
+        // fsPriority 最大者。多窗口可同时 fullscreen (显示模式切换时 Wine 会
+        // 把足够大的旧窗口连带标记, 且请求到达顺序不定 — 2026-07 实测 notepad
+        // 被连带标记并压在游戏上, 第一下点击切走前台导致游戏掉出全屏),
+        // 规则原因/局限见 ToplevelState::fsPriority 注释
+        const ToplevelManager::ToplevelState* zst = nullptr;
+        uint32_t fullscreenId = 0;
+        for (uint32_t id : tmgr_.toplevelZOrder()) {
+            const auto* cand = tmgr_.FindToplevelLocked(id);
+            if (!cand || !cand->fullscreen || !tmgr_.IsToplevelVisibleLocked(id, desktopRootToplevelId_)) continue;
+            if (!zst || cand->fsPriority > zst->fsPriority) { zst = cand; fullscreenId = id; }
+        }
+        // 逆变换尺寸必须与渲染一致: ZC 游戏用全屏前尺寸 (游戏分辨率),
+        // SHM 游戏用实际 buffer 尺寸 (geometry.h SelectFullscreenContentSize)
+        int contentW = 0, contentH = 0;
+        FitRect transform;
+        bool fsGeometryOk = false;
+        if (zst) {
             SelectFullscreenContentSize(zst->preFsW, zst->preFsH, zst->w, zst->h,
-                                        compositor_.HasZeroCopyLayerForToplevelLocked(*zit),
+                                        compositor_.HasZeroCopyLayerForToplevelLocked(fullscreenId),
                                         contentW, contentH);
-            FitRect transform;
-            if (!ComputeFitRect(rootW, rootH, contentW, contentH, transform)) break;
-            const uint32_t fullscreenId = *zit;
+            fsGeometryOk = ComputeFitRect(rootW, rootH, contentW, contentH, transform);
+        }
+        if (fsGeometryOk) {
             // 诊断: 全屏输入目标选取 (仅目标变化时输出 — 多窗口同时全屏时
-            // 选错窗口的点击路由问题靠它定位, 例如 explorer 窗口压在游戏上)
+            // 选错窗口的点击路由问题靠它定位, 例如旧窗口被连带标记压在游戏上)
             static uint32_t sLastPicked = 0;
             if (fullscreenId != sLastPicked) {
                 sLastPicked = fullscreenId;
                 OH_LOG_INFO(LOG_APP,
-                    "[Input] fs-pick tl=#%{public}u pass=%{public}d shell=%{public}d zc=%{public}d"
+                    "[Input] fs-pick tl=#%{public}u pri=%{public}llu zc=%{public}d"
                     " preFs=%{public}dx%{public}d buf=%{public}dx%{public}d → content=%{public}dx%{public}d",
-                    fullscreenId, pass, zst->isExplorerWindow ? 1 : 0,
-                    compositor_.HasZeroCopyLayerForToplevelLocked(*zit) ? 1 : 0,
+                    fullscreenId, static_cast<unsigned long long>(zst->fsPriority),
+                    compositor_.HasZeroCopyLayerForToplevelLocked(fullscreenId) ? 1 : 0,
                     zst->preFsW, zst->preFsH, zst->w, zst->h, contentW, contentH);
             }
             // 该窗口的 subsurface 层绘制在窗口内容之上, 先命中 (同一变换)
@@ -117,7 +124,6 @@ bool InputResolver::FindInputTargetAt(int x, int y, InputTarget& out)
             out.scale = static_cast<float>(transform.scale);
             out.swallow = true;
             return out.surface != nullptr;
-        }
         }
     }
 

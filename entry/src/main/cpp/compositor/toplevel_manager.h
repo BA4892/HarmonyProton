@@ -52,10 +52,28 @@ public:
         // 但游戏内部分辨率不变, 输入逆映射须用全屏前尺寸; SHM 游戏 buffer 即
         // 画面, 直接用 w/h。选择逻辑是 geometry.h 的纯函数, 两侧共用。
         int32_t preFsW = 0, preFsH = 0;  // 全屏前内容尺寸, SetToplevelFullscreen 快照
-        // app_id 前缀 "explorer.exe" (含 desktop-shell/taskbar): 显示模式切换会
-        // 把 explorer 窗口意外标成全屏 (winewayland 按位置推断 fullscreen),
-        // 全屏扫描两遍遍历用它让游戏优先于这类伴随窗口
-        bool isExplorerWindow = false;
+        // -- 全屏优先级序号 --
+        // 多窗口可同时处于 fullscreen: 游戏 ChangeDisplaySettings 缩虚拟屏后,
+        // Wine 按"窗口矩形覆盖整个屏幕即全屏"把所有足够大的旧窗口 (notepad、
+        // explorer 伴随窗口等) 连带标成 fullscreen, 且 set_fullscreen 请求
+        // 到达顺序不定 — 靠 z-order/到达顺序选"全屏前台"都会被旧窗口压顶,
+        // 第一下点击路由错 → Wine 前台切换 → 游戏掉出全屏 (2026-07 实测,
+        // 曾用 app_id 前缀 "explorer.exe" 特判, 但 notepad 等非 explorer
+        // 窗口同样触发, 特判只是 mask 最常见实例, 故改一般规则)。
+        // 取号规则 (渲染/输入两侧全屏扫描统一取序号最大者):
+        // - 首次入 z-order 时按先后取号 (AddToZOrder 内部完成): 游戏窗口
+        //   必定最晚入列 (map 或 set_fullscreen 的 raise, 以先到者为准),
+        //   天然最大, 连带标记的旧窗口都比它旧;
+        // - 用户显式 raise 一个已 fullscreen 的窗口时重新取号
+        //   (RaiseToplevel 用户路径): 两个全屏窗口经任务栏互相切换靠它。
+        //   tl_set_fullscreen 批处理里的 raise 不重新取号 (否则退回到达
+        //   顺序); 窗口化窗口不重新取号 (点过 notepad 不该让它日后盖过游戏)。
+        // 已知局限:
+        // - 游戏窗口 map 之后、模式切换之前新建的其他窗口 (launcher 弹窗
+        //   等) 会盖过游戏 — 概率低, 发生时 fs-pick 日志可诊断;
+        // - 本字段是容错锚点, 根因在 Wine 连带标记; 根治需 wine 侧只对
+        //   前台窗口发 xdg set_fullscreen。
+        uint64_t fsPriority = 0;
         // -- ARGB 窗口剪影掩码 --
         WindowMask mask;               // mask.w==0 = 从未生成
     };
@@ -89,7 +107,17 @@ public:
 
     // -- Z-order 管理 --
     const std::vector<uint32_t>& toplevelZOrder() const { return toplevelZOrder_; }
-    void AddToZOrder(uint32_t id) { toplevelZOrder_.push_back(id); }
+    void AddToZOrder(uint32_t id) {
+        toplevelZOrder_.push_back(id);
+        // 首次入列时取全屏优先级号 (fsPriority==0 即从未取过; Remove 后再
+        // Add 的置顶重排不重复取)。必须在 AddToZOrder 内部做: 取号点若只
+        // 挂在首帧 commit 处, RaiseToplevel 会抢先把未 commit 的窗口放进
+        // z-order (红警2 的 set_fullscreen 先于首帧 commit, 2026-07 实测),
+        // map 点的"不在列才取号"判定被绕过, 窗口永远拿不到号 → 全屏扫描
+        // 输给任何旧窗口
+        auto& st = EnsureToplevelLocked(id);
+        if (st.fsPriority == 0) st.fsPriority = nextFsPriority_++;
+    }
     void RemoveFromZOrder(uint32_t id) {
         auto it = std::find(toplevelZOrder_.begin(), toplevelZOrder_.end(), id);
         if (it != toplevelZOrder_.end()) toplevelZOrder_.erase(it);
@@ -97,6 +125,11 @@ public:
     bool IsInZOrder(uint32_t id) const {
         return std::find(toplevelZOrder_.begin(), toplevelZOrder_.end(), id) != toplevelZOrder_.end();
     }
+
+    // -- 全屏优先级取号 (调用方须已持有 mutex; 规则与局限见 ToplevelState::fsPriority) --
+    // 首次入 z-order 的取号在 AddToZOrder 内部完成; 此处仅"用户显式 raise
+    // 已 fullscreen 窗口"的重新取号 (RaiseToplevel 用户路径)
+    void BumpFsPriorityLocked(uint32_t id) { EnsureToplevelLocked(id).fsPriority = nextFsPriority_++; }
 
     // -- 只读遍历 --
     const std::unordered_map<uint32_t, ToplevelState>& toplevels() const { return toplevels_; }
@@ -184,6 +217,7 @@ private:
     std::unordered_map<uint64_t, wl_resource*> surfaceResources_;
     std::unordered_map<uint32_t, ToplevelState> toplevels_;
     std::vector<uint32_t> toplevelZOrder_;
+    uint64_t nextFsPriority_ = 1;  // 全屏优先级取号器 (toplevelMutex_ 保护)
     // 以下成员由自己的 mutex 保护 (非 toplevelMutex_)
     std::unordered_map<uint32_t, wl_resource*> toplevelSurfaceMap_;
     std::mutex toplevelSurfaceMutex_;

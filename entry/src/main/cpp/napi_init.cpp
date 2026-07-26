@@ -517,7 +517,9 @@ static napi_value RaiseToplevel(napi_env env, napi_callback_info info) {
     if (argc < 1) return nullptr;
     uint32_t tl;
     napi_get_value_uint32(env, args[0], &tl);
-    WaylandServer::GetInstance()->RaiseToplevel(tl);
+    // 用户显式操作 (任务栏/窗口点击) 路径: 已 fullscreen 的目标会重新取
+    // 全屏优先级号, 支撑两个全屏窗口间的主动切换
+    WaylandServer::GetInstance()->RaiseToplevel(tl, true);
     return nullptr;
 }
 

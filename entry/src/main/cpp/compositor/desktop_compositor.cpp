@@ -341,21 +341,21 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
         // ZC 游戏 (画面在 zero-copy GL 层): 全屏独占输出, 见下方填黑分支
         bool isZcGame = false;
         int fullscreenX = 0, fullscreenY = 0;
-        // 两遍扫描: pass 0 跳过 explorer 窗口 (显示模式切换会把 explorer 伴随
-        // 窗口意外标成全屏并压到游戏之上, 游戏优先); pass 1 接受它兜底
-        for (int pass = 0; pass < 2 && fullscreenId == 0; ++pass) {
-        for (auto zit = tmgr_.toplevelZOrder().rbegin(); zit != tmgr_.toplevelZOrder().rend(); ++zit) {
-            const auto* zst = tmgr_.FindToplevelLocked(*zit);
-            if (!zst || !zst->fullscreen || !tmgr_.IsToplevelVisibleLocked(*zit, desktopRootToplevelId_)) continue;
-            if (pass == 0 && zst->isExplorerWindow) continue;
-            fullscreenId = *zit;
-            fullscreenX = zst->x;
-            fullscreenY = zst->y;
-            hasFullscreen = ComputeFitRect(rootW, rootH, zst->w, zst->h, transform);
-            if (!zst->isExplorerWindow)
-                isZcGame = HasZeroCopyLayerForToplevelLocked(*zit);
-            break;
+        // 全屏选取与输入侧 (FindInputTargetAt) 同规则: 可见全屏窗口中取
+        // fsPriority 最大者 — 多窗口可同时 fullscreen (显示模式切换时 Wine
+        // 会把足够大的旧窗口连带标记, 请求到达顺序不定), 规则原因/局限见
+        // ToplevelState::fsPriority 注释
+        const ToplevelManager::ToplevelState* fsWin = nullptr;
+        for (uint32_t childId : tmgr_.toplevelZOrder()) {
+            const auto* zst = tmgr_.FindToplevelLocked(childId);
+            if (!zst || !zst->fullscreen || !tmgr_.IsToplevelVisibleLocked(childId, desktopRootToplevelId_)) continue;
+            if (!fsWin || zst->fsPriority > fsWin->fsPriority) { fsWin = zst; fullscreenId = childId; }
         }
+        if (fsWin) {
+            fullscreenX = fsWin->x;
+            fullscreenY = fsWin->y;
+            hasFullscreen = ComputeFitRect(rootW, rootH, fsWin->w, fsWin->h, transform);
+            isZcGame = HasZeroCopyLayerForToplevelLocked(fullscreenId);
         }
 
         bool fullscreenContentCovered = false;
@@ -434,9 +434,16 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
 
         for (uint32_t childId : tmgr_.toplevelZOrder()) {
             if (!tmgr_.IsToplevelVisibleLocked(childId, desktopRootToplevelId_)) continue;
-            // ZC 游戏全屏: 独占输出, 跳过其它 toplevel — 它们的 SHM 内容
-            // (explorer 桌面等) 不是游戏画面, 画上只会在黑边区残留杂色
-            if (isZcGame && childId != fullscreenId) continue;
+            // 跳过非主全屏的 toplevel: ZC 游戏独占输出 (其它 toplevel 的
+            // SHM 内容不是游戏画面, 画上会在黑边区残留杂色); SHM 游戏只跳过
+            // 被连带标 fullscreen 的旧窗口 (notepad/explorer 等, 显示模式
+            // 切换时 winewayland 批量标记, fsPriority 选了游戏但它仍在
+            // z-order 高位, 普通 blit 会盖在游戏上面), 非全屏弹窗/对话框保留
+            if (hasFullscreen && childId != fullscreenId) {
+                if (isZcGame) continue;
+                auto* cst = tmgr_.FindToplevelLocked(childId);
+                if (cst && cst->fullscreen) continue;
+            }
             auto* cst = tmgr_.FindToplevelLocked(childId);
             if (!cst) continue;
             auto& childPx = cst->pixels;

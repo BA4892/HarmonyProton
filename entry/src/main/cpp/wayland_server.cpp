@@ -132,10 +132,22 @@ bool WaylandServer::TakeFrame(std::vector<uint8_t>& out, int& w, int& h) {
     return true;
 }
 
-void WaylandServer::RaiseToplevel(uint32_t id) {
+void WaylandServer::RaiseToplevel(uint32_t id, bool userInitiated) {
     auto lk = toplevelMgr_.Lock();
     toplevelMgr_.RemoveFromZOrder(id);
     toplevelMgr_.AddToZOrder(id);
+    // 全屏优先级: 仅"用户显式 raise (任务栏/窗口点击经 ArkTS 发起) 且目标
+    // 当前已 fullscreen"时重新取号 — 两个全屏窗口互相切换靠它;
+    // tl_set_fullscreen 批处理里的 raise 不重新取号 (显示模式切换会批量连带
+    // 标记旧窗口, 重新取号即退回到达顺序决定论); 窗口化窗口不重新取号
+    // (点过 notepad 不该让它日后被连带标全屏时盖过游戏)。
+    // 注意: AddToZOrder 对首次入列的窗口会取初始号 (红警2 set_fullscreen
+    // 先于首帧 commit 时经此路径取号), 与"不重新取号"不冲突。
+    // 见 ToplevelState::fsPriority
+    if (userInitiated) {
+        if (const auto* rst = toplevelMgr_.FindToplevelLocked(id); rst && rst->fullscreen)
+            toplevelMgr_.BumpFsPriorityLocked(id);
+    }
     // 任务栏始终在顶层 (app_id == "explorer.exe.taskbar");
     // 全屏窗口例外 — 游戏全屏必须压过任务栏
     bool raisedFullscreen = false;

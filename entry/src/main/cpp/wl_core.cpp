@@ -673,7 +673,8 @@ void WaylandServer::UpdateToplevelFrameOnCommit(SurfaceData* sd, wl_resource* su
             FireToplevelEvent(sd->toplevelId, "mask_dirty", "{}");
         }
     }
-    // 新 toplevel 加到 Z-order 顶层
+    // 新 toplevel 加到 Z-order 顶层 (首次入列的全屏优先级取号在
+    // AddToZOrder 内部完成, 见 ToplevelState::fsPriority 注释)
     if (Policy().RootCompositing() && sd->toplevelId != desktopRootToplevelId_) {
         auto zit = std::find(toplevelMgr_.toplevelZOrder().begin(), toplevelMgr_.toplevelZOrder().end(), sd->toplevelId);
         if (zit == toplevelMgr_.toplevelZOrder().end()) toplevelMgr_.AddToZOrder(sd->toplevelId);
@@ -709,10 +710,6 @@ void WaylandServer::CheckDesktopRootOnCommit(SurfaceData* sd, ShmCommitInfo& fi,
     DesktopRootManager::CheckRootResult cr;
     {
         auto lk = toplevelMgr_.Lock();
-        // explorer 窗口语义标记 (app_id 前缀, 普通 explorer 窗口无后缀):
-        // 全屏扫描时游戏优先于 explorer 伴随窗口 (见 desktop_compositor.cpp)
-        if (auto* st = toplevelMgr_.FindToplevelLocked(sd->toplevelId))
-            st->isExplorerWindow = (sd->appId.rfind(compositor_consts::kAppIdExplorerPrefix, 0) == 0);
         cr = desktopRootMgr_.CheckRootLocked(sd, isFirstCommit, fi.contentW, fi.contentH);
         MarkDesktopRootDirtyLocked();
     }

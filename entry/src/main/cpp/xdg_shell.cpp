@@ -225,7 +225,10 @@ static void tl_set_fullscreen(wl_client* client, wl_resource* tlRes, wl_resource
         // (fullscreen 生效状态由 SetToplevelFullscreen 写入 ToplevelState, 唯一权威)
         sd->maximized = false;
         ws->SetToplevelFullscreen(sd->toplevelId, true);
-        // 全屏置顶 (RaiseToplevel 对全屏窗口跳过任务栏 pin)
+        // 全屏置顶 (RaiseToplevel 对全屏窗口跳过任务栏 pin)。
+        // 注意走默认 userInitiated=false: 显示模式切换时 Wine 会批量连带
+        // 标记旧窗口 fullscreen, 此处若取号, 全屏优先级就退回请求到达
+        // 顺序决定论 (旧窗口压游戏, 见 ToplevelState::fsPriority 注释)
         ws->RaiseToplevel(sd->toplevelId);
     }
     // 按 xdg-shell 协议回 configure: FULLSCREEN 状态 + 整个输出尺寸 (含任务栏区,

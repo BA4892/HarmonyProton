@@ -42,12 +42,9 @@ constexpr int32_t kMinimizedCoordThreshold = 16000;
 constexpr int32_t kMinimizedCoordOffset = 32000;
 
 // -- Wine 语义化 app_id (winewayland wayland_surface.c 按窗口 class 附加后缀) --
-// desktop-shell: explorer 的 #32769 桌面窗口 (desktop root 识别 / 全屏扫描游戏优先)
+// desktop-shell: explorer 的 #32769 桌面窗口 (desktop root 识别)
 // taskbar: Shell_TrayWnd 任务栏 (置顶 pin / 工作区高度计算)
 constexpr const char* kAppIdExplorerDesktopShell = "explorer.exe.desktop-shell";
 constexpr const char* kAppIdExplorerTaskbar = "explorer.exe.taskbar";
-// explorer 进程前缀 (普通 explorer 窗口无后缀, app_id 即 "explorer.exe"):
-// 全屏扫描跳过explorer 伴随窗口用, 见 ToplevelState::isExplorerWindow
-constexpr const char* kAppIdExplorerPrefix = "explorer.exe";
 
 } // namespace compositor_consts
