@@ -1,6 +1,6 @@
 # WineHua Phase 2 DXVK Status Memo
 
-> Last updated: 2026-07-25
+> Last updated: 2026-07-27
 >
 > Purpose: this is the durable handoff for resuming the DXVK investigation.
 > Read this file before changing DXVK, Venus present, SmokeRunner, or game launch
@@ -133,6 +133,47 @@ contention count, per-acquire wait, and cumulative wait. The lock is released
 before Host `vkQueueSubmit` and present. ARM64 `make native` passes. This is an
 A/B diagnostic, not yet a correctness fix or `KNOWN_GOOD` baseline; physical
 Heaven and Cube results are still required.
+
+### 2026-07-27 shadow-generation A/B rejected and durable recovery rule
+
+The physical Heaven run still showed continuous backward angle jumps and is
+therefore rejected:
+
+    archive:
+      D:\MyProject\winehua-logs\manual\heaven-shadow-generation-serialize-20260727-034900
+    HAP SHA-256:
+      545f2ef188882daaf026de6c5d5ee943dedb23aa4292e052591f490244645baf
+    wine-data SHA-256:
+      701b1ac5af6d6f2f79458b74efa421ee07b4a6f5d8128aa925005fa97185278b
+    source:
+      main 167c373, DXVK c665707, Mesa db8f4de,
+      virglrenderer 39344384, Wine 9978980
+    visual status:
+      REJECTED-user-observed-continuous-camera-rollback
+
+The lock trace reached 5,618,040 flush acquisitions and 37,080 submit
+acquisitions with `contended_total=0`; total measured lock acquisition time was
+only 6,547 us. Remote flush therefore did not enter the submit
+`prepare -> dirty retirement` window. Do not formalize this coarse mutex as a
+product fix. It remains diagnostic-only and disabled in ordinary profiles.
+
+The same run captured Camera binding 3 for frames 119..2967. All 2,849 decoded
+3x4 view matrices had valid rotations, no reversal inside continuous camera
+segments, and no two-frame-old pose replay. Position-step median was 0.176403
+and p95 was 0.812264; large discontinuities matched normal Heaven camera cuts.
+This rules out the game or DXVK submitting a backward Camera matrix. The fault
+boundary is now the Host data actually consumed by the draw: either a private
+`vkCmdUpdateBuffer` upload targets the wrong buffer/offset/generation, or the
+draw binds an old physical uniform-buffer slice. Binding 4's 1,536-byte dynamic
+block must be joined with binding 3 and the Host command before any further
+behavioral change.
+
+Starting with the next candidate, every behavior-changing experiment must be
+committed and archived before deployment. Its artifact record must contain the
+exact HAP/runtime hashes, source commits, environment/profile, automated Cube
+verdict, and continuous Heaven verdict. A visually passing candidate may not be
+overwritten until its restore command is recorded and verified. This rule is a
+release-process requirement, not optional investigation bookkeeping.
 
 ### 2026-07-27 full command identity attempt and namespace correction
 
