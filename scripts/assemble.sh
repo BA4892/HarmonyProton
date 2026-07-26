@@ -267,11 +267,11 @@ assemble_pad() {
     [ -f "$dxvk_root/x64/bin/dxgi.dll" ] || err "DXVK Legacy x64 dxgi.dll missing: $dxvk_root/x64/bin/dxgi.dll"
     [ -f "$dxvk_root/x86/bin/d3d11.dll" ] || err "DXVK Legacy x86 d3d11.dll missing: $dxvk_root/x86/bin/d3d11.dll"
     [ -f "$dxvk_root/x86/bin/dxgi.dll" ] || err "DXVK Legacy x86 dxgi.dll missing: $dxvk_root/x86/bin/dxgi.dll"
-    mkdir -p "$smoke_dir/dxvk/legacy/x64" "$smoke_dir/dxvk/legacy/x86"
-    cp "$dxvk_root/x64/bin/d3d11.dll" "$smoke_dir/dxvk/legacy/x64/d3d11.dll"
-    cp "$dxvk_root/x64/bin/dxgi.dll" "$smoke_dir/dxvk/legacy/x64/dxgi.dll"
-    cp "$dxvk_root/x86/bin/d3d11.dll" "$smoke_dir/dxvk/legacy/x86/d3d11.dll"
-    cp "$dxvk_root/x86/bin/dxgi.dll" "$smoke_dir/dxvk/legacy/x86/dxgi.dll"
+    mkdir -p "$wine_data/dxvk/legacy/x64" "$wine_data/dxvk/legacy/x86"
+    cp "$dxvk_root/x64/bin/d3d11.dll" "$wine_data/dxvk/legacy/x64/d3d11.dll"
+    cp "$dxvk_root/x64/bin/dxgi.dll" "$wine_data/dxvk/legacy/x64/dxgi.dll"
+    cp "$dxvk_root/x86/bin/d3d11.dll" "$wine_data/dxvk/legacy/x86/d3d11.dll"
+    cp "$dxvk_root/x86/bin/dxgi.dll" "$wine_data/dxvk/legacy/x86/dxgi.dll"
     # The DXVK binaries are runtime-owned overlays.  Do not place them next
     # to the smoke executables: that would make the test layout look like a
     # game distribution and would force real games to carry WineHua-specific
@@ -312,15 +312,16 @@ assemble_pad() {
     local dxvk_commit
     dxvk_commit="$(git -c safe.directory="$DXVK_SRC" -C "$DXVK_SRC" rev-parse HEAD 2>/dev/null || echo unknown)"
     local dxvk64_d3d11_sha dxvk64_dxgi_sha dxvk32_d3d11_sha dxvk32_dxgi_sha
-    dxvk64_d3d11_sha="$(sha256sum "$smoke_dir/dxvk/legacy/x64/d3d11.dll" | awk '{print $1}')"
-    dxvk64_dxgi_sha="$(sha256sum "$smoke_dir/dxvk/legacy/x64/dxgi.dll" | awk '{print $1}')"
-    dxvk32_d3d11_sha="$(sha256sum "$smoke_dir/dxvk/legacy/x86/d3d11.dll" | awk '{print $1}')"
-    dxvk32_dxgi_sha="$(sha256sum "$smoke_dir/dxvk/legacy/x86/dxgi.dll" | awk '{print $1}')"
-    cat > "$smoke_dir/dxvk/manifest.json" <<EOF
+    dxvk64_d3d11_sha="$(sha256sum "$wine_data/dxvk/legacy/x64/d3d11.dll" | awk '{print $1}')"
+    dxvk64_dxgi_sha="$(sha256sum "$wine_data/dxvk/legacy/x64/dxgi.dll" | awk '{print $1}')"
+    dxvk32_d3d11_sha="$(sha256sum "$wine_data/dxvk/legacy/x86/d3d11.dll" | awk '{print $1}')"
+    dxvk32_dxgi_sha="$(sha256sum "$wine_data/dxvk/legacy/x86/dxgi.dll" | awk '{print $1}')"
+    cat > "$wine_data/dxvk/manifest.json" <<EOF
 {
   "schemaVersion": 1,
   "backend": "dxvk",
   "profile": "legacy",
+  "runtimeRoot": "dxvk",
   "version": "1.10.3",
   "commit": "$dxvk_commit",
   "requiredCapabilities": {
@@ -337,7 +338,7 @@ EOF
     cat > "$smoke_dir/manifest.json" <<EOF
 {
   "schemaVersion": 1,
-  "suiteVersion": "phase2-vulkan-dxvk-legacy-v3",
+  "suiteVersion": "phase2-vulkan-dxvk-legacy-v4-runtime",
   "enabledSuites": ["core", "audio", "opengl", "wine-vulkan", "dxvk"],
   "managedRoot": "C:\\\\smoke",
   "files": {
@@ -462,6 +463,20 @@ HKLM,%FontSubStr%,"Lucida Console",,"Noto Sans Mono"' "$wine_data/share/wine/win
     else
         log "  guest_vulkan: SKIP"
     fi
+
+    # Native offscreen replay runs in the App/NCP security domain and links the
+    # system Host Vulkan loader. Captured resources remain in guest_vulkan so
+    # there is one authoritative exact-replay input set for the Host/Venus A/B.
+    local host_vulkan_root="$BUILD_DIR/host_vulkan/$NATIVE_ARCH"
+    [ -f "$host_vulkan_root/manifest.json" ] || \
+        err "Host Vulkan replay manifest missing: $host_vulkan_root/manifest.json"
+    [ -f "$host_vulkan_root/bin/heaven_exact_host_replay" ] || \
+        err "Host Vulkan replay marker missing: $host_vulkan_root/bin/heaven_exact_host_replay"
+    [ -f "$host_vulkan_root/lib/libwinehua_host_heaven_replay.so" ] || \
+        err "Host Vulkan replay module missing: $host_vulkan_root/lib/libwinehua_host_heaven_replay.so"
+    mkdir -p "$wine_data/bin/host_vulkan"
+    cp -a "$host_vulkan_root/"* "$wine_data/bin/host_vulkan/"
+    log "  host_vulkan ($NATIVE_ARCH): native exact replay"
 
     # -- 3. 打包 zip → rawfile (不带 wine-data/ 前缀) --
     local rawfile_dir="$WINEHUA/entry/src/main/resources/rawfile"

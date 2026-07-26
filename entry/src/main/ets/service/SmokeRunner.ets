@@ -6,6 +6,7 @@ const DOMAIN = 0x0000;
 const FILES_BASE = '/data/storage/el2/base/files';
 const WINE_ROOT = `${FILES_BASE}/wine`;
 const GUEST_VULKAN_ROOT = `${WINE_ROOT}/bin/guest_vulkan`;
+const HOST_VULKAN_ROOT = `${WINE_ROOT}/bin/host_vulkan`;
 const AUTOMATION_RESULTS = `${FILES_BASE}/automation/results`;
 const CACHE_BASE = '/data/storage/el2/base/cache';
 const TEMP_BASE = '/data/storage/el2/base/temp';
@@ -235,6 +236,10 @@ export function syncManagedSmoke(prefixMode: string): boolean {
         `${target}/${file}`, JSON.stringify(error));
     }
   }
+  /* Remove the old payload layout from prefixes upgraded before DXVK became a
+   * runtime component.  This never touches user-installed game files. */
+  const staleDxvk = target + '/dxvk';
+  if (pathExists(staleDxvk)) removeRecursive(staleDxvk);
   let complete = sourceManifest === readText(`${target}/manifest.json`);
   for (const file of required) {
     if (!pathExists(`${target}/${file}`)) {
@@ -261,11 +266,13 @@ export function syncManagedSmoke(prefixMode: string): boolean {
 }
 
 /* Validate the versioned DXVK payload without injecting it into the prefix's
- * system32/syswow64 directories.  Native D3D DLLs belong to the selected game
- * or smoke application directory; the Wine loader supplies the normal
+ * system32/syswow64 directories.  DXVK DLLs belong to the selected WineHua runtime
+ * profile; the Wine loader supplies the normal
  * system/builtin fallback for every other process. */
 function validateManagedDxvk(): boolean {
-  const source = `${WINE_ROOT}/smoke/dxvk/legacy`;
+  const source = `${WINE_ROOT}/dxvk/legacy`;
+  const manifest = WINE_ROOT + "/dxvk/manifest.json";
+  if (!pathExists(manifest)) return false;
   const required = [
     `${source}/x64/d3d11.dll`, `${source}/x64/dxgi.dll`,
     `${source}/x86/d3d11.dll`, `${source}/x86/dxgi.dll`
@@ -315,6 +322,22 @@ export class SmokeRunner {
     const includeVenusDepthCubeArray2D =
       this.request.suite === 'venus-depth-cube-array-2d-golden';
     const includeVenusDepthCubeGraphics = this.request.suite === 'venus-depth-cube-graphics';
+    const includeVenusHeavenMaterial = this.request.suite === 'venus-heaven-material';
+    const includeVenusHeavenMaterialDepth =
+      this.request.suite === 'venus-heaven-material-depth';
+    const includeVenusHeavenCaptured = this.request.suite === 'venus-heaven-captured';
+    const includeVenusHeavenDraw0 = this.request.suite === 'venus-heaven-draw0';
+    const includeVenusHeavenDraw170 = this.request.suite === 'venus-heaven-draw170';
+    const includeVenusHeavenF647 = this.request.suite === 'venus-heaven-f647';
+    const includeVenusHeavenInputs = this.request.suite === 'venus-heaven-inputs';
+    const includeVenusHeavenCapturedAb = this.request.suite === 'venus-heaven-captured-ab';
+    const includeVenusHeavenDiscardAb = this.request.suite === 'venus-heaven-discard-ab';
+    const includeVenusHeavenMaterialLayout =
+      this.request.suite === 'venus-heaven-material-layout';
+    const includeHostHeaven = this.request.suite === 'host-heaven';
+    const includeHostHeavenMaterialDepth =
+      this.request.suite === 'host-heaven-material-depth';
+    const includeHostHeavenInputs = this.request.suite === 'host-heaven-inputs';
     const includeWineVulkan = this.request.suite === 'wine-vulkan' ||
       this.request.suite === 'all';
     const includeWineVulkanPresent = this.request.suite === 'wine-vulkan-present' ||
@@ -384,6 +407,190 @@ export class SmokeRunner {
         executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 90000 });
       tests.push({ id: 'venus-depth-cube-graphics-no-float-controls-x64', architecture: 'guest-x64',
         executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 90000 });
+    }
+    if (includeVenusHeavenMaterial) {
+      tests.push({ id: 'venus-heaven-material-graphics-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-exact-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-exact-fragment-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-exact-probe-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-no-float-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-constant-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-contract-simple-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-constant-final-vertex-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-final-fragment-simple-vertex-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-bool-true-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-bool-false-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+    }
+    if (includeVenusHeavenMaterialDepth) {
+      tests.push({ id: 'venus-heaven-material-depth-pass0-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-depth-pass3-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-depth-pass0-no-float-controls-x64',
+        architecture: 'guest-x64', executable: 'venus_heaven_material_replay',
+        seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-depth-pass3-no-float-controls-x64',
+        architecture: 'guest-x64', executable: 'venus_heaven_material_replay',
+        seconds: 0, timeoutMs: 120000 });
+    }
+    if (includeVenusHeavenCaptured) {
+      tests.push({ id: 'venus-heaven-material-captured-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-nodepth-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-constant-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+    }
+    if (includeVenusHeavenDraw0) {
+      tests.push({ id: 'venus-heaven-material-captured-draw0-loaded-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-draw0-clear-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-draw0-nodepth-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-draw0-input-verify-nodepth-x64',
+        architecture: 'guest-x64', executable: 'venus_heaven_material_replay',
+        seconds: 0, timeoutMs: 180000 });
+      tests.push({ id: 'venus-heaven-material-captured-draw0-always-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+    }
+    if (includeVenusHeavenDraw170) {
+      tests.push({ id: 'venus-heaven-material-captured-draw170-clear-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-draw170-nodepth-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-draw170-always-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+    }
+    if (includeVenusHeavenF647) {
+      tests.push({ id: 'venus-heaven-material-captured-f647-baseline-x64',
+        architecture: 'guest-x64', executable: 'venus_heaven_material_replay',
+        seconds: 0, timeoutMs: 180000 });
+      tests.push({ id: 'venus-heaven-material-captured-f647-input-verify-nodepth-x64',
+        architecture: 'guest-x64', executable: 'venus_heaven_material_replay',
+        seconds: 0, timeoutMs: 180000 });
+      tests.push({ id: 'venus-heaven-material-captured-f647-loaded-x64',
+        architecture: 'guest-x64', executable: 'venus_heaven_material_replay',
+        seconds: 0, timeoutMs: 180000 });
+      tests.push({ id: 'venus-heaven-material-captured-f647-nodepth-x64',
+        architecture: 'guest-x64', executable: 'venus_heaven_material_replay',
+        seconds: 0, timeoutMs: 180000 });
+      tests.push({ id: 'venus-heaven-material-captured-f647-always-x64',
+        architecture: 'guest-x64', executable: 'venus_heaven_material_replay',
+        seconds: 0, timeoutMs: 180000 });
+    }
+    if (includeVenusHeavenInputs) {
+      tests.push({ id: 'venus-heaven-material-captured-input-verify-nodepth-x64',
+        architecture: 'guest-x64', executable: 'venus_heaven_material_replay',
+        seconds: 0, timeoutMs: 120000 });
+    }
+    if (includeVenusHeavenCapturedAb) {
+      tests.push({ id: 'venus-heaven-material-captured-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-nodepth-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-depth-always-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-no-kill-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-force-opaque-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-t0-implicit-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-t0-lod0-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-explicit-kill-init-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-kill-direct-bit-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-kill-direct-compare-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-kill-recompare-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-local-kill-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-compare-color-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-inline-kill-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-uint-kill-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-compare-alpha-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-no-float-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-compare-alpha-no-float-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-sample-mask-discard-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-sample-mask-keep-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-inlined-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-inlined-local-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-return-compare-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-sample-mask-final-select-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-sample-mask-final-branch-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-terminate-invocation-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'venus-heaven-material-captured-ccp-x64', architecture: 'guest-x64',
+        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+    }
+    if (includeVenusHeavenDiscardAb) {
+      for (const mode of ['captured-nodepth', 'captured-compare-alpha-nodepth',
+        'captured-omap-frozen-nodepth', 'captured-no-kill-omap-frozen-nodepth',
+        'captured-kill-direct-clean-omap-frozen-nodepth',
+        'captured-return-compare-clean-omap-frozen-nodepth',
+        'captured-sample-mask-direct-clean-omap-frozen-nodepth']) {
+        tests.push({ id: `venus-heaven-material-${mode}-x64`, architecture: 'guest-x64',
+          executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      }
+    }
+    if (includeVenusHeavenMaterialLayout) {
+      for (const mode of ['no-set', 'empty', 'small', 'ubo', 'dynamic', 'sampler', 'sampled', 'full', 'exact']) {
+        tests.push({ id: `venus-heaven-material-${mode}-x64`, architecture: 'guest-x64',
+          executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+      }
+    }
+    if (includeHostHeaven) {
+      tests.push({ id: 'host-heaven-original-nodepth', architecture: 'host-native',
+        executable: 'heaven_exact_host_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'host-heaven-compare-alpha-nodepth', architecture: 'host-native',
+        executable: 'heaven_exact_host_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'host-heaven-no-kill-nodepth', architecture: 'host-native',
+        executable: 'heaven_exact_host_replay', seconds: 0, timeoutMs: 120000 });
+    }
+    if (includeHostHeavenMaterialDepth) {
+      tests.push({ id: 'host-heaven-material-depth-pass0', architecture: 'host-native',
+        executable: 'heaven_exact_host_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'host-heaven-material-depth-pass3', architecture: 'host-native',
+        executable: 'heaven_exact_host_replay', seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'host-heaven-material-depth-pass0-no-float-controls',
+        architecture: 'host-native', executable: 'heaven_exact_host_replay',
+        seconds: 0, timeoutMs: 120000 });
+      tests.push({ id: 'host-heaven-material-depth-pass3-no-float-controls',
+        architecture: 'host-native', executable: 'heaven_exact_host_replay',
+        seconds: 0, timeoutMs: 120000 });
+    }
+    if (includeHostHeavenInputs) {
+      tests.push({ id: 'host-heaven-original-input-verify-nodepth',
+        architecture: 'host-native', executable: 'heaven_exact_host_replay',
+        seconds: 0, timeoutMs: 120000 });
     }
     if (includeWineVulkan) {
       tests.push({ id: 'wine-vulkan-offscreen-x64', architecture: 'x64',
@@ -535,10 +742,91 @@ export class SmokeRunner {
     return this.failureResult(spec, 'timeout', `test exceeded ${spec.timeoutMs} ms`, process);
   }
 
+  private async waitForHostFinal(spec: SmokeTestSpec,
+                                 resultPath: string): Promise<SmokeSuiteTestResult> {
+    const deadline = Date.now() + spec.timeoutMs;
+    while (Date.now() < deadline) {
+      const text = readText(resultPath);
+      if (text) {
+        try {
+          const result = JSON.parse(text) as SmokeResult;
+          if (this.finalStatus(result)) {
+            while (testNapi.isHostReplayRunning() && Date.now() < deadline) await sleep(25);
+            const parsed = JSON.parse(text) as SmokeSuiteTestResult;
+            parsed.exitCodeSource = 'result';
+            return parsed;
+          }
+        } catch (_) {}
+      }
+      if (!testNapi.isHostReplayRunning())
+        return this.failureResult(spec, 'crash',
+          text ? 'Host replay stopped with only a non-final result' :
+            'Host replay stopped without an authoritative result', null);
+      await sleep(100);
+    }
+    return this.failureResult(spec, 'timeout', `test exceeded ${spec.timeoutMs} ms`, null);
+  }
+
   private async runOne(spec: SmokeTestSpec): Promise<SmokeSuiteTestResult> {
     const resultPath = `${this.resultDirectory}/${spec.id}.json`;
     if (pathExists(resultPath)) fs.unlinkSync(resultPath);
     this.onStatus(`Smoke: ${spec.id}`);
+
+    if (spec.architecture === 'host-native') {
+      const executablePath = `${HOST_VULKAN_ROOT}/bin/${spec.executable}`;
+      const materialDepth = spec.id.indexOf('host-heaven-material-depth-pass') === 0;
+      const materialDepthPass3 =
+        spec.id.indexOf('host-heaven-material-depth-pass3') === 0;
+      const materialDepthNoFloatControls =
+        materialDepth && spec.id.indexOf('-no-float-controls') >= 0;
+      const capturedHeavenRoot = materialDepth ?
+        `${GUEST_VULKAN_ROOT}/share/winehua/replay_external/heaven_material_depth` :
+        `${GUEST_VULKAN_ROOT}/share/winehua/replay_external/heaven_exact`;
+      const captureDirectory = materialDepth ?
+        `${capturedHeavenRoot}/${materialDepthPass3 ? 'pass3' : 'pass0'}` :
+        capturedHeavenRoot;
+      if (!pathExists(`${HOST_VULKAN_ROOT}/manifest.json`) || !pathExists(executablePath))
+        return this.failureResult(spec, 'startup', 'managed Host Vulkan replay is missing', null);
+      if (!pathExists(captureDirectory))
+        return this.failureResult(spec, 'startup', 'managed Heaven exact capture is missing', null);
+
+      const fragmentName = spec.id.indexOf('compare-alpha') >= 0 ?
+        'heaven_exact_fs_compare_alpha.spv' : spec.id.indexOf('no-kill') >= 0 ?
+        'heaven_exact_fs_no_kill.spv' :
+        'FS_844c52a11b923f49d2afee97a8d6119eef8efeb3.remapped-d5aa1ffafa7f5fa1.spv';
+      const vertexName =
+        'VS_809ef7d3d23ff811f90c51be8d0cfddf6994cdb0.remapped-3d526c03b048bdf1.spv';
+      const fragmentPath = materialDepth ? `${capturedHeavenRoot}/depth.frag.spv` :
+        `${capturedHeavenRoot}/${fragmentName}`;
+      const vertexPath = materialDepth ?
+        `${captureDirectory}/${materialDepthNoFloatControls ?
+          'vs-no-float-controls.spv' : 'vs.spv'}` :
+        `${capturedHeavenRoot}/${vertexName}`;
+      const started = testNapi.runHostReplay({
+        executablePath: executablePath,
+        argv: ['--automation', '--run-id', this.request.runId, '--test-id', spec.id,
+          '--result', resultPath,
+          '--rgba-output', `${this.resultDirectory}/${spec.id}.rgba`,
+          '--vertex-spv', vertexPath,
+          '--fragment-spv', fragmentPath,
+          '--capture-dir', captureDirectory,
+          '--capture-color', 'sentinel', '--capture-depth', materialDepth ? 'clear' : 'disabled',
+          ...(materialDepth ? ['--capture-depth-compare', 'less-equal', '--capture-profile',
+            materialDepthPass3 ? 'material-pass3-depth' : 'material-pass0-depth'] : []),
+          '--layout-mode', 'captured',
+          ...(spec.id.indexOf('input-verify') >= 0 || materialDepth ?
+            ['--verify-inputs', '1'] : [])],
+        environment: {
+          'WINEHUA_SMOKE_RUN_ID': this.request.runId,
+          'WINEHUA_SMOKE_TEST_ID': spec.id
+        },
+        workingDirectory: HOST_VULKAN_ROOT,
+        automationMode: true
+      }) as boolean;
+      if (!started)
+        return this.failureResult(spec, 'startup', 'runHostReplay failed to start', null);
+      return this.waitForHostFinal(spec, resultPath);
+    }
 
     if (spec.architecture === 'guest-x64') {
       const executablePath = `${GUEST_VULKAN_ROOT}/bin/${spec.executable}`;
@@ -548,6 +836,238 @@ export class SmokeRunner {
       const replaySpvDirectory = spec.executable === 'venus_spirv_replay' &&
         !hasReplayShader(currentReplayDirectory) ?
         latestReplayShaderDirectory(this.prefix, currentReplayDirectory) : currentReplayDirectory;
+      const heavenFragment = spec.id.indexOf('no-float') >= 0 ?
+        `${GUEST_VULKAN_ROOT}/share/winehua/replay_external/heaven_final_fs_no_float.spv` :
+        spec.id.indexOf('constant') >= 0 ?
+        `${GUEST_VULKAN_ROOT}/share/winehua/replay_external/heaven_constant.frag.spv` :
+        spec.id.indexOf('contract-simple') >= 0 ?
+        `${GUEST_VULKAN_ROOT}/share/winehua/replay_external/heaven_contract_simple.frag.spv` :
+        spec.id.indexOf('exact-probe') >= 0 ?
+        `${GUEST_VULKAN_ROOT}/share/winehua/replay_external/heaven_exact_probe.frag.spv` :
+        `${GUEST_VULKAN_ROOT}/share/winehua/replay_external/heaven_final_fs.spv`;
+      const heavenVertex = (spec.id.indexOf('constant') >= 0 ||
+        spec.id.indexOf('contract-simple') >= 0 ||
+        spec.id.indexOf('exact-fragment') >= 0 ||
+        spec.id.indexOf('exact-probe') >= 0 ||
+        spec.id.indexOf('bool-') >= 0) &&
+        spec.id.indexOf('final-vertex') < 0 ?
+        `${GUEST_VULKAN_ROOT}/share/winehua/venus_heaven_material.vert.spv` :
+        `${GUEST_VULKAN_ROOT}/share/winehua/replay_external/heaven_final_vs.spv`;
+      const replayVertex = spec.id.indexOf('final-fragment-simple-vertex') >= 0 ?
+        `${GUEST_VULKAN_ROOT}/share/winehua/venus_heaven_material.vert.spv` : heavenVertex;
+      const useSparseHeaven = spec.id === 'venus-heaven-material-graphics-x64' ||
+        spec.id === 'venus-heaven-material-exact-x64' ||
+        spec.id === 'venus-heaven-material-exact-fragment-x64' ||
+        spec.id === 'venus-heaven-material-bool-true-x64' ||
+        spec.id === 'venus-heaven-material-bool-false-x64';
+      const sparseHeavenFragment =
+        `${GUEST_VULKAN_ROOT}/share/winehua/replay_external/heaven_sparse_fs.spv`;
+      const sparseHeavenVertex =
+        `${GUEST_VULKAN_ROOT}/share/winehua/replay_external/heaven_sparse_vs.spv`;
+      const capturedHeavenDraw0 =
+        spec.id.indexOf('venus-heaven-material-captured-draw0-') === 0;
+      const capturedHeavenDraw0NoDepth =
+        spec.id === 'venus-heaven-material-captured-draw0-nodepth-x64' ||
+        spec.id === 'venus-heaven-material-captured-draw0-input-verify-nodepth-x64';
+      const capturedHeavenDraw0Clear =
+        spec.id === 'venus-heaven-material-captured-draw0-clear-x64';
+      const capturedHeavenDraw0Always =
+        spec.id === 'venus-heaven-material-captured-draw0-always-x64';
+      const capturedHeavenDraw170 =
+        spec.id.indexOf('venus-heaven-material-captured-draw170-') === 0;
+      const capturedHeavenDraw170NoDepth =
+        spec.id === 'venus-heaven-material-captured-draw170-nodepth-x64';
+      const capturedHeavenDraw170Clear =
+        spec.id === 'venus-heaven-material-captured-draw170-clear-x64';
+      const capturedHeavenDraw170Always =
+        spec.id === 'venus-heaven-material-captured-draw170-always-x64';
+      const capturedHeavenF647 =
+        spec.id.indexOf('venus-heaven-material-captured-f647-') === 0;
+      const capturedHeavenF647Always =
+        spec.id === 'venus-heaven-material-captured-f647-always-x64';
+      const capturedHeavenF647Baseline =
+        spec.id === 'venus-heaven-material-captured-f647-baseline-x64';
+      const capturedHeavenMaterialDepth =
+        spec.id.indexOf('venus-heaven-material-depth-pass') === 0;
+      const capturedHeavenMaterialDepthPass3 =
+        spec.id.indexOf('venus-heaven-material-depth-pass3') === 0;
+      const capturedHeavenMaterialDepthNoFloatControls =
+        capturedHeavenMaterialDepth && spec.id.indexOf('-no-float-controls') >= 0;
+      const capturedHeavenMaterialDepthRoot =
+        `${GUEST_VULKAN_ROOT}/share/winehua/replay_external/heaven_material_depth`;
+      const capturedHeavenRoot = capturedHeavenDraw0 ?
+        `${GUEST_VULKAN_ROOT}/share/winehua/replay_external/heaven_draw0` :
+        capturedHeavenDraw170 ?
+          `${GUEST_VULKAN_ROOT}/share/winehua/replay_external/heaven_draw170` :
+          capturedHeavenF647 ?
+            `${GUEST_VULKAN_ROOT}/share/winehua/replay_external/heaven_f647` :
+          `${GUEST_VULKAN_ROOT}/share/winehua/replay_external/heaven_exact`;
+      const capturedHeaven = spec.id.indexOf('venus-heaven-material-captured-') === 0;
+      const capturedHeavenConstant = spec.id === 'venus-heaven-material-captured-constant-x64';
+      const capturedHeavenNoDepth =
+        spec.id.indexOf('venus-heaven-material-captured-') === 0 &&
+        spec.id.indexOf('-nodepth-x64') >= 0;
+      const capturedHeavenDepthAlways =
+        spec.id === 'venus-heaven-material-captured-depth-always-x64' ||
+        capturedHeavenDraw0Always || capturedHeavenDraw170Always ||
+        capturedHeavenF647Always;
+      const capturedHeavenNoKill =
+        spec.id === 'venus-heaven-material-captured-no-kill-x64' ||
+        spec.id === 'venus-heaven-material-captured-no-kill-nodepth-x64';
+      const capturedHeavenForceOpaque =
+        spec.id === 'venus-heaven-material-captured-force-opaque-x64';
+      const capturedHeavenT0Implicit =
+        spec.id === 'venus-heaven-material-captured-t0-implicit-x64';
+      const capturedHeavenT0Lod0 =
+        spec.id === 'venus-heaven-material-captured-t0-lod0-x64';
+      const capturedHeavenExplicitKillInit =
+        spec.id === 'venus-heaven-material-captured-explicit-kill-init-x64';
+      const capturedHeavenKillDirectBit =
+        spec.id === 'venus-heaven-material-captured-kill-direct-bit-x64';
+      const capturedHeavenKillDirectCompare =
+        spec.id === 'venus-heaven-material-captured-kill-direct-compare-x64';
+      const capturedHeavenKillRecompare =
+        spec.id === 'venus-heaven-material-captured-kill-recompare-x64';
+      const capturedHeavenLocalKill =
+        spec.id === 'venus-heaven-material-captured-local-kill-x64';
+      const capturedHeavenCompareColor =
+        spec.id === 'venus-heaven-material-captured-compare-color-x64';
+      const capturedHeavenInlineKill =
+        spec.id === 'venus-heaven-material-captured-inline-kill-x64';
+      const capturedHeavenUintKill =
+        spec.id === 'venus-heaven-material-captured-uint-kill-x64';
+      const capturedHeavenCompareAlpha =
+        spec.id === 'venus-heaven-material-captured-compare-alpha-x64' ||
+        spec.id === 'venus-heaven-material-captured-compare-alpha-nodepth-x64';
+      const capturedHeavenNoFloat =
+        spec.id === 'venus-heaven-material-captured-no-float-x64';
+      const capturedHeavenCompareAlphaNoFloat =
+        spec.id === 'venus-heaven-material-captured-compare-alpha-no-float-x64';
+      const capturedHeavenSampleMaskDiscard =
+        spec.id === 'venus-heaven-material-captured-sample-mask-discard-x64';
+      const capturedHeavenSampleMaskKeep =
+        spec.id === 'venus-heaven-material-captured-sample-mask-keep-x64' ||
+        spec.id === 'venus-heaven-material-captured-sample-mask-keep-nodepth-x64';
+      const capturedHeavenInlined =
+        spec.id === 'venus-heaven-material-captured-inlined-x64';
+      const capturedHeavenInlinedLocal =
+        spec.id === 'venus-heaven-material-captured-inlined-local-x64';
+      const capturedHeavenReturnCompare =
+        spec.id === 'venus-heaven-material-captured-return-compare-x64';
+      const capturedHeavenSampleMaskFinalSelect =
+        spec.id === 'venus-heaven-material-captured-sample-mask-final-select-x64' ||
+        spec.id === 'venus-heaven-material-captured-sample-mask-final-select-nodepth-x64';
+      const capturedHeavenSampleMaskFinalBranch =
+        spec.id === 'venus-heaven-material-captured-sample-mask-final-branch-x64' ||
+        spec.id === 'venus-heaven-material-captured-sample-mask-final-branch-nodepth-x64';
+      const capturedHeavenTerminateInvocation =
+        spec.id === 'venus-heaven-material-captured-terminate-invocation-x64';
+      const capturedHeavenKillDirectClean =
+        spec.id === 'venus-heaven-material-captured-kill-direct-clean-nodepth-x64';
+      const capturedHeavenReturnCompareClean =
+        spec.id === 'venus-heaven-material-captured-return-compare-clean-nodepth-x64';
+      const capturedHeavenSampleMaskDirectClean =
+        spec.id === 'venus-heaven-material-captured-sample-mask-direct-clean-nodepth-x64';
+      const capturedHeavenOmapFrozen =
+        spec.id === 'venus-heaven-material-captured-omap-frozen-nodepth-x64';
+      const capturedHeavenNoKillOmapFrozen =
+        spec.id === 'venus-heaven-material-captured-no-kill-omap-frozen-nodepth-x64';
+      const capturedHeavenKillDirectCleanOmapFrozen = spec.id ===
+        'venus-heaven-material-captured-kill-direct-clean-omap-frozen-nodepth-x64';
+      const capturedHeavenReturnCompareCleanOmapFrozen = spec.id ===
+        'venus-heaven-material-captured-return-compare-clean-omap-frozen-nodepth-x64';
+      const capturedHeavenSampleMaskDirectCleanOmapFrozen = spec.id ===
+        'venus-heaven-material-captured-sample-mask-direct-clean-omap-frozen-nodepth-x64';
+      const capturedHeavenCcp =
+        spec.id === 'venus-heaven-material-captured-ccp-x64';
+      const capturedHeavenFragment = capturedHeavenDraw0 ?
+        `${capturedHeavenRoot}/FS_56289d3e1ccd04a77c3d954c5ea8fe76a545a831.remapped.spv` :
+        capturedHeavenDraw170 ? `${capturedHeavenRoot}/` +
+          'FS_e47a0b705fa8d6f25bab50a322b14606f914dac6.remapped-6f2ed2660be66fad.spv' :
+        capturedHeavenF647 ? `${capturedHeavenRoot}/` +
+          'FS_f64724cbe909fa7080a3f266cec16847ec90bb92.remapped-4a2c265ca77b091e.spv' :
+        capturedHeavenConstant ?
+        `${GUEST_VULKAN_ROOT}/share/winehua/replay_external/heaven_constant.frag.spv` :
+        capturedHeavenNoKill ? `${capturedHeavenRoot}/heaven_exact_fs_no_kill.spv` :
+        capturedHeavenForceOpaque ? `${capturedHeavenRoot}/heaven_exact_fs_force_opaque.spv` :
+        capturedHeavenT0Implicit ? `${capturedHeavenRoot}/heaven_exact_fs_t0_implicit.spv` :
+        capturedHeavenT0Lod0 ? `${capturedHeavenRoot}/heaven_exact_fs_t0_lod0.spv` :
+        capturedHeavenExplicitKillInit ?
+          `${capturedHeavenRoot}/heaven_exact_fs_explicit_kill_init.spv` :
+        capturedHeavenKillDirectBit ?
+          `${capturedHeavenRoot}/heaven_exact_fs_kill_direct_bit.spv` :
+        capturedHeavenKillDirectCompare ?
+          `${capturedHeavenRoot}/heaven_exact_fs_kill_direct_compare.spv` :
+        capturedHeavenKillRecompare ?
+          `${capturedHeavenRoot}/heaven_exact_fs_kill_recompare.spv` :
+        capturedHeavenLocalKill ?
+          `${capturedHeavenRoot}/heaven_exact_fs_local_kill.spv` :
+        capturedHeavenCompareColor ?
+          `${capturedHeavenRoot}/heaven_exact_fs_compare_color.spv` :
+        capturedHeavenInlineKill ?
+          `${capturedHeavenRoot}/heaven_exact_fs_inline_kill.spv` :
+        capturedHeavenUintKill ?
+          `${capturedHeavenRoot}/heaven_exact_fs_uint_kill.spv` :
+        capturedHeavenCompareAlpha ?
+          `${capturedHeavenRoot}/heaven_exact_fs_compare_alpha.spv` :
+        capturedHeavenNoFloat ?
+          `${capturedHeavenRoot}/heaven_exact_fs_no_float.spv` :
+        capturedHeavenCompareAlphaNoFloat ?
+          `${capturedHeavenRoot}/heaven_exact_fs_compare_alpha_no_float.spv` :
+        capturedHeavenSampleMaskDiscard ?
+          `${capturedHeavenRoot}/heaven_exact_fs_sample_mask_discard.spv` :
+        capturedHeavenSampleMaskKeep ?
+          `${capturedHeavenRoot}/heaven_exact_fs_sample_mask_keep.spv` :
+        capturedHeavenInlined ? `${capturedHeavenRoot}/heaven_exact_fs_inlined.spv` :
+        capturedHeavenInlinedLocal ?
+          `${capturedHeavenRoot}/heaven_exact_fs_inlined_local.spv` :
+        capturedHeavenReturnCompare ?
+          `${capturedHeavenRoot}/heaven_exact_fs_return_compare.spv` :
+        capturedHeavenSampleMaskFinalSelect ?
+          `${capturedHeavenRoot}/heaven_exact_fs_sample_mask_final_select.spv` :
+        capturedHeavenSampleMaskFinalBranch ?
+          `${capturedHeavenRoot}/heaven_exact_fs_sample_mask_final_branch.spv` :
+        capturedHeavenTerminateInvocation ?
+          `${capturedHeavenRoot}/heaven_exact_fs_terminate_invocation.spv` :
+        capturedHeavenKillDirectClean ?
+          `${capturedHeavenRoot}/heaven_exact_fs_kill_direct_clean.spv` :
+        capturedHeavenReturnCompareClean ?
+          `${capturedHeavenRoot}/heaven_exact_fs_return_compare_clean.spv` :
+        capturedHeavenSampleMaskDirectClean ?
+          `${capturedHeavenRoot}/heaven_exact_fs_sample_mask_direct_clean.spv` :
+        capturedHeavenOmapFrozen ?
+          `${capturedHeavenRoot}/heaven_exact_fs_omap_frozen.spv` :
+        capturedHeavenNoKillOmapFrozen ?
+          `${capturedHeavenRoot}/heaven_exact_fs_no_kill_omap_frozen.spv` :
+        capturedHeavenKillDirectCleanOmapFrozen ?
+          `${capturedHeavenRoot}/heaven_exact_fs_kill_direct_clean_omap_frozen.spv` :
+        capturedHeavenReturnCompareCleanOmapFrozen ?
+          `${capturedHeavenRoot}/heaven_exact_fs_return_compare_clean_omap_frozen.spv` :
+        capturedHeavenSampleMaskDirectCleanOmapFrozen ?
+          `${capturedHeavenRoot}/heaven_exact_fs_sample_mask_direct_clean_omap_frozen.spv` :
+        capturedHeavenCcp ? `${capturedHeavenRoot}/heaven_exact_fs_ccp.spv` :
+        `${capturedHeavenRoot}/` +
+        'FS_844c52a11b923f49d2afee97a8d6119eef8efeb3.remapped-d5aa1ffafa7f5fa1.spv';
+      const capturedHeavenVertex = capturedHeavenDraw0 ?
+        `${capturedHeavenRoot}/VS_809ef7d3d23ff811f90c51be8d0cfddf6994cdb0.remapped.spv` :
+        capturedHeavenDraw170 ? `${capturedHeavenRoot}/` +
+          'VS_809ef7d3d23ff811f90c51be8d0cfddf6994cdb0.remapped-3d526c03b048bdf1.spv' :
+        capturedHeavenF647 ? `${capturedHeavenRoot}/` +
+          'VS_fa0f746828dc66ef12b425928c234654b310a37e.remapped-1eded4254f7290.spv' :
+        `${capturedHeavenRoot}/` +
+        'VS_809ef7d3d23ff811f90c51be8d0cfddf6994cdb0.remapped-3d526c03b048bdf1.spv';
+      const selectedHeavenFragment = capturedHeavenMaterialDepth ?
+        `${capturedHeavenMaterialDepthRoot}/depth.frag.spv` :
+        capturedHeaven ? capturedHeavenFragment :
+        (useSparseHeaven ? sparseHeavenFragment : heavenFragment);
+      const selectedHeavenVertex = capturedHeavenMaterialDepth ?
+        `${capturedHeavenMaterialDepthRoot}/${capturedHeavenMaterialDepthPass3 ?
+          'pass3' : 'pass0'}/${capturedHeavenMaterialDepthNoFloatControls ?
+            'vs-no-float-controls.spv' : 'vs.spv'}` :
+        capturedHeaven ? capturedHeavenVertex : useSparseHeaven &&
+        spec.id !== 'venus-heaven-material-exact-fragment-x64' &&
+        spec.id.indexOf('bool-') < 0 ?
+        sparseHeavenVertex : replayVertex;
       const guestProcess = testNapi.runGuestProgram({
         executablePath: executablePath,
         argv: ['--automation', '--run-id', this.request.runId, '--test-id', spec.id,
@@ -572,6 +1092,60 @@ export class SmokeRunner {
             ['--depth-cube-graphics-padded-dref'] : []),
           ...(spec.id === 'venus-depth-cube-graphics-no-float-controls-x64' ?
             ['--depth-cube-graphics-no-float-controls'] : []),
+          ...(spec.id.indexOf('venus-heaven-material-bool-') === 0 ?
+            ['--bool-mode', spec.id.indexOf('bool-false') >= 0 ? 'false' : 'true'] : []),
+          ...(spec.id === 'venus-heaven-material-constant-final-vertex-x64' ?
+            ['--vs-transform-probe', '1'] : []),
+          ...(capturedHeaven ?
+            ['--capture-dir', capturedHeavenRoot,
+              '--capture-color', capturedHeavenF647 ? 'golden' : 'sentinel',
+              '--capture-depth',
+              capturedHeavenDraw0 ?
+                (capturedHeavenDraw0NoDepth ? 'disabled' : capturedHeavenDraw0Clear ?
+                  'clear' : 'loaded') : capturedHeavenDraw170 ?
+                  (capturedHeavenDraw170NoDepth ? 'disabled' : capturedHeavenDraw170Clear ?
+                    'clear' : 'loaded') : capturedHeavenF647 ?
+                    (capturedHeavenNoDepth ? 'disabled' : 'loaded') :
+                    capturedHeavenNoDepth ? 'disabled' : 'clear',
+              '--capture-depth-compare', capturedHeavenDepthAlways ? 'always' :
+                capturedHeavenF647 ? 'equal' : 'less-equal'] : []),
+          ...(capturedHeavenDraw0 ? ['--capture-profile', 'draw0'] : []),
+          ...(capturedHeavenDraw170 ? ['--capture-profile', 'draw170'] : []),
+          ...(capturedHeavenF647 ? ['--capture-profile', 'f647'] : []),
+          ...(capturedHeavenMaterialDepth ? [
+            '--capture-dir', `${capturedHeavenMaterialDepthRoot}/${capturedHeavenMaterialDepthPass3 ? 'pass3' : 'pass0'}`,
+            '--capture-color', 'sentinel', '--capture-depth', 'clear',
+            '--capture-depth-compare', 'less-equal', '--capture-profile',
+            capturedHeavenMaterialDepthPass3 ? 'material-pass3-depth' : 'material-pass0-depth'
+          ] : []),
+          ...(capturedHeavenF647Baseline ? ['--skip-draw', '1'] : []),
+          ...(spec.id.indexOf('venus-heaven-material-') === 0 ?
+            ['--vertex-spv', selectedHeavenVertex,
+              '--fragment-spv', selectedHeavenFragment,
+              '--rgba-output', `${this.resultDirectory}/${spec.id}.rgba`] : []),
+          ...(spec.id.endsWith('-empty-x64') ? ['--layout-mode', 'empty'] : []),
+          ...(spec.id.endsWith('-no-set-x64') ? ['--layout-mode', 'no-set'] : []),
+          ...(spec.id.endsWith('-small-x64') ? ['--layout-mode', 'small'] : []),
+          ...(spec.id.endsWith('-ubo-x64') ? ['--layout-mode', 'ubo'] : []),
+          ...(spec.id.endsWith('-dynamic-x64') ? ['--layout-mode', 'dynamic'] : []),
+          ...(spec.id.endsWith('-sampler-x64') ? ['--layout-mode', 'sampler'] : []),
+          ...(spec.id.endsWith('-sampled-x64') ? ['--layout-mode', 'sampled'] : []),
+          ...(spec.id.endsWith('-full-x64') ? ['--layout-mode', 'full'] : []),
+          ...(spec.id === 'venus-heaven-material-exact-x64' ||
+            spec.id === 'venus-heaven-material-exact-fragment-x64' ||
+            spec.id === 'venus-heaven-material-exact-probe-x64' ||
+            spec.id === 'venus-heaven-material-graphics-x64' ||
+            spec.id === 'venus-heaven-material-no-float-x64' ||
+            spec.id === 'venus-heaven-material-constant-final-vertex-x64' ||
+            spec.id === 'venus-heaven-material-constant-x64' ||
+            spec.id === 'venus-heaven-material-bool-true-x64' ||
+            spec.id === 'venus-heaven-material-bool-false-x64' ?
+            ['--layout-mode', 'exact'] : []),
+          ...(capturedHeaven ? ['--layout-mode', 'captured'] : []),
+          ...(capturedHeavenMaterialDepth ? ['--layout-mode', 'captured'] : []),
+          ...(spec.id.indexOf('input-verify') >= 0 || capturedHeavenMaterialDepth ?
+            ['--verify-inputs', '1'] : []),
+          ...(spec.id.endsWith('-exact-x64') ? ['--layout-mode', 'exact'] : []),
           ...(spec.id === 'venus-depth-cube-array-x64' ?
             ['--depth-cube-array'] : []),
           ...(spec.id === 'venus-depth-cube-array-2d-golden-x64' ?
@@ -580,10 +1154,18 @@ export class SmokeRunner {
         environment: {
           'WINEHUA_SMOKE_RUN_ID': this.request.runId,
           'WINEHUA_SMOKE_TEST_ID': spec.id,
-          /* Guest and Host map different shadow files. Functional probes use
-           * explicit flush/invalidate for their tiny readback allocations. */
-          'VN_WINEHUA_REMOTE_MEMORY_SYNC': '1'
-        },
+            /* Guest and Host map different shadow files. Functional probes use
+             * explicit flush/invalidate for their tiny readback allocations. */
+            'VN_WINEHUA_REMOTE_MEMORY_SYNC': '1',
+            'WINEHUA_VKR_TRACE_PIPELINE':
+              this.request.suite === 'venus-heaven-material-layout' ? '1' : '0',
+            'VKR_WINEHUA_SHADOW_TRACE':
+              spec.id.indexOf('input-verify') >= 0 ? '1' : '0',
+            'BOX64_DYNAREC_WEAKBARRIER':
+              spec.id.indexOf('input-verify') >= 0 ? '0' : '2',
+            'VN_WINEHUA_STRONG_RING_BARRIER':
+              spec.id.indexOf('input-verify') >= 0 ? '1' : '0'
+          },
         workingDirectory: GUEST_VULKAN_ROOT,
         automationMode: true
       }) as ProcessInfo;
@@ -657,11 +1239,18 @@ export class SmokeRunner {
           this.perfProfile === 'shadow-precise-single-ring' ||
           this.perfProfile === 'shadow-precise-sync-submit' ||
           this.perfProfile === 'shadow-precise-strong-ring' ||
+          this.perfProfile === 'shadow-precise-dirty-ring' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-no-upload' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-no-upload-fast' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-perf' ||
+          this.perfProfile === 'shadow-precise-strong-ring-trace' ||
+          this.perfProfile === 'shadow-precise-strong-ring-perf' ||
           this.perfProfile === 'shadow-precise-strong-ring-async-present' ||
           this.perfProfile === 'shadow-precise-strong-ring-fence-poll' ||
           this.perfProfile === 'shadow-precise-strong-ring-mailbox' ||
           this.perfProfile === 'shadow-precise-direct-fence' ||
-          this.perfProfile === 'shadow-precise-retain-shmem') {
+          this.perfProfile === 'shadow-precise-retain-shmem' ||
+          this.perfProfile === 'shadow-precise-cpu-upload') {
           smokeEnvironment['DXVK_WINEHUA_PRECISE_SHADOW'] = '1';
           smokeEnvironment['DXVK_WINEHUA_FLUSH_DYNAMIC_MAPPED'] = '1';
           smokeEnvironment['VN_WINEHUA_REMOTE_MEMORY_SYNC'] = '1';
@@ -672,10 +1261,19 @@ export class SmokeRunner {
             smokeEnvironment['VN_PERF'] =
               'no_fence_feedback,no_query_feedback,no_async_queue_submit';
           if (this.perfProfile === 'shadow-precise-strong-ring' ||
+            this.perfProfile === 'shadow-precise-dirty-ring' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-no-upload' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-no-upload-fast' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-perf' ||
+            this.perfProfile === 'shadow-precise-strong-ring-trace' ||
+            this.perfProfile === 'shadow-precise-strong-ring-perf' ||
             this.perfProfile === 'shadow-precise-strong-ring-async-present' ||
             this.perfProfile === 'shadow-precise-strong-ring-fence-poll' ||
             this.perfProfile === 'shadow-precise-strong-ring-mailbox')
             smokeEnvironment['VN_WINEHUA_STRONG_RING_BARRIER'] = '1';
+          if (this.perfProfile === 'shadow-precise-strong-ring-perf' ||
+            this.perfProfile === 'shadow-precise-dirty-ring-perf')
+            smokeEnvironment['VN_WINEHUA_PERF_SUMMARY'] = '1';
           if (this.perfProfile === 'shadow-precise-direct-fence')
             smokeEnvironment['VN_WINEHUA_DIRECT_FENCE_WAIT'] = '1';
           if (this.perfProfile === 'shadow-precise-retain-shmem')

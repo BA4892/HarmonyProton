@@ -121,7 +121,7 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
     std::string profile = d3dBackend.substr(strlen("dxvk_"));
     if (profile.empty()) profile = "legacy";
     const std::string overlayRoot = std::string(WINE_RUNTIME_ROOT) +
-        "/smoke/dxvk/" + profile;
+        "/dxvk/" + profile;
     const std::string overlay64 = overlayRoot + "/x64";
     const std::string overlay86 = overlayRoot + "/x86";
     const std::string guestVulkanRoot = binDir + "/guest_vulkan";

@@ -1,10 +1,10 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('core', 'audio', 'opengl', 'host-vulkan', 'venus', 'venus-sampled', 'venus-sampled-idle', 'venus-depth-cube', 'venus-depth-cube-array-2d-golden', 'venus-depth-cube-graphics', 'capabilities', 'wine-vulkan', 'wine-vulkan-present', 'dxvk', 'dxvk-long', 'dxvk-replay', 'dxvk-layout-general', 'dxvk-combined', 'dxvk-dynamic', 'all', 'long')]
+    [ValidateSet('core', 'audio', 'opengl', 'host-vulkan', 'host-heaven', 'host-heaven-material-depth', 'host-heaven-inputs', 'venus', 'venus-sampled', 'venus-sampled-idle', 'venus-depth-cube', 'venus-depth-cube-array-2d-golden', 'venus-depth-cube-graphics', 'venus-heaven-material', 'venus-heaven-material-depth', 'venus-heaven-captured', 'venus-heaven-inputs', 'venus-heaven-captured-ab', 'venus-heaven-discard-ab', 'venus-heaven-material-layout', 'venus-heaven-draw0', 'venus-heaven-draw170', 'venus-heaven-f647', 'capabilities', 'wine-vulkan', 'wine-vulkan-present', 'dxvk', 'dxvk-long', 'dxvk-replay', 'dxvk-layout-general', 'dxvk-combined', 'dxvk-dynamic', 'all', 'long')]
     [string]$Suite = 'core',
     [ValidateSet('reuse', 'clean')]
     [string]$Prefix = 'reuse',
-    [ValidateSet('baseline', 'direct-fence-wait', 'no-remote-sync', 'no-dynamic-flush', 'fence-feedback', 'shadow-none', 'shadow-trace', 'shadow-to-host-explicit', 'shadow-precise', 'shadow-precise-single-ring', 'shadow-precise-sync-submit', 'shadow-precise-strong-ring', 'shadow-precise-strong-ring-async-present', 'shadow-precise-strong-ring-fence-poll', 'shadow-precise-strong-ring-mailbox', 'shadow-precise-direct-fence', 'shadow-precise-retain-shmem')]
+    [ValidateSet('baseline', 'direct-fence-wait', 'no-remote-sync', 'no-dynamic-flush', 'fence-feedback', 'shadow-none', 'shadow-trace', 'shadow-to-host-explicit', 'shadow-precise', 'shadow-precise-single-ring', 'shadow-precise-sync-submit', 'shadow-precise-strong-ring', 'shadow-precise-strong-ring-trace', 'shadow-precise-strong-ring-perf', 'shadow-precise-dirty-ring', 'shadow-precise-dirty-ring-perf', 'shadow-precise-dirty-ring-no-merge', 'shadow-precise-dirty-ring-no-upload', 'shadow-precise-dirty-ring-no-upload-fast', 'shadow-precise-strong-ring-async-present', 'shadow-precise-strong-ring-fence-poll', 'shadow-precise-strong-ring-mailbox', 'shadow-precise-direct-fence', 'shadow-precise-retain-shmem', 'shadow-precise-cpu-upload')]
     [string]$PerfProfile = 'shadow-precise-strong-ring',
     [int]$Runs = 1,
     [ValidateRange(60, 3600)]
@@ -12,6 +12,8 @@ param(
     [switch]$Gate,
     [switch]$SkipBuild,
     [string]$DeviceId = '',
+    [string]$ReplayFragmentSpv = '',
+    [string]$ReplayVertexSpv = '',
     [string]$ArchiveRoot = 'D:\MyProject\winehua-logs\automation',
     [int]$TimeoutMinutes = 15
 )
@@ -380,9 +382,9 @@ function Get-ArtifactMetadata {
         'smoke/x86/winehua_graphics_smoke.exe', 'smoke/x64/winehua_vulkan_smoke.exe',
         'smoke/x86/winehua_vulkan_smoke.exe',
         'smoke/x64/winehua_d3d11_smoke.exe', 'smoke/x86/winehua_d3d11_smoke.exe',
-        'smoke/dxvk/manifest.json',
-        'smoke/dxvk/legacy/x64/d3d11.dll', 'smoke/dxvk/legacy/x64/dxgi.dll',
-        'smoke/dxvk/legacy/x86/d3d11.dll', 'smoke/dxvk/legacy/x86/dxgi.dll',
+        'dxvk/manifest.json',
+        'dxvk/legacy/x64/d3d11.dll', 'dxvk/legacy/x64/dxgi.dll',
+        'dxvk/legacy/x86/d3d11.dll', 'dxvk/legacy/x86/dxgi.dll',
         'bin/guest_vulkan/lib/libvulkan.so.1',
         'bin/guest_vulkan/lib/libvulkan_virtio.so',
         'bin/guest_vulkan/share/vulkan/icd.d/venus_icd.x86_64.json')) {
@@ -714,6 +716,42 @@ $installOutput = & $Hdc -t $DeviceId install -r $HapWindows 2>&1
 $installOutput | Set-Content -LiteralPath (Join-Path $sessionDirectory 'install.log') -Encoding UTF8
 if ($LASTEXITCODE -ne 0 -or ($installOutput -join "`n") -notmatch 'install bundle successfully') {
     throw 'HAP overwrite install did not report install bundle successfully'
+}
+
+if ($Suite -in @('venus-heaven-material', 'venus-heaven-material-layout')) {
+    if (-not $ReplayFragmentSpv -or -not (Test-Path -LiteralPath $ReplayFragmentSpv)) {
+        throw 'venus-heaven-material requires -ReplayFragmentSpv pointing to the captured final SPIR-V'
+    }
+    if (-not $ReplayVertexSpv -or -not (Test-Path -LiteralPath $ReplayVertexSpv)) {
+        throw 'venus-heaven-material requires -ReplayVertexSpv pointing to the captured/remapped VS SPIR-V'
+    }
+    # /data/local/tmp is visible to the HDC shell but not to the App's
+    # sandboxed native child. Stage the captured shaders in the app-owned temp
+    # directory and let SmokeRunner use its logical storage alias.
+    $remoteReplaySpv = "$DeviceSandbox/temp/winehua_heaven_final_fs.spv"
+    $remoteReplayVertexSpv = "$DeviceSandbox/temp/winehua_heaven_final_vs.spv"
+    $sendOutput = & $Hdc -t $DeviceId file send $ReplayFragmentSpv $remoteReplaySpv 2>&1
+    $sendOutput | Set-Content -LiteralPath (Join-Path $sessionDirectory 'replay-shader-send.log') -Encoding UTF8
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to stage the external replay SPIR-V on the device' }
+    $localReplayHash = (Get-FileHash -LiteralPath $ReplayFragmentSpv -Algorithm SHA256).Hash.ToLowerInvariant()
+    $deviceReplayHashLine = (& $Hdc -t $DeviceId shell sha256sum $remoteReplaySpv 2>$null | Select-Object -First 1)
+    $deviceReplayHash = if ($deviceReplayHashLine) { ("$deviceReplayHashLine" -split '\s+')[0].ToLowerInvariant() } else { '' }
+    if ($deviceReplayHash -and $deviceReplayHash -match '^[0-9a-f]{64}$' -and
+        $deviceReplayHash -ne $localReplayHash) {
+        throw "External replay SPIR-V hash mismatch: local=$localReplayHash device=$deviceReplayHash"
+    }
+    $sendVertexOutput = & $Hdc -t $DeviceId file send $ReplayVertexSpv $remoteReplayVertexSpv 2>&1
+    $sendVertexOutput | Set-Content -LiteralPath (Join-Path $sessionDirectory 'replay-vertex-send.log') -Encoding UTF8
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to stage the external replay vertex SPIR-V on the device' }
+    $localVertexHash = (Get-FileHash -LiteralPath $ReplayVertexSpv -Algorithm SHA256).Hash.ToLowerInvariant()
+    $deviceVertexHashLine = (& $Hdc -t $DeviceId shell sha256sum $remoteReplayVertexSpv 2>$null | Select-Object -First 1)
+    $deviceVertexHash = if ($deviceVertexHashLine) { ("$deviceVertexHashLine" -split '\s+')[0].ToLowerInvariant() } else { '' }
+    if ($deviceVertexHash -and $deviceVertexHash -match '^[0-9a-f]{64}$' -and
+        $deviceVertexHash -ne $localVertexHash) {
+        throw "External replay vertex SPIR-V hash mismatch: local=$localVertexHash device=$deviceVertexHash"
+    }
+    Copy-Item -LiteralPath $ReplayFragmentSpv -Destination (Join-Path $sessionDirectory 'heaven-final-fragment.spv')
+    Copy-Item -LiteralPath $ReplayVertexSpv -Destination (Join-Path $sessionDirectory 'heaven-final-vertex.spv')
 }
 
 $matrix = @()
