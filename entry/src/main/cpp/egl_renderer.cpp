@@ -37,8 +37,8 @@ static uint64_t PerfNowUs()
 
 static bool TraceFrameOrder()
 {
-    const char* mode = std::getenv("VKR_WINEHUA_SHADOW_FROM_HOST");
-    return mode && std::strcmp(mode, "none") == 0;
+    const char* trace = std::getenv("VKR_WINEHUA_SHADOW_TRACE");
+    return trace && trace[0] == '1' && !trace[1];
 }
 
 struct RendererPerfWindow {
@@ -432,6 +432,10 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
         zeroCopyLastTimestamp_ = 0;
         zeroCopyTimestampRegressions_ = 0;
         zeroCopyFrames_ = 0;
+        zeroCopyUpdates_ = 0;
+        zeroCopyLastConsumedSignal_ = 0;
+        zeroCopyCoalescedSignals_ = 0;
+        zeroCopyDuplicateTimestamps_ = 0;
         zeroCopyFailures_ = 0;
         OH_LOG_INFO(LOG_APP,
                     "[VIRGL-ZC][MAIN] consumer attached tl=%{public}u key=%{public}llu "
@@ -458,6 +462,14 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
     if (!zeroCopyRegistered_ || !zeroCopyImage_ ||
         !zeroCopyFrameAvailable_.exchange(false, std::memory_order_acq_rel))
         return false;
+
+    const uint64_t signalCount = zeroCopyFrameSignals_.load(std::memory_order_acquire);
+    const uint64_t signalDelta = signalCount >= zeroCopyLastConsumedSignal_
+        ? signalCount - zeroCopyLastConsumedSignal_ : 0;
+    if (signalDelta > 1)
+        zeroCopyCoalescedSignals_ += signalDelta - 1;
+    zeroCopyLastConsumedSignal_ = signalCount;
+    ++zeroCopyUpdates_;
 
     const int32_t updateResult = OH_NativeImage_UpdateSurfaceImage(zeroCopyImage_);
     const int32_t transformResult = updateResult == 0
@@ -523,23 +535,31 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
 
     zeroCopyConsecutiveFailures_ = 0;
     const int64_t imageTimestamp = OH_NativeImage_GetTimestamp(zeroCopyImage_);
+    const int64_t previousTimestamp = zeroCopyLastTimestamp_;
+    int64_t timestampDeltaUs = 0;
     if (imageTimestamp > 0)
     {
-        if (zeroCopyLastTimestamp_ > 0 && imageTimestamp <= zeroCopyLastTimestamp_)
+        if (previousTimestamp > 0)
         {
-            ++zeroCopyTimestampRegressions_;
-            if (zeroCopyTimestampRegressions_ == 1 || zeroCopyTimestampRegressions_ % 60 == 0)
-                OH_LOG_WARN(LOG_APP,
-                            "[VIRGL-ZC][MAIN] timestamp regression tl=%{public}u "
-                            "current=%{public}lld previous=%{public}lld count=%{public}llu",
-                            toplevelId_, static_cast<long long>(imageTimestamp),
-                            static_cast<long long>(zeroCopyLastTimestamp_),
-                            static_cast<unsigned long long>(zeroCopyTimestampRegressions_));
+            timestampDeltaUs = (imageTimestamp - previousTimestamp) / 1000;
+            if (imageTimestamp < previousTimestamp)
+            {
+                ++zeroCopyTimestampRegressions_;
+                if (zeroCopyTimestampRegressions_ == 1 || zeroCopyTimestampRegressions_ % 60 == 0)
+                    OH_LOG_WARN(LOG_APP,
+                                "[VIRGL-ZC][MAIN] timestamp regression tl=%{public}u "
+                                "current=%{public}lld previous=%{public}lld count=%{public}llu",
+                                toplevelId_, static_cast<long long>(imageTimestamp),
+                                static_cast<long long>(previousTimestamp),
+                                static_cast<unsigned long long>(zeroCopyTimestampRegressions_));
+            }
+            else if (imageTimestamp == previousTimestamp)
+            {
+                ++zeroCopyDuplicateTimestamps_;
+            }
         }
-        else
-        {
+        if (imageTimestamp > zeroCopyLastTimestamp_)
             zeroCopyLastTimestamp_ = imageTimestamp;
-        }
     }
 
     WaylandServer::ZeroCopyLayerInfo layer;
@@ -583,10 +603,18 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
     if (TraceFrameOrder() && zeroCopyFrames_ <= 600)
         OH_LOG_INFO(LOG_APP,
                     "[VENUS-ORDER][MAIN] frame=%{public}llu signals=%{public}llu "
-                    "timestamp=%{public}lld timestamp_regress=%{public}llu",
+                    "updates=%{public}llu signal_delta=%{public}llu "
+                    "coalesced=%{public}llu timestamp=%{public}lld "
+                    "timestamp_delta_us=%{public}lld timestamp_dup=%{public}llu "
+                    "timestamp_regress=%{public}llu",
                     static_cast<unsigned long long>(zeroCopyFrames_),
                     static_cast<unsigned long long>(zeroCopyFrameSignals_.load()),
+                    static_cast<unsigned long long>(zeroCopyUpdates_),
+                    static_cast<unsigned long long>(signalDelta),
+                    static_cast<unsigned long long>(zeroCopyCoalescedSignals_),
                     static_cast<long long>(imageTimestamp),
+                    static_cast<long long>(timestampDeltaUs),
+                    static_cast<unsigned long long>(zeroCopyDuplicateTimestamps_),
                     static_cast<unsigned long long>(zeroCopyTimestampRegressions_));
     if (zeroCopyFrames_ == 1 || zeroCopyFrames_ % 120 == 0)
         OH_LOG_INFO(LOG_APP,
@@ -631,6 +659,10 @@ void EglRenderer::ReleaseZeroCopyBinding()
     zeroCopyFallbackShmSerial_ = 0;
     zeroCopyLastTimestamp_ = 0;
     zeroCopyTimestampRegressions_ = 0;
+    zeroCopyUpdates_ = 0;
+    zeroCopyLastConsumedSignal_ = 0;
+    zeroCopyCoalescedSignals_ = 0;
+    zeroCopyDuplicateTimestamps_ = 0;
     zeroCopySurfaceKey_ = 0;
     zeroCopyClientPid_ = 0;
     zeroCopySurfaceId_ = 0;

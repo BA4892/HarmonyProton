@@ -39,6 +39,16 @@ export interface GuestProgramOptions {
   automationMode: boolean;
 }
 export const runGuestProgram: (options: GuestProgramOptions) => WineProcessHandle;
+export interface HostProgramOptions {
+  executablePath: string;
+  argv: string[];
+  environment: Record<string, string>;
+  workingDirectory: string;
+  automationMode: boolean;
+}
+export const runHostProgram: (options: HostProgramOptions) => WineProcessHandle;
+export const runHostReplay: (options: HostProgramOptions) => boolean;
+export const isHostReplayRunning: () => boolean;
 export const queryWineProcess: (pid: number) => WineProcessHandle;
 export const terminateWineProcess: (pid: number) => boolean;
 export const checkWinePrefix: (prefixMode?: string) => boolean;

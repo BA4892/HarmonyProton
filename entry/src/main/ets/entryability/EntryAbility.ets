@@ -123,10 +123,14 @@ export default class EntryAbility extends UIAbility {
     const perfProfile = ['direct-fence-wait', 'no-remote-sync', 'no-dynamic-flush', 'fence-feedback',
       'shadow-none', 'shadow-trace', 'shadow-to-host-explicit', 'shadow-precise',
       'shadow-precise-single-ring', 'shadow-precise-sync-submit', 'shadow-precise-strong-ring',
+      'shadow-precise-dirty-ring', 'shadow-precise-dirty-ring-perf', 'shadow-precise-dirty-ring-no-merge', 'shadow-precise-dirty-ring-no-upload',
+      'shadow-precise-dirty-ring-no-upload-fast',
+      'shadow-precise-strong-ring-trace', 'shadow-precise-strong-ring-perf',
       'shadow-precise-strong-ring-async-present',
       'shadow-precise-strong-ring-fence-poll',
       'shadow-precise-strong-ring-mailbox',
-      'shadow-precise-direct-fence', 'shadow-precise-retain-shmem']
+      'shadow-precise-direct-fence', 'shadow-precise-retain-shmem',
+      'shadow-precise-cpu-upload']
       .indexOf(requestedPerfProfile) >= 0 ? requestedPerfProfile : 'baseline';
     this.contentPage = mode === 'smoke' && suite === 'host-vulkan' ?
       'pages/HostVulkanSmoke' : 'pages/Index';

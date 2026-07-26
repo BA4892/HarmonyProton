@@ -8,17 +8,22 @@
 #include "wine_process.h"
 
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <dlfcn.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cerrno>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <signal.h>
 #include <string>
+#include <thread>
 #include <vector>
 
 #undef LOG_TAG
@@ -35,7 +40,7 @@ struct ProgramOptions {
     std::vector<std::string> environment;
     std::string workingDirectory;
     std::string prefixMode = "reuse";
-    std::string d3dBackend = "wined3d";
+    std::string d3dBackend = "dxvk_legacy";
     std::string presentBackend = "virgl_compositor";
     bool automationMode = false;
 };
@@ -47,6 +52,17 @@ struct GuestProgramOptions {
     std::string workingDirectory;
     bool automationMode = true;
 };
+
+struct HostProgramOptions {
+    std::string executablePath;
+    std::vector<std::string> argv;
+    std::vector<std::string> environment;
+    std::string workingDirectory;
+    bool automationMode = true;
+};
+
+using HostReplayMain = int (*)(int, char**);
+static std::atomic<bool> gHostReplayRunning{false};
 
 static bool HasUnsafeProtocolChar(const std::string& value)
 {
@@ -390,7 +406,7 @@ static pid_t SpawnGuestProgram(const GuestProgramOptions& options)
     UpsertEnv(&envStrs, "BOX64_NOBANNER=1");
     UpsertEnv(&envStrs, "VK_DRIVER_FILES=" + icd);
     UpsertEnv(&envStrs, "VK_ICD_FILENAMES=" + icd);
-    UpsertEnv(&envStrs, "VN_DEBUG=vtest");
+    UpsertEnv(&envStrs, "VN_DEBUG=vtest,result");
     // OHOS Host Vulkan memory uses an explicit SHM shadow when the driver
     // cannot export dma-buf/opaque-fd memory. GPU fence and query feedback
     // writes only the Host mapping, so query the real Host objects instead
@@ -420,6 +436,61 @@ static pid_t SpawnGuestProgram(const GuestProgramOptions& options)
     return pid;
 }
 
+static bool ResolveManagedHostExecutable(const std::string& requested,
+                                         std::string* resolved)
+{
+    const std::string managedRoot = std::string(WINE_RUNTIME_BIN) + "/host_vulkan";
+    char rootPath[PATH_MAX] = {};
+    char executablePath[PATH_MAX] = {};
+    struct stat info = {};
+
+    if (!realpath(managedRoot.c_str(), rootPath) ||
+        !realpath(requested.c_str(), executablePath))
+        return false;
+    const std::string rootPrefix = std::string(rootPath) + "/";
+    if (std::string(executablePath).rfind(rootPrefix, 0) != 0 ||
+        stat(executablePath, &info) != 0 || !S_ISREG(info.st_mode))
+        return false;
+    *resolved = executablePath;
+    return true;
+}
+
+static pid_t SpawnHostProgram(const HostProgramOptions& options)
+{
+    std::string executablePath;
+    if (options.executablePath.empty() || HasUnsafeProtocolChar(options.executablePath) ||
+        !ResolveManagedHostExecutable(options.executablePath, &executablePath))
+        return -1;
+    for (const std::string& arg : options.argv)
+        if (HasUnsafeProtocolChar(arg)) return -1;
+
+    std::vector<std::string> envStrs = options.environment;
+    UpsertEnv(&envStrs, "HOME=" + std::string(WINE_AUTOMATION_HOME));
+    UpsertEnv(&envStrs, "TMPDIR=" + std::string(WINE_TMPDIR));
+    UpsertEnv(&envStrs, "WINEHUA_HOST_ARCH=" + std::string(
+#ifdef __aarch64__
+        "aarch64"
+#else
+        "x86_64"
+#endif
+    ));
+    UpsertEnv(&envStrs, std::string("WINEHUA_AUTOMATION=") +
+              (options.automationMode ? "1" : "0"));
+    if (!options.workingDirectory.empty())
+        UpsertEnv(&envStrs, "WINEHUA_WORKING_DIRECTORY=" + options.workingDirectory);
+
+    std::string entryParams = std::string(WINE_RUNTIME_BIN) +
+        "|__winehua_host_elf__|" + executablePath;
+    for (const std::string& arg : options.argv) entryParams += "|" + arg;
+
+    const pid_t pid = SpawnViaBroker(entryParams, envStrs);
+    if (pid <= 0) return -1;
+    AddProcess(pid, executablePath, -1);
+    OH_LOG_INFO(LOG_APP, "[HostProgram] pid=%{public}d elf=%{public}s",
+                pid, executablePath.c_str());
+    return pid;
+}
+
 } // namespace
 
 napi_value RunWineProgram(napi_env env, napi_callback_info info)
@@ -437,7 +508,7 @@ napi_value RunWineProgram(napi_env env, napi_callback_info info)
     options.windowsExePath = GetString(env, args[0], "windowsExePath");
     options.workingDirectory = GetString(env, args[0], "workingDirectory");
     options.prefixMode = GetString(env, args[0], "prefixMode", "reuse");
-    options.d3dBackend = GetString(env, args[0], "d3dBackend", "wined3d");
+    options.d3dBackend = GetString(env, args[0], "d3dBackend", "dxvk_legacy");
     options.presentBackend = GetString(env, args[0], "presentBackend", "virgl_compositor");
     options.automationMode = GetBool(env, args[0], "automationMode", false);
     ReadStringArray(env, args[0], "argv", &options.argv);
@@ -476,6 +547,92 @@ napi_value RunGuestProgram(napi_env env, napi_callback_info info)
     return pid > 0 && QueryProcessSnapshot(pid, &entry)
         ? MakeProcessObject(env, &entry, true)
         : MakeProcessObject(env, nullptr, false);
+}
+
+napi_value RunHostProgram(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value args[1] = {};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc < 1) return MakeProcessObject(env, nullptr, false);
+
+    napi_valuetype type;
+    if (napi_typeof(env, args[0], &type) != napi_ok || type != napi_object)
+        return MakeProcessObject(env, nullptr, false);
+
+    HostProgramOptions options;
+    options.executablePath = GetString(env, args[0], "executablePath");
+    options.workingDirectory = GetString(env, args[0], "workingDirectory");
+    options.automationMode = GetBool(env, args[0], "automationMode", true);
+    ReadStringArray(env, args[0], "argv", &options.argv);
+    ReadEnvironment(env, args[0], &options.environment);
+
+    const pid_t pid = SpawnHostProgram(options);
+    WineProcessEntry entry;
+    return pid > 0 && QueryProcessSnapshot(pid, &entry)
+        ? MakeProcessObject(env, &entry, true)
+        : MakeProcessObject(env, nullptr, false);
+}
+
+napi_value RunHostReplay(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value args[1] = {};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    bool started = false;
+    napi_valuetype type;
+    if (argc >= 1 && napi_typeof(env, args[0], &type) == napi_ok && type == napi_object)
+    {
+        HostProgramOptions options;
+        options.executablePath = GetString(env, args[0], "executablePath");
+        ReadStringArray(env, args[0], "argv", &options.argv);
+        std::string managedPath;
+        if (ResolveManagedHostExecutable(options.executablePath, &managedPath) &&
+            !gHostReplayRunning.exchange(true, std::memory_order_acq_rel))
+        {
+            void *module = dlopen("libwinehua_host_heaven_replay.so", RTLD_NOW | RTLD_LOCAL);
+            HostReplayMain replayMain = module ? reinterpret_cast<HostReplayMain>(
+                dlsym(module, "winehua_host_replay_main")) : nullptr;
+            if (!replayMain)
+            {
+                const char *loadError = dlerror();
+                OH_LOG_ERROR(LOG_APP, "[HostReplay] signed module unavailable: %{public}s",
+                             loadError ? loadError : "unknown");
+                gHostReplayRunning.store(false, std::memory_order_release);
+            }
+            else
+            {
+                std::thread([managedPath = std::move(managedPath),
+                             replayArgs = std::move(options.argv), replayMain]() mutable {
+                    std::vector<char*> argv;
+                    argv.reserve(replayArgs.size() + 2);
+                    argv.push_back(const_cast<char*>(managedPath.c_str()));
+                    for (std::string& argument : replayArgs)
+                        argv.push_back(const_cast<char*>(argument.c_str()));
+                    argv.push_back(nullptr);
+                    OH_LOG_INFO(LOG_APP, "[HostReplay] main-process worker started argc=%{public}zu",
+                                argv.size() - 1);
+                    const int result = replayMain(static_cast<int>(argv.size() - 1), argv.data());
+                    OH_LOG_INFO(LOG_APP, "[HostReplay] main-process worker finished rc=%{public}d",
+                                result);
+                    gHostReplayRunning.store(false, std::memory_order_release);
+                }).detach();
+                started = true;
+            }
+        }
+    }
+
+    napi_value result;
+    napi_get_boolean(env, started, &result);
+    return result;
+}
+
+napi_value IsHostReplayRunning(napi_env env, napi_callback_info)
+{
+    napi_value result;
+    napi_get_boolean(env, gHostReplayRunning.load(std::memory_order_acquire), &result);
+    return result;
 }
 
 napi_value QueryWineProcess(napi_env env, napi_callback_info info)

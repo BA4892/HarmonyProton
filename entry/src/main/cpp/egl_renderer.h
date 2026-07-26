@@ -67,6 +67,10 @@ private:
     std::atomic<bool> zeroCopyFrameAvailable_{false};
     std::atomic<uint64_t> zeroCopyFrameSignals_{0};
     uint64_t zeroCopyFrames_ = 0;
+    uint64_t zeroCopyUpdates_ = 0;
+    uint64_t zeroCopyLastConsumedSignal_ = 0;
+    uint64_t zeroCopyCoalescedSignals_ = 0;
+    uint64_t zeroCopyDuplicateTimestamps_ = 0;
     uint64_t zeroCopyFailures_ = 0;
     uint64_t zeroCopyFallbackShmSerial_ = 0;
     uint64_t zeroCopyTimestampRegressions_ = 0;

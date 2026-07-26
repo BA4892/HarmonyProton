@@ -2,7 +2,7 @@
 param(
     [ValidateSet('dxvk_legacy', 'wined3d')]
     [string]$D3DBackend = 'dxvk_legacy',
-    [ValidateSet('baseline', 'direct-fence-wait', 'no-remote-sync', 'no-dynamic-flush', 'fence-feedback', 'shadow-none', 'shadow-trace', 'shadow-to-host-explicit', 'shadow-precise', 'shadow-precise-single-ring', 'shadow-precise-sync-submit', 'shadow-precise-strong-ring', 'shadow-precise-strong-ring-async-present', 'shadow-precise-strong-ring-fence-poll', 'shadow-precise-strong-ring-mailbox', 'shadow-precise-direct-fence', 'shadow-precise-retain-shmem')]
+    [ValidateSet('baseline', 'direct-fence-wait', 'no-remote-sync', 'no-dynamic-flush', 'fence-feedback', 'shadow-none', 'shadow-trace', 'shadow-to-host-explicit', 'shadow-precise', 'shadow-precise-single-ring', 'shadow-precise-sync-submit', 'shadow-precise-strong-ring', 'shadow-precise-strong-ring-trace', 'shadow-precise-strong-ring-perf', 'shadow-precise-strong-ring-async-present', 'shadow-precise-strong-ring-fence-poll', 'shadow-precise-strong-ring-mailbox', 'shadow-precise-direct-fence', 'shadow-precise-retain-shmem', 'shadow-precise-cpu-upload', 'shadow-precise-dirty-ring', 'shadow-precise-dirty-ring-perf', 'shadow-precise-dirty-ring-no-merge', 'shadow-precise-dirty-ring-no-upload', 'shadow-precise-dirty-ring-no-upload-fast')]
     [string]$PerfProfile = 'shadow-precise-strong-ring',
     [ValidateSet('', 'heaven-dx11')]
     [string]$GamePreset = '',
@@ -54,6 +54,14 @@ if ($GamePreset -eq 'heaven-dx11') {
     if (-not $ClickButtonText) {
         $ClickButtonText = 'Benchmark'
     }
+    # Heaven draws its launcher controls itself, so there is no Win32 BUTTON
+    # for BM_CLICK. Keep a deterministic client-coordinate fallback.
+    if ($ClickClientXPermille -lt 0) {
+        $ClickClientXPermille = 80
+    }
+    if ($ClickClientYPermille -lt 0) {
+        $ClickClientYPermille = 65
+    }
 }
 
 $environmentPairs = @($D3DEnvironment.GetEnumerator() | Sort-Object { [string]$_.Key })
@@ -76,7 +84,7 @@ if ($ClickClientXPermille -ge 0 -and -not $ClickTitlePrefix) {
 foreach ($pair in $environmentPairs) {
     $key = [string]$pair.Key
     $value = [string]$pair.Value
-    if ($key -notmatch '^(WINEDEBUG|DXVK_|VN_|VKR_|WINEHUA_DXVK_)[A-Za-z0-9_]*$') {
+    if ($key -notmatch '^(WINEDEBUG|DXVK_|VN_|VKR_|WINEHUA_DXVK_|WINEHUA_VKR_)[A-Za-z0-9_]*$') {
         throw "Unsupported D3D environment key: $key"
     }
     if ($value.Length -gt 1024) {
@@ -94,16 +102,21 @@ $encodedEnvironmentJson = [Uri]::EscapeDataString($environmentJson)
 
 & $hdc -t $DeviceId shell aa force-stop $bundle | Out-Null
 $stopped = $false
+$processLines = @()
 for ($attempt = 0; $attempt -lt 25; ++$attempt) {
-    $pids = @(& $hdc -t $DeviceId shell pidof $bundle 2>$null)
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace(($pids -join '').Trim())) {
+    # pidof only reports the main Ability. Native Wine/VirGL children have
+    # suffixed process names and can keep the GPU workload alive after the
+    # Ability has disappeared, contaminating the next A/B run.
+    $processLines = @(& $hdc -t $DeviceId shell ps -ef 2>$null |
+        Where-Object { $_ -match [regex]::Escape($bundle) })
+    if ($processLines.Count -eq 0) {
         $stopped = $true
         break
     }
     Start-Sleep -Milliseconds 200
 }
 if (-not $stopped) {
-    throw "WineHua process did not stop before relaunch: $($pids -join ' ')"
+    throw "WineHua process tree did not stop before relaunch: $($processLines -join ' | ')"
 }
 # Let the old Ability session finish publishing its termination before aa start.
 # Without this short settling window, the system can redeliver the previous Want

@@ -331,16 +331,69 @@ static void apply_entry_param_env_overrides(const std::vector<std::string>& envO
 
 static void log_d3d_environment_summary()
 {
+    const char* backend = getenv("WINEHUA_D3D_BACKEND");
+    const char* dxvkRoot = getenv("WINEHUA_DXVK_ROOT");
+    const char* dxvkVersion = getenv("WINEHUA_DXVK_VERSION");
+    const char* dllOverrides = getenv("WINEDLLOVERRIDES");
+    const char* dllPath = getenv("WINEDLLPATH");
     const char* profile = getenv("WINEHUA_PERF_PROFILE");
+    const char* logLevel = getenv("DXVK_LOG_LEVEL");
     const char* logPath = getenv("DXVK_LOG_PATH");
     const char* dumpPath = getenv("DXVK_SHADER_DUMP_PATH");
     const char* traceSampled = getenv("DXVK_WINEHUA_TRACE_SAMPLED");
     const char* traceFlow = getenv("DXVK_WINEHUA_TRACE_FLOW");
+    const char* vnPerfSummary = getenv("VN_WINEHUA_PERF_SUMMARY");
+    const char* vnPerfLog = getenv("VN_WINEHUA_PERF_LOG");
+    const char* mesaLogLevel = getenv("MESA_LOG_LEVEL");
+
+    std::string root = dxvkRoot && dxvkRoot[0] ? dxvkRoot : "";
+    const std::string x64D3d11 = root + "/x64/d3d11.dll";
+    const std::string x64Dxgi = root + "/x64/dxgi.dll";
+    const std::string x86D3d11 = root + "/x86/d3d11.dll";
+    const std::string x86Dxgi = root + "/x86/dxgi.dll";
+    auto present = [](const std::string& path) {
+        return !path.empty() && access(path.c_str(), R_OK) == 0 ? "present" : "missing";
+    };
     OH_LOG_INFO(LOG_APP,
-                "[WineChild] final D3D env profile=%{public}s logPath=%{public}s dumpPath=%{public}s "
-                "traceSampled=%{public}s traceFlow=%{public}s",
-                profile ? profile : "", logPath ? logPath : "", dumpPath ? dumpPath : "",
-                traceSampled ? traceSampled : "", traceFlow ? traceFlow : "");
+                "[WineChild] final D3D env backend=%{public}s dxvkVersion=%{public}s "
+                "override=%{public}s dllPath=%{public}s root=%{public}s "
+                "x64=(%{public}s,%{public}s) x86=(%{public}s,%{public}s) "
+                "profile=%{public}s logLevel=%{public}s "
+                "logPath=%{public}s dumpPath=%{public}s "
+                "traceSampled=%{public}s traceFlow=%{public}s "
+                "vnPerfSummary=%{public}s vnPerfLog=%{public}s mesaLogLevel=%{public}s",
+                backend ? backend : "", dxvkVersion ? dxvkVersion : "",
+                dllOverrides ? dllOverrides : "", dllPath ? dllPath : "",
+                dxvkRoot ? dxvkRoot : "", present(x64D3d11), present(x64Dxgi),
+                present(x86D3d11), present(x86Dxgi),
+                profile ? profile : "", logLevel ? logLevel : "",
+                logPath ? logPath : "", dumpPath ? dumpPath : "",
+                traceSampled ? traceSampled : "", traceFlow ? traceFlow : "",
+                vnPerfSummary ? vnPerfSummary : "",
+                vnPerfLog ? vnPerfLog : "",
+                mesaLogLevel ? mesaLogLevel : "");
+}
+
+static void prepare_host_elf_environment(const char *homeDir)
+{
+    std::vector<std::string> removeKeys;
+    for (char **entry = environ; entry && *entry; ++entry) {
+        const char *separator = strchr(*entry, '=');
+        if (!separator) continue;
+        std::string key(*entry, (size_t)(separator - *entry));
+        if (key.rfind("BOX64_", 0) == 0 || key.rfind("VN_", 0) == 0 ||
+            key == "USE_LIBBOX64" || key == "VK_DRIVER_FILES" ||
+            key == "VK_ICD_FILENAMES" || key == "MESA_LOADER_DRIVER_OVERRIDE" ||
+            key == "LIBGL_DRIVERS_PATH")
+            removeKeys.push_back(std::move(key));
+    }
+    for (const std::string& key : removeKeys) unsetenv(key.c_str());
+
+    setenv("LD_LIBRARY_PATH",
+           "/data/app/bin:/usr/local/lib:/system/lib64/module:/system/lib64", 1);
+    setenv("PATH", "/usr/local/bin:/data/app/bin:/usr/bin:/vendor/bin", 1);
+    setenv("TMPDIR", WINE_TMPDIR, 1);
+    if (homeDir && homeDir[0]) setenv("HOME", homeDir, 1);
 }
 
 extern "C" void Main(NativeChildProcess_Args args)
@@ -372,10 +425,14 @@ extern "C" void Main(NativeChildProcess_Args args)
     argv[argc] = nullptr;
 
     bool guestElfMode = argc >= 2 && !strcmp(argv[0], "__winehua_guest_elf__");
-    if (guestElfMode) {
+    bool hostElfMode = argc >= 2 && !strcmp(argv[0], "__winehua_host_elf__");
+    if (guestElfMode || hostElfMode) {
         for (int i = 0; i < argc; ++i) argv[i] = argv[i + 1];
         argc--;
-        OH_LOG_INFO(LOG_APP, "[GuestChild] isolated x86_64 ELF=%{public}s", argv[0]);
+        if (hostElfMode)
+            OH_LOG_INFO(LOG_APP, "[HostChild] isolated native ELF=%{public}s", argv[0]);
+        else
+            OH_LOG_INFO(LOG_APP, "[GuestChild] isolated x86_64 ELF=%{public}s", argv[0]);
     }
 
     // 检查 __winehua_desktop__ 标记: 有 → desktop 模式, 需要传 env 给 wine
@@ -396,8 +453,10 @@ extern "C" void Main(NativeChildProcess_Args args)
 
     // 2. Step A: 设置 Wine 环境变量 baseline (硬编码默认值, 确保非 broker 路径可用)
     const char *winedebug = select_winedebug_profile(argc, argv);
-    OH_LOG_INFO(LOG_APP, "[WineChild] WINEDEBUG=%{public}s", winedebug);
-    setup_wine_env(binDir, homeDir, winedebug);
+    if (!hostElfMode) {
+        OH_LOG_INFO(LOG_APP, "[WineChild] WINEDEBUG=%{public}s", winedebug);
+        setup_wine_env(binDir, homeDir, winedebug);
+    }
 
     // 3. 从父进程 fdList 读取 fds (按 fdName 区分)
     //    环境变量转发 fd (wine_env) 先读到缓冲区, 最后一步 apply
@@ -464,7 +523,7 @@ extern "C" void Main(NativeChildProcess_Args args)
         free(envBuf);
     }
 
-    log_d3d_environment_summary();
+    if (!hostElfMode) log_d3d_environment_summary();
 
     // 覆盖 per-process fd 变量 (转发 env 中的是父进程 fd 号, 本进程无效)
     // 等价于 fork+exec 路径中 exec_wineloader 的 putenv("WINESERVERSOCKET")
@@ -481,6 +540,37 @@ extern "C" void Main(NativeChildProcess_Args args)
         setenv("WINE_OHOS_AUDIO_BOOTSTRAP_FD", buf, 1);
         setenv("WINE_OHOS_AUDIO_PROTOCOL_VERSION", "1", 1);
         OH_LOG_INFO(LOG_APP, "[WineChild] AUDIO fd=%{public}d (own fd)", audioFd);
+    }
+
+    if (hostElfMode) {
+        prepare_host_elf_environment(homeDir);
+        const char *requestedCwd = getenv("WINEHUA_WORKING_DIRECTORY");
+        if (requestedCwd && requestedCwd[0] && chdir(requestedCwd) != 0) {
+            OH_LOG_ERROR(LOG_APP, "[HostChild] chdir(%{public}s) failed: %{public}s",
+                         requestedCwd, strerror(errno));
+            free(buf);
+            return;
+        }
+        OH_LOG_INFO(LOG_APP,
+                    "[HostChild] loading signed replay module for=%{public}s loader=system-vulkan",
+                    argv[0]);
+        void *module = dlopen("libwinehua_host_heaven_replay.so", RTLD_NOW | RTLD_LOCAL);
+        if (!module) {
+            OH_LOG_ERROR(LOG_APP, "[HostChild] replay module load failed: %{public}s", dlerror());
+            free(buf);
+            return;
+        }
+        auto replayMain = reinterpret_cast<int (*)(int, char **)>(
+            dlsym(module, "winehua_host_replay_main"));
+        if (!replayMain) {
+            OH_LOG_ERROR(LOG_APP, "[HostChild] replay entry lookup failed: %{public}s", dlerror());
+            free(buf);
+            return;
+        }
+        int replayResult = replayMain(argc, argv);
+        OH_LOG_INFO(LOG_APP, "[HostChild] replay module returned rc=%{public}d", replayResult);
+        free(buf);
+        return;
     }
 
     // 确保 WINEPREFIX 目录存在

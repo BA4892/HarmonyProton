@@ -46,8 +46,8 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
                                       const std::string& prefixDir = WINE_PREFIX);
 
 // Add the managed product D3D backend overlay to a process environment. The
-// overlay is opt-in: normal desktop launches remain WineD3D unless the caller
-// explicitly selects a managed dxvk_* profile.
+// caller selects the product backend once per Wine session; the default is
+// dxvk_legacy, while wined3d remains an explicit compatibility fallback.
 void AppendD3dBackendEnv(std::vector<std::string>& env,
                          const std::string& d3dBackend,
                          const std::string& binDir);

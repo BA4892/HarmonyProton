@@ -1,11 +1,46 @@
 # WineHua Phase 2 DXVK Status Memo
 
-> Last updated: 2026-07-23
+> Last updated: 2026-07-25
 >
 > Purpose: this is the durable handoff for resuming the DXVK investigation.
 > Read this file before changing DXVK, Venus present, SmokeRunner, or game launch
 > code. Update it whenever a conclusion, gate result, commit, HAP, or primary
 > blocker changes.
+
+### 2026-07-23 Heaven pipeline-create replay isolation (current)
+
+The captured Heaven material replay still fails at `vkCreateGraphicsPipelines`
+with `VK_ERROR_INITIALIZATION_FAILED` before any queue submit. The following
+layout matrix was run on the physical Maleoon 910 Venus device:
+
+    no-set, empty, small, ubo, dynamic, sampler, sampled, full: all FAIL
+
+The small layout was corrected to fragment-only UBO stage flags. A built-in
+constant fragment shader with specialization omitted also fails. Changing the
+replay target from 64x64 to 64x4 (the passing depth-cube graphics replay extent)
+does not change the failure. This rules out descriptor binding count/type,
+unknown SpecId 1216, and target extent as the primary cause.
+
+The Heaven replay init path is now aligned with the passing graphics replay:
+minimal instance create, graphics+compute queue selection, and supported
+storage-image read/write feature enablement. A temporary host trace records
+every graphics pipeline's stage count, shader stage/module handles, pipeline
+layout, render pass, fixed-state pointers, and the host return code under
+`WINEHUA_VKR_TRACE_PIPELINE=1`. The NCP diagnostic environment currently
+injects this flag for the next physical-device run; remove it after collecting
+the comparison trace so normal game runs do not carry pipeline log overhead.
+
+Latest diagnostic HAP:
+
+    built 2026-07-23 23:07:47 +0800
+    SHA-256 fe2341f0b069b00af9f9edcee3c15970d95bf87d4192b053d9cb91221cca6c5f
+
+The device was disconnected after this build (`hdc list targets` empty), so the
+aligned-init and host-trace A/B is not yet validated. On reconnect, install
+this HAP and run `venus-heaven-material-layout` with the captured final
+vertex/fragment SPIR-V. Archive `hilog.txt` and compare the Heaven records with
+`venus-depth-cube-graphics` golden records before changing DXVK or Vulkan
+semantics.
 
 ### 2026-07-23 Heaven Host constant-buffer identity result (current)
 
@@ -1043,3 +1078,236 @@ Then commit in reviewable units:
 
 Update this memo with the new commit hashes, HAP hash, archive path, confirmed
 root cause, and remaining gates immediately after those commits.
+
+## 12. 2026-07-25 Heaven draw0 exact replay A/B
+
+The latest HAP was installed on physical device `5KPBB25818203996`:
+
+    HAP SHA-256: 52eea041108a49966ad6e3aa034e13cb85413f94a5eca85584befe73cf47690d
+    embedded wine-data.zip matches assembled payload
+
+The new `venus-heaven-draw0` suite ran four exact variants using the same
+captured vertex/fragment SPIR-V, six full-mip sampled images, ten UBOs, index
+and vertex buffers, and descriptor bindings 0-21:
+
+    D:\MyProject\winehua-logs\automation\phase2-20260725-090001
+
+All four Venus/Maleoon runs passed pipeline creation and one queue submit:
+
+    loaded:  checksum 0xf0feb108, changedPixels 20508
+    clear:   checksum 0x2e0fd6ba, changedPixels 27076
+    nodepth: checksum 0x6248cf31, changedPixels 27076
+    always:  checksum 0x6248cf31, changedPixels 27076
+
+The same four captures were rebuilt with the current replay source and run on
+Lavapipe. Every variant also passed:
+
+    loaded:  checksum 0x8fd624cb, changedPixels 14888
+    clear:   checksum 0x44e63bc0, changedPixels 27076
+    nodepth: checksum 0xabeac79c, changedPixels 27076
+    always:  checksum 0xabeac79c, changedPixels 27076
+
+The loaded/clear/nodepth/always ordering is therefore identical on both
+drivers. The raw outputs differ between Maleoon and Lavapipe, but the device
+does not lose the draw, fail pipeline creation, or ignore depth compare. The
+physical logs show `vkCreateGraphicsPipelines returned 0` for all four tests,
+and no device-lost or replay failure. The exact replay still uses CPU readback
+only as an offline diagnostic (`cpuReadBytes=1843200`); it has no per-frame
+`vkDeviceWaitIdle`.
+
+Conclusion: the captured draw does not support a global descriptor, SPIR-V,
+or generic Venus sampled-image failure. The remaining Heaven defect is in the
+real frame's pass/state contract or in a later post-processing attachment. The
+next diagnostic must capture per-pass color/depth/HDR/bloom metadata and the
+first incorrect intermediate image, while preserving the passing draw0 suite.
+Do not change stable DXVK descriptor or shadow synchronization based on this
+A/B alone.
+
+## 13. 2026-07-25 Heaven f647 RGBA16F alignment finding
+
+The exact frame 180 / pass 2 / draw 390 replay initially appeared to fail
+before any draw on Maleoon:
+
+    expected baseline checksum: 0x1f10f6f7
+    Maleoon baseline checksum:  0x3ca290f3
+    changed pixels:             230400 / 230400
+
+Raw-output comparison proved that this was not floating-point precision,
+channel swizzle, render-pass load/store, or general shadow corruption:
+
+    device[4:] == captured_golden[:-4]  (1843196 / 1843196 bytes)
+
+The leading device bytes were `ff ff ff 00`, exactly matching the final D24S8
+texel immediately before the RGBA16F capture in the shared upload buffer. The
+replay's RGBA16F source offset was:
+
+    target_upload_offset = 22893908
+    target_upload_offset % 4 = 0
+    target_upload_offset % 8 = 4
+
+This is Vulkan-valid four-byte alignment, but Maleoon behaves as if the
+R16G16B16A16_SFLOAT copy offset must be aligned to the full eight-byte texel
+and rounds the source down by four bytes. The replay now uses the stricter,
+still-valid texel-size alignment for its RGBA16F source.
+
+Important scope limit: DXVK 1.10.3's `copyImageHostData` already allocates its
+staging slice with `CACHE_LINE_SIZE` alignment. Do not add a speculative DXVK
+alignment quirk based on this replay artifact. First prove an actual DXVK copy
+uses an offset that is four-byte aligned but not texel aligned.
+
+Reference verification after the replay fix:
+
+    Lavapipe aligned baseline: PASS
+    checksum:                  0x1f10f6f7
+    changed pixels:            0
+
+Artifacts:
+
+    build/diagnostics/heaven-f647-lavapipe/result-baseline-aligned.json
+    build/diagnostics/heaven-f647-lavapipe/output-baseline-aligned.rgba
+
+The rebuilt ARM64 artifact is ready but was not installed because HDC lost the
+physical target immediately before deployment:
+
+    HAP timestamp: 2026-07-25 13:35:00
+    HAP SHA-256:   744a13a7a70ce0b57c573b4235f15b17ad7bf77d32fa0375328267540f7065eb
+    wine-data:     c83480cee5ab4f63dcddbeb947177d5be1e6a4c58f8dad568c0d808aec1578e3
+    Guest replay:  x86-64
+    Host libentry: AArch64
+
+The next connected-device sequence is:
+
+1. Run `venus-heaven-f647` with the default GPU shadow upload and require the
+   aligned no-draw baseline to pass bit-exactly.
+2. If it still fails, run the new `shadow-precise-cpu-upload` A/B profile. It
+   changes only Host shadow upload from `vkCmdUpdateBuffer` to mapped flush.
+3. Once the baseline passes, compare loaded/EQUAL, no-depth, and ALWAYS exact
+   draw outputs against Lavapipe. Only then resume shader, blend, depth, or
+   descriptor investigation.
+4. Preserve the existing DXVK staging alignment until an actual DXVK trace
+   proves a violating offset. Do not convert this diagnostic artifact into a
+   global product workaround.
+
+## 14. 2026-07-25 Heaven final-pass dual-source resolution
+
+The real-frame capture reduced the visible Heaven corruption to frame 120,
+pass 2, draw 666. Draws 0-665 already contain the HDR scene, materials, roads,
+and buildings. Draw 666 is a full-screen triangle using:
+
+    VS_1d847df94f10700d88316f63fcf6acbea4717f78
+    FS_867aa8b9e85be8db453848a261c10fac3249e09d
+
+The draw requests D3D11 dual-source blending equivalent to:
+
+    result.rgb = o0.rgb + destination.rgb * o1.rgb
+
+Maleoon reports `dualSrcBlend = false`. This is a valid Vulkan implementation
+because the feature is optional. Relaxing DXVK's FL11 feature gate therefore
+was not sufficient: the native dual-source pipeline had undefined behavior.
+
+Two DXVK issues were fixed:
+
+1. The 1.10.3 SPIR-V scanner matched `Location 1` without restricting the
+   variable to `StorageClass Output`. A fragment input at the same location
+   could overwrite the secondary-output record. The scanner now records only
+   output variables.
+2. The new two-pass emulation initially used an `unordered_set` of output IDs
+   and stopped as soon as it found `o1`. When iteration visited `o1` before
+   `o0`, `m_o0LocOffset` stayed zero and the secondary variant was not remapped.
+   The first pass therefore calculated `destination *= o0`, and the second
+   pass added `o0`. It now stops only after both output offsets are known.
+
+The constrained emulation is enabled only when the Host lacks dual-source
+blend and the draw matches the side-effect-free single-target formula used by
+Heaven. It performs:
+
+    pass 1: destination = destination * o1
+    pass 2: destination = destination + o0
+
+There is no CPU frame readback or upload. Diagnostic modes can expose `o0`,
+`o1`, either individual arithmetic pass, or the default two-pass result via
+`DXVK_WINEHUA_DUAL_SRC_MODE`.
+
+Physical-device evidence:
+
+    HAP SHA-256:       361993ef598099db6eb74499121c138de3ce4cf503efd6846241d48850cee5b0
+    wine-data SHA-256: b848b3dba232d7e4c1bc63f683050130363185751c6f101214b1ee772ae178a9
+    x64 d3d11.dll:     59349b3b1d5f7e17dcaeb87b232511d818e3bbddc8d67e301ee0d4587ea31661
+    device DLL hash:   matches packaged x64 DLL
+
+After the loop fix, the log contains three distinct final shader variants:
+
+    native dual-source: 1e318dab8aee558a
+    secondary output:   991e93e9aa8f258a
+    primary output:     b53dc1bcd0485c2a
+
+The default two-pass physical screenshot restores the ship's wood, metal,
+ropes, normal detail, and lighting:
+
+    D:\MyProject\winehua-logs\manual\heaven-dual-src-scan-fix-twopass-20260725
+
+The x64 exhaustive D3D11 smoke and visible cube pass after this change. The
+cube rendered 552 frames with `angleRegressions = 0`. The first x86 smoke run
+timed out before producing a result and is being treated as a separate
+automation/runtime regression until its single allowed retry completes:
+
+    D:\MyProject\winehua-logs\automation\phase2-20260725-215522
+
+Next work is no longer broad sampled-image correctness. It is:
+
+1. Finish the x86 retry and preserve x64/x86 smoke coverage.
+2. Measure Heaven frame pacing with continuous screenshots and split
+   render/fence/present timing; distinguish pacing stalls from old-frame
+   regressions.
+3. Measure the one extra full-screen draw cost. Optimize only after the timing
+   split; do not weaken the correct two-pass ordering.
+4. Add a focused dual-source smoke that has both fragment input and output at
+   Location 1 and checks the emulated `o0 + destination * o1` result.
+
+## 15. 2026-07-26 frame-order investigation
+
+The `shadow-precise-strong-ring-trace` profile now carries a read-only trace
+through the render server, NCP presenter, and the main NativeImage consumer.
+The trace records a common serial and monotonic timestamp for:
+
+    enter -> source-fence-ready -> target-acquired -> copy-submitted
+    -> queue-present-returned -> source-release-ready -> published
+
+The main consumer records signal delta, coalesced callbacks, consumed image
+timestamp delta, duplicate timestamps, and timestamp regressions. This does
+not change fence, barrier, drop-buffer, or fallback behavior.
+
+The continuous Heaven run is archived at:
+
+    D:\MyProject\winehua-logs\manual\heaven-stage-trace-20260726-r3
+
+It produced 377 NCP/main frames. The observed invariants were:
+
+    NCP serial: 1..377, serial_regress=0
+    NativeImage timestamp: monotonic, timestamp_regress=0
+    signal_delta: always 1
+    coalesced callbacks: 0
+    duplicate timestamps: 0
+    source image ring: alternating two source handles in serial order
+    NCP target ring: 0,1,2,0,1,2,... in serial order
+
+The first seven present calls with serial 1 were startup publication retries
+returning `-EAGAIN` before the SurfaceQueue target attached. They did not
+publish a frame and must not be interpreted as replayed history.
+
+The frame interval distribution was approximately p50=158 ms, p95=323 ms,
+p99=565 ms, with six intervals above 500 ms and two above 1 s. The largest
+intervals were 17.8 s and 5.2 s. NCP present itself remained ordered and
+reported no throttling; the host shadow-to-host synchronization had p50 about
+26 ms, p95 about 218 ms, p99 about 324 ms, and a maximum about 484 ms.
+
+Current conclusion: there is no evidence that an old serial or old NativeImage
+timestamp is submitted again. The visible back-and-forth is currently better
+explained by a long producer/shadow stall, during which the compositor keeps
+the last valid buffer, followed by a large scene jump when a new frame arrives.
+
+Do not implement stale-frame dropping, remove fences, disable precise shadow
+sync, or switch to CPU fallback until a trace records a real serial or
+timestamp regression. Next investigation is to split the long producer gap
+between guest command generation, shadow dirty-range synchronization, and
+present dispatch; optimize only the measured dominant segment.

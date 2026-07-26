@@ -79,8 +79,18 @@ const char* PresentModeName(VkPresentModeKHR mode)
 
 bool TraceFrameOrder()
 {
-    const char* mode = std::getenv("VKR_WINEHUA_SHADOW_FROM_HOST");
-    return mode && (!std::strcmp(mode, "none") || !std::strcmp(mode, "precise"));
+    const char* trace = std::getenv("VKR_WINEHUA_SHADOW_TRACE");
+    return trace && trace[0] == '1' && !trace[1];
+}
+
+void TracePresentStage(const char* stage, uint32_t serial, uint64_t sourceImage)
+{
+    if (!TraceFrameOrder()) return;
+    OH_LOG_INFO(LOG_APP,
+                "[VENUS-TRACE][NCP] serial=%{public}u stage=%{public}s "
+                "source=0x%{public}llx timestamp=%{public}llu",
+                serial, stage, static_cast<unsigned long long>(sourceImage),
+                static_cast<unsigned long long>(NowNs()));
 }
 
 VkPipelineStageFlags SourceStage(VkImageLayout layout)
@@ -204,6 +214,7 @@ struct VenusSurfaceQueueTarget::Impl {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const uint64_t presentStartNs = NowNs();
+        TracePresentStage("enter", serial, image);
         if (nextPresentDeadlineNs) *nextPresentDeadlineNs = 0;
         if (!window_) {
             OH_LOG_ERROR(LOG_APP, "[VENUS-PRESENT][NCP] present no window");
@@ -241,6 +252,7 @@ struct VenusSurfaceQueueTarget::Impl {
         const uint64_t waitFenceUs = (NowNs() - stageStartNs) / 1000;
         if (result == VK_TIMEOUT) return 1;
         if (result != VK_SUCCESS) return FailLocked("wait fence", result, serial);
+        TracePresentStage("source-fence-ready", serial, image);
 
         uint32_t imageIndex = 0;
         stageStartNs = NowNs();
@@ -268,6 +280,7 @@ struct VenusSurfaceQueueTarget::Impl {
         }
         if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
             return FailLocked("acquire", result, serial);
+        TracePresentStage("target-acquired", serial, image);
 
         vkResetFences(device_, 1, &frame.complete);
         vkResetCommandBuffer(frame.command, 0);
@@ -387,6 +400,7 @@ struct VenusSurfaceQueueTarget::Impl {
         result = vkQueueSubmit(queue_, 1, &submit, frame.complete);
         const uint64_t submitUs = (NowNs() - stageStartNs) / 1000;
         if (result != VK_SUCCESS) return FailLocked("queue submit", result, serial);
+        TracePresentStage("copy-submitted", serial, image);
 
         VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
         present.waitSemaphoreCount = 1;
@@ -397,6 +411,7 @@ struct VenusSurfaceQueueTarget::Impl {
         stageStartNs = NowNs();
         result = vkQueuePresentKHR(queue_, &present);
         const uint64_t queuePresentUs = (NowNs() - stageStartNs) / 1000;
+        TracePresentStage("queue-present-returned", serial, image);
 
         /* Vulkan only requires external synchronization while a host queue
          * command is executing. Keep the synchronous completion wait, but do
@@ -449,6 +464,7 @@ struct VenusSurfaceQueueTarget::Impl {
         if (fenceResult != VK_SUCCESS)
             return FailLocked("source release fence", fenceResult, serial);
         targetInitialized_[imageIndex] = true;
+        TracePresentStage("source-release-ready", serial, image);
 
         if (result == VK_ERROR_OUT_OF_DATE_KHR) {
             swapchainDirty_ = true;
@@ -487,6 +503,7 @@ struct VenusSurfaceQueueTarget::Impl {
                             swapchainImages_[imageIndex])),
                         static_cast<unsigned long long>(timestamp));
         }
+        TracePresentStage("published", serial, image);
         if (framesPresented_ == 1 || !(framesPresented_ % 120)) {
             const uint64_t elapsedNs = frameEndNs - firstPresentedNs_;
             const uint64_t fpsX100 = elapsedNs && framesPresented_ > 1

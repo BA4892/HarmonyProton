@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('baseline', 'direct-fence-wait', 'no-remote-sync', 'no-dynamic-flush', 'fence-feedback', 'shadow-none', 'shadow-trace', 'shadow-to-host-explicit', 'shadow-precise', 'shadow-precise-single-ring', 'shadow-precise-sync-submit', 'shadow-precise-strong-ring', 'shadow-precise-strong-ring-async-present', 'shadow-precise-strong-ring-fence-poll', 'shadow-precise-strong-ring-mailbox', 'shadow-precise-direct-fence', 'shadow-precise-retain-shmem')]
+    [ValidateSet('baseline', 'direct-fence-wait', 'no-remote-sync', 'no-dynamic-flush', 'fence-feedback', 'shadow-none', 'shadow-trace', 'shadow-to-host-explicit', 'shadow-precise', 'shadow-precise-single-ring', 'shadow-precise-sync-submit', 'shadow-precise-strong-ring', 'shadow-precise-strong-ring-perf', 'shadow-precise-dirty-ring', 'shadow-precise-dirty-ring-perf', 'shadow-precise-dirty-ring-no-merge', 'shadow-precise-dirty-ring-no-upload', 'shadow-precise-dirty-ring-no-upload-fast', 'shadow-precise-strong-ring-async-present', 'shadow-precise-strong-ring-fence-poll', 'shadow-precise-strong-ring-mailbox', 'shadow-precise-direct-fence', 'shadow-precise-retain-shmem')]
     [string]$PerfProfile = 'shadow-precise-strong-ring',
     [string]$GamePath = 'C:\smoke\x64\winehua_d3d_switch_cube.exe',
     [ValidateRange(8, 120)]
@@ -44,9 +44,10 @@ function Get-FrameMarker {
         # The marker is a blue-dominant quad in the upper-left part of the D3D
         # client. R and G store the high/low nibbles as 4 + nibble * 8.
         $maxX = [Math]::Min($bitmap.Width - 1, [Math]::Max(260, [int]($bitmap.Width * 0.22)))
-        # The OHNativeImage transform currently displays D3D positive Y in the
-        # lower half of the Wine client, so the marker appears at lower-left.
-        $minY = [Math]::Max(90, [int]($bitmap.Height * 0.60))
+        # Scan both historical lower-left and current upper-left placements.
+        # The blue-dominance threshold excludes the desktop background, while
+        # the X bound keeps the rotating cube out of the marker sample.
+        $minY = [Math]::Min($bitmap.Height - 1, 32)
         $maxY = [Math]::Min($bitmap.Height - 1, [int]($bitmap.Height * 0.90))
         [long]$sumR = 0
         [long]$sumG = 0
@@ -67,7 +68,12 @@ function Get-FrameMarker {
                 }
             }
         }
-        if ($count -lt 500) {
+        # The WineHua shell contains small blue icons that can satisfy the
+        # colour test during application startup.  The D3D marker occupies
+        # roughly 6,500 samples at the native Pad resolution, while those
+        # icons stay below 600; require enough area to prove that the actual
+        # test surface is visible before accepting a marker value.
+        if ($count -lt 1500) {
             return [pscustomobject]@{ valid = $false; pixels = $count; value = $null }
         }
 

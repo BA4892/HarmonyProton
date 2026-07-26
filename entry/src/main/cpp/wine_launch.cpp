@@ -253,15 +253,34 @@ static void AppendStableDesktopDxvkEnv(std::vector<std::string>& env,
 {
     if (params.d3dBackend.rfind("dxvk_", 0) != 0) return;
 
+    /* SetHostShadowProfile carries the selected diagnostic profile through
+     * the host-side broker environment before Explorer is launched.  Keep
+     * the desktop descendants on that explicit profile instead of replacing
+     * it with the product default below. */
+    const char* shadowTrace = getenv("VKR_WINEHUA_SHADOW_TRACE");
+    const bool guestPerf = shadowTrace && !strcmp(shadowTrace, "perf");
+
     /* Explorer-launched programs inherit the desktop process environment and
      * bypass Index.d3dLaunchEnvironment(). Keep the product-correct settings
      * here without changing the explicit A/B profiles used by runWineProgram. */
-    env.push_back("DXVK_LOG_LEVEL=info");
+    /* Product sessions retain warnings and errors without formatting DXVK's
+     * informational startup stream. Smoke and explicit diagnostics override
+     * this through runWineProgram's per-process environment. */
+    env.push_back("DXVK_LOG_LEVEL=warn");
     env.push_back("DXVK_LOG_PATH=C:\\windows\\temp");
     env.push_back("BOX64_DYNAREC_WEAKBARRIER=0");
-    env.push_back("WINEHUA_PERF_PROFILE=shadow-precise-strong-ring");
+    env.push_back(std::string("WINEHUA_PERF_PROFILE=") +
+                  (guestPerf ? "shadow-precise-strong-ring-perf"
+                             : "shadow-precise-strong-ring"));
     env.push_back("DXVK_WINEHUA_PRECISE_SHADOW=1");
     env.push_back("VN_WINEHUA_STRONG_RING_BARRIER=1");
+    if (guestPerf) {
+        env.push_back("VN_WINEHUA_PERF_SUMMARY=1");
+        env.push_back("VN_WINEHUA_PERF_LOG=/storage/Users/currentUser/Download/app.hackeris.winehua/winehua_guest_ring_perf.log");
+        /* vn_log uses MESA_LOG_DEBUG.  Raise only the explicit diagnostic
+         * profile so the Guest ring summary survives the OHOS logger filter. */
+        env.push_back("MESA_LOG_LEVEL=debug");
+    }
 }
 
 static void PrepareDesktopSessionGraphicsEnv(const LaunchParams& params)
@@ -351,10 +370,20 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
     setenv("PROCESSBROKER", WINE_BROKER_SOCKET, 1);
 
     // -- wineboot --init --
-    bool prefixReady = IsWinePrefixInitialized(p->prefixDir);
+    const std::string initMarker = p->prefixDir + "/.winehua-init-in-progress";
+    bool prefixReady = IsWinePrefixInitialized(p->prefixDir)
+        && access(initMarker.c_str(), F_OK) != 0;
 
     if (!prefixReady) {
         OH_LOG_INFO(LOG_APP, "[Launch-Async] prefix not initialized, preparing WoW64 and running wineboot --init...");
+        if (FILE* marker = fopen(initMarker.c_str(), "w")) {
+            fputs("wineboot\n", marker);
+            fclose(marker);
+        } else {
+            OH_LOG_ERROR(LOG_APP, "[Launch-Async] cannot create prefix init marker: %{public}s",
+                         initMarker.c_str());
+            return false;
+        }
         auto* ws = WaylandServer::GetInstance();
         ws->SetDesktopRootRecognitionEnabled(false);
         // wineboot creates shell-owned helper windows while initializing a fresh
@@ -392,10 +421,21 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
         }
         char procPath[64];
         snprintf(procPath, sizeof(procPath), "/proc/%d", childPid);
+        bool winebootCompleted = false;
         for (int i = 0; i < 120; i++) {
-            if (access(procPath, F_OK) != 0) break;
+            if (access(procPath, F_OK) != 0) {
+                winebootCompleted = true;
+                break;
+            }
             usleep(500000);
         }
+        if (!winebootCompleted) {
+            OH_LOG_ERROR(LOG_APP, "[Launch-Async] wineboot process timeout, keeping init marker");
+            if (gStateTsfn)
+                napi_call_threadsafe_function(gStateTsfn, strdup("wineboot-failed"), napi_tsfn_blocking);
+            return false;
+        }
+        unlink(initMarker.c_str());
         OH_LOG_INFO(LOG_APP, "[Launch-Async] wineboot completed");
         ws->SetDesktopRootRecognitionEnabled(true);
         ws->PromotePendingDesktopRoot();

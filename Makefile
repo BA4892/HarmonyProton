@@ -46,6 +46,7 @@ DEPS_SENTINEL   := $(BUILD_DIR)/sysroot-ext/usr/lib/x86_64-linux-ohos/libfreetyp
 WINE_SENTINEL   := $(BUILD_DIR)/wine-native/tools/winegcc/winegcc
 GUEST_GFX_SENTINEL := $(BUILD_DIR)/guest_gfx/$(GUEST_ARCH)/winehua-guest-gfx.env
 GUEST_VULKAN_SENTINEL := $(BUILD_DIR)/guest_vulkan/$(GUEST_ARCH)/manifest.json
+HOST_VULKAN_SOURCE := $(ROOT)/smoke/venus_heaven_material_replay.c
 
 # Guest runtime build scripts can also be invoked directly while iterating on
 # Mesa/Venus. Track their manifests as assemble inputs so a subsequent
@@ -89,6 +90,30 @@ $(STAMPS)/arm64-v8a $(STAMPS)/x86_64:
 	mkdir -p $@
 
 # ============================================================
+# host-vulkan — native Host Vulkan exact replay diagnostic
+# ============================================================
+.PHONY: host-vulkan
+host-vulkan: $(foreach a,$(ARCHES),$(STAMPS)/$(a)/host-vulkan)
+
+define host_vulkan_rule
+.PHONY: host-vulkan-$(1)
+host-vulkan-$(1): $$(STAMPS)/$(1)/host-vulkan
+
+$$(STAMPS)/$(1)/host-vulkan: $(SCRIPTS)/build_ohos_host_vulkan.sh $(SCRIPTS)/env.sh \
+	$(HOST_VULKAN_SOURCE) FORCE | $$(STAMPS)/$(1)
+	@manifest="$(BUILD_DIR)/host_vulkan/$(1)/manifest.json"; \
+	module="$(BUILD_DIR)/host_vulkan/$(1)/lib/libwinehua_host_heaven_replay.so"; \
+	if [ -f $$@ ] && [ -f "$$$$manifest" ] && [ -f "$$$$module" ] && \
+	    ! [ "$(SCRIPTS)/build_ohos_host_vulkan.sh" -nt $$@ ] && \
+	    ! [ "$(HOST_VULKAN_SOURCE)" -nt $$@ ]; then \
+	    echo "  [host-vulkan/$(1)] up to date"; \
+	else \
+	    NATIVE_ARCH=$(1) bash $(SCRIPTS)/build_ohos_host_vulkan.sh && touch $$@; \
+	fi
+endef
+$(foreach a,arm64-v8a x86_64,$(eval $(call host_vulkan_rule,$(a))))
+
+# ============================================================
 # deps — 交叉编译依赖 → build/sysroot-ext/ (架构无关)
 # ============================================================
 .PHONY: deps
@@ -100,6 +125,8 @@ $(STAMPS)/deps: $(SCRIPTS)/build_deps.sh $(SCRIPTS)/build_ohos_guest_gfx.sh \
 	$(ROOT)/smoke/venus_depth_cube_probe.inc \
 	$(ROOT)/smoke/venus_depth_cube_graphics_replay.inc \
 	$(ROOT)/smoke/venus_fullscreen_triangle.vert \
+	$(ROOT)/smoke/venus_heaven_material.vert \
+	$(ROOT)/smoke/venus_heaven_material_replay.c \
 	$(ROOT)/smoke/venus_depth_cube_golden.frag \
 	$(ROOT)/smoke/venus_depth_cube_fail.spvasm \
 	$(ROOT)/smoke/venus_storage_write.comp \
@@ -139,6 +166,8 @@ $(STAMPS)/deps: $(SCRIPTS)/build_deps.sh $(SCRIPTS)/build_ohos_guest_gfx.sh \
 	    ! [ "$(ROOT)/smoke/venus_depth_cube_probe.inc" -nt $@ ] && \
 	    ! [ "$(ROOT)/smoke/venus_depth_cube_graphics_replay.inc" -nt $@ ] && \
 	    ! [ "$(ROOT)/smoke/venus_fullscreen_triangle.vert" -nt $@ ] && \
+	    ! [ "$(ROOT)/smoke/venus_heaven_material.vert" -nt $@ ] && \
+	    ! [ "$(ROOT)/smoke/venus_heaven_material_replay.c" -nt $@ ] && \
 	    ! [ "$(ROOT)/smoke/venus_depth_cube_golden.frag" -nt $@ ] && \
 	    ! [ "$(ROOT)/smoke/venus_depth_cube_fail.spvasm" -nt $@ ] && \
 	    ! [ "$(ROOT)/smoke/venus_storage_write.comp" -nt $@ ] && \
@@ -295,6 +324,7 @@ $$(STAMPS)/$(1)/assemble: $(SCRIPTS)/assemble.sh $(SCRIPTS)/env.sh $(DXVK_SENTIN
 	$(ROOT)/smoke/winehua_d3d_switch_cube.c \
 	$(ROOT)/smoke/winehua_win32_driver.c \
 	$$(STAMPS)/deps $$(STAMPS)/wine-$(1) $$(STAMPS)/$(1)/native \
+	$$(STAMPS)/$(1)/host-vulkan \
 	$$(ASSEMBLE_GUEST_INPUTS) | $$(STAMPS)/$(1)
 	@echo "=== assemble ($(1)) ==="
 	NATIVE_ARCH=$(1) GUEST_ARCH=$(GUEST_ARCH) BUILD_GUEST_GFX=$(BUILD_GUEST_GFX) bash $(SCRIPTS)/assemble.sh
@@ -351,6 +381,7 @@ help:
 	@echo "  make wine      # Wine + wineserver"
 	@echo "  make box64     # Box64 (仅 arm64)"
 	@echo "  make native    # Native compositor 依赖"
+	@echo "  make host-vulkan # Host Vulkan exact replay"
 	@echo "  make assemble  # 组装布局"
 	@echo "  make hap       # HAP 打包 + 签名"
 	@echo ""

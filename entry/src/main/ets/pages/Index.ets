@@ -89,7 +89,7 @@ interface ProcessInfo {
 @Component
 struct Index {
   @StorageLink('winehua.smoke.request') smokeRequestText: string = '';
-  @StorageLink('winehua.d3d.backend') d3dBackendText: string = 'wined3d';
+  @StorageLink('winehua.d3d.backend') d3dBackendText: string = 'dxvk_legacy';
   @StorageLink('winehua.d3d.preference') d3dPreferenceText: string = 'dxvk_legacy';
   @StorageLink('winehua.game.path') gamePathText: string = '';
   @StorageLink('winehua.game.args') gameArguments: string[] = [];
@@ -120,7 +120,7 @@ struct Index {
   private smokeRequest: SmokeLaunchRequest = defaultSmokeRequest();
   private smokeStarted: boolean = false;
   private cleanPrefixPrepared: boolean = false;
-  private d3dBackend: string = 'wined3d';
+  private d3dBackend: string = 'dxvk_legacy';
   private gameTestMode: boolean = false;
   private gameStarted: boolean = false;
 
@@ -376,7 +376,7 @@ struct Index {
     if (this.d3dBackend !== 'dxvk_legacy') return {};
     ensureDirectory(`${this.driveC}/smoke/results/desktop-dxvk`);
     const environment: Record<string, string> = {
-      'DXVK_LOG_LEVEL': 'info',
+      'DXVK_LOG_LEVEL': 'warn',
       'DXVK_LOG_PATH': 'C:\\smoke\\results\\desktop-dxvk',
       'WINEDEBUG': '-all',
       /* Venus uses a shared-memory command ring between the x86_64 guest and
@@ -386,6 +386,8 @@ struct Index {
       'BOX64_DYNAREC_WEAKBARRIER': '0',
       'WINEHUA_PERF_PROFILE': this.perfProfileText
     };
+    if (this.perfProfileText === 'shadow-precise-strong-ring-trace')
+      environment['VN_WINEHUA_PRESENT_TRACE'] = '1';
     if (this.perfProfileText === 'direct-fence-wait')
       environment['VN_WINEHUA_DIRECT_FENCE_WAIT'] = '1';
     else if (this.perfProfileText === 'no-remote-sync')
@@ -412,26 +414,43 @@ struct Index {
       this.perfProfileText === 'shadow-precise-single-ring' ||
       this.perfProfileText === 'shadow-precise-sync-submit' ||
       this.perfProfileText === 'shadow-precise-strong-ring' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-no-upload' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-no-upload-fast' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-perf' ||
+      this.perfProfileText === 'shadow-precise-strong-ring-trace' ||
+      this.perfProfileText === 'shadow-precise-strong-ring-perf' ||
       this.perfProfileText === 'shadow-precise-strong-ring-async-present' ||
       this.perfProfileText === 'shadow-precise-strong-ring-fence-poll' ||
       this.perfProfileText === 'shadow-precise-strong-ring-mailbox' ||
       this.perfProfileText === 'shadow-precise-direct-fence' ||
-      this.perfProfileText === 'shadow-precise-retain-shmem') {
+      this.perfProfileText === 'shadow-precise-retain-shmem' ||
+      this.perfProfileText === 'shadow-precise-cpu-upload') {
       environment['DXVK_WINEHUA_PRECISE_SHADOW'] = '1';
       environment['DXVK_WINEHUA_FLUSH_DYNAMIC_MAPPED'] = '1';
       environment['VN_WINEHUA_REMOTE_MEMORY_SYNC'] = '1';
       environment['VKR_WINEHUA_SHADOW_FROM_HOST'] = 'precise';
-      environment['VKR_WINEHUA_SHADOW_TRACE'] = '0';
+      environment['VKR_WINEHUA_SHADOW_TRACE'] =
+        this.perfProfileText === 'shadow-precise-strong-ring-trace' ? '1' : '0';
       if (this.perfProfileText === 'shadow-precise-single-ring')
         environment['VN_PERF'] = 'no_fence_feedback,no_query_feedback,no_multi_ring';
       if (this.perfProfileText === 'shadow-precise-sync-submit')
         environment['VN_PERF'] =
           'no_fence_feedback,no_query_feedback,no_async_queue_submit';
       if (this.perfProfileText === 'shadow-precise-strong-ring' ||
+        this.perfProfileText === 'shadow-precise-dirty-ring' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-no-upload' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-no-upload-fast' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-perf' ||
+        this.perfProfileText === 'shadow-precise-strong-ring-trace' ||
+        this.perfProfileText === 'shadow-precise-strong-ring-perf' ||
         this.perfProfileText === 'shadow-precise-strong-ring-async-present' ||
         this.perfProfileText === 'shadow-precise-strong-ring-fence-poll' ||
         this.perfProfileText === 'shadow-precise-strong-ring-mailbox')
         environment['VN_WINEHUA_STRONG_RING_BARRIER'] = '1';
+      if (this.perfProfileText === 'shadow-precise-strong-ring-perf' ||
+        this.perfProfileText === 'shadow-precise-dirty-ring-perf')
+        environment['VN_WINEHUA_PERF_SUMMARY'] = '1';
       if (this.perfProfileText === 'shadow-precise-direct-fence')
         environment['VN_WINEHUA_DIRECT_FENCE_WAIT'] = '1';
       if (this.perfProfileText === 'shadow-precise-retain-shmem')
