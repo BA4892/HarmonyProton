@@ -64,6 +64,15 @@ if ($GamePreset -eq 'heaven-dx11') {
     }
 }
 
+# Carry the DXVK half of the frame-association trace explicitly in the game
+# Want. The Host profile reaches the NCP through graphics-broker IPC, but it
+# does not itself guarantee that an arbitrary Wine child environment variable
+# survives Ability startup on every Harmony build.
+if ($PerfProfile -eq 'shadow-precise-dirty-ring-frame-assoc-trace' -and
+    -not $D3DEnvironment.ContainsKey('WINEHUA_DXVK_TRACE_CAMERA')) {
+    $D3DEnvironment['WINEHUA_DXVK_TRACE_CAMERA'] = '1'
+}
+
 $environmentPairs = @($D3DEnvironment.GetEnumerator() | Sort-Object { [string]$_.Key })
 if ($environmentPairs.Count -gt 32) {
     throw "At most 32 D3D environment overrides are supported"

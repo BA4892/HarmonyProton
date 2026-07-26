@@ -32,7 +32,7 @@ def parse_fields(line):
     return {key: value.rstrip(",") for key, value in FIELD_RE.findall(line)}
 
 
-def parse_wine_identity(path):
+def parse_wine_identity(path, requested_pid=None):
     client_to_guest = {}
     pending = collections.defaultdict(collections.deque)
     guest_submits_by_pid = collections.defaultdict(list)
@@ -49,16 +49,18 @@ def parse_wine_identity(path):
 
             match = DXVK_SUBMIT_RE.search(line)
             if match:
-                _, recording, client, _, frames_text = match.groups()
+                win_pid_text, recording, client, _, frames_text = match.groups()
                 mapped = client_to_guest.get(client)
                 frames = [int(value) for value in frames_text.split(",") if value]
                 if mapped:
                     pid, guest = mapped
-                    pending[(pid, guest)].append((int(recording), frames, client))
+                    pending[(pid, guest)].append((
+                        int(recording), frames, client, int(win_pid_text)))
                 else:
                     unjoined_dxvk.append({
                         "recording": int(recording), "frames": frames,
-                        "clientCmd": client, "reason": "missing-client-map",
+                        "clientCmd": client, "winPid": int(win_pid_text),
+                        "reason": "missing-client-map",
                     })
                 continue
 
@@ -72,25 +74,36 @@ def parse_wine_identity(path):
             guest_submits_by_pid[pid].append(entry)
             queue = pending[(pid, guest)]
             if queue:
-                recording, frames, client = queue.popleft()
+                recording, frames, client, win_pid = queue.popleft()
                 for frame in frames:
-                    frame_guest_index[frame] = {
+                    frame_guest_index[(pid, frame)] = {
                         "recording": recording,
                         "clientCmd": client,
                         "guestCmd": guest,
                         "cmdId": entry["cmdId"],
                         "guestIndex": index,
                         "unixPid": pid,
+                        "winPid": win_pid,
                     }
 
-    selected_pid = max(guest_submits_by_pid, key=lambda pid: len(guest_submits_by_pid[pid]))
+    selected_pid = requested_pid
+    if selected_pid is None:
+        selected_pid = max(
+            guest_submits_by_pid,
+            key=lambda pid: len(guest_submits_by_pid[pid]))
+    if selected_pid not in guest_submits_by_pid:
+        raise ValueError(f"requested Unix PID {selected_pid} has no Guest submits")
+    selected_frame_index = {
+        frame: value for (pid, frame), value in frame_guest_index.items()
+        if pid == selected_pid
+    }
     return {
         "selectedPid": selected_pid,
         "guestSubmits": guest_submits_by_pid[selected_pid],
-        "frameGuestIndex": {
-            frame: value for frame, value in frame_guest_index.items()
-            if value["unixPid"] == selected_pid
-        },
+        "selectedWinPids": sorted({
+            item["winPid"] for item in selected_frame_index.values()
+        }),
+        "frameGuestIndex": selected_frame_index,
         "unjoinedDxvk": unjoined_dxvk,
     }
 
@@ -195,6 +208,8 @@ def parse_host_ubo(path, minimum_timestamp):
                 "descriptorRange", "descriptorOffset", "bufferMemoryOffset",
                 "descriptorSequence", "setId", "arrayElement", "type",
                 "updateOffset", "updateBytes", "capacity",
+                "cmdId", "mappingSequence", "oldMappingSequence",
+                "newBufferId", "newDescriptorOffset", "newDescriptorRange",
             ):
                 if key in fields:
                     fields[key] = integer(fields[key])
@@ -202,12 +217,14 @@ def parse_host_ubo(path, minimum_timestamp):
     return phases, limits
 
 
-def parse_wine_ubo(path):
+def parse_wine_ubo(path, selected_win_pids=None):
     result = collections.defaultdict(dict)
     with path.open("r", encoding="utf-8", errors="replace") as source:
         for line in source:
             record = parse_record(line)
-            if record and record["binding"] in (3, 4):
+            if (record and record["binding"] in (3, 4) and
+                    (not selected_win_pids or
+                     record["pid"] in selected_win_pids)):
                 result[record["frame"]][record["binding"]] = record
     return result
 
@@ -237,9 +254,12 @@ def build_host_indices(phases):
 
 def build_focused_indices(phases):
     descriptors = collections.defaultdict(list)
+    bound_descriptors = collections.defaultdict(list)
     updates = collections.defaultdict(list)
     for item in phases["watched-descriptor"]:
         descriptors[(item.get("setId"), item.get("binding"))].append(item)
+    for item in phases["bound-descriptor"]:
+        bound_descriptors[(item.get("cmdId"), item.get("binding"))].append(item)
     for item in phases["watched-update"]:
         updates[(item.get("bufferId"), item.get("absoluteOffset"),
                  item.get("bytes"))].append(item)
@@ -247,9 +267,12 @@ def build_focused_indices(phases):
         items.sort(key=lambda item: (
             item.get("submitGeneration", 0),
             item.get("descriptorSequence", 0), item["timestamp"]))
+    for items in bound_descriptors.values():
+        items.sort(key=lambda item: (item["timestamp"],
+                                     item.get("mappingSequence", 0)))
     for items in updates.values():
         items.sort(key=lambda item: (item.get("submit", 0), item["timestamp"]))
-    return descriptors, updates
+    return descriptors, bound_descriptors, updates
 
 
 def previous_submit_timestamps(host_submits):
@@ -283,18 +306,33 @@ def bound_sets_for_submit(bind_events, host_item, previous_timestamp):
 
 
 def join_focused_binding(record, host_item, previous_timestamp, bind_events,
-                         focused_descriptors, focused_updates):
+                         focused_descriptors, focused_bound_descriptors,
+                         focused_updates):
     expected_hash = record["hash"][2:]
     size = record["bytes"]
+    direct = [item for item in focused_bound_descriptors.get(
+        (host_item["cmdId"], record["binding"]), [])
+        if item["timestamp"] <= host_item["timestamp"] and
+        (previous_timestamp is None or item["timestamp"] > previous_timestamp)]
+    if not direct:
+        prior = [item for item in focused_bound_descriptors.get(
+            (host_item["cmdId"], record["binding"]), [])
+            if item["timestamp"] <= host_item["timestamp"]]
+        direct = prior[-64:]
+
     set_ids = bound_sets_for_submit(bind_events, host_item, previous_timestamp)
     candidates = []
-    for set_id in set_ids:
-        descriptor_events = [item for item in focused_descriptors.get(
-            (set_id, record["binding"]), [])
-            if item.get("submitGeneration", 0) <= host_item["submit"]]
-        if not descriptor_events:
-            continue
-        descriptor = descriptor_events[-1]
+    descriptor_candidates = direct
+    if not descriptor_candidates:
+        for set_id in set_ids:
+            descriptor_events = [item for item in focused_descriptors.get(
+                (set_id, record["binding"]), [])
+                if item.get("submitGeneration", 0) <= host_item["submit"]]
+            if descriptor_events:
+                descriptor_candidates.append(descriptor_events[-1])
+
+    for descriptor in descriptor_candidates:
+        set_id = descriptor.get("setId")
         update_events = [item for item in focused_updates.get((
             descriptor.get("bufferId"), descriptor.get("absoluteOffset"),
             size), []) if item.get("submit", 0) <= host_item["submit"]]
@@ -314,6 +352,8 @@ def join_focused_binding(record, host_item, previous_timestamp, bind_events,
     ), reverse=True)
     return {
         "commandId": host_item["cmdId"],
+        "descriptorSource": "bound-descriptor" if direct else
+                            "watched-descriptor",
         "boundSetCount": len(set_ids),
         "boundSetIdsFirst64": set_ids[:64],
         "candidateCount": len(candidates),
@@ -397,10 +437,11 @@ def main():
     parser.add_argument("--host-assoc", type=Path, required=True)
     parser.add_argument("--host-ubo", type=Path, required=True)
     parser.add_argument("--host-bind", type=Path)
+    parser.add_argument("--unix-pid", type=int)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
-    identity = parse_wine_identity(args.wine_identity)
+    identity = parse_wine_identity(args.wine_identity, args.unix_pid)
     selected_ctx, host_submits = parse_host_submits(args.host_assoc)
     bind_events = parse_host_binds(args.host_bind or args.host_ubo)
     alignment, alignment_mismatches = align_submit_sequences(
@@ -417,7 +458,8 @@ def main():
     host_indices = build_host_indices(phases)
     focused_indices = build_focused_indices(phases)
     previous_timestamps = previous_submit_timestamps(host_submits)
-    wine_ubo = parse_wine_ubo(args.wine_ubo)
+    wine_ubo = parse_wine_ubo(
+        args.wine_ubo, set(identity["selectedWinPids"]))
     results = {3: [], 4: []}
     focused_results = {3: [], 4: []}
     failures = []
@@ -489,6 +531,7 @@ def main():
     report = {
         "schemaVersion": 1,
         "selectedUnixPid": identity["selectedPid"],
+        "selectedWindowsPids": identity["selectedWinPids"],
         "selectedHostContext": selected_ctx,
         "guestSubmitCount": len(identity["guestSubmits"]),
         "hostSubmitCommandCount": len(host_submits),

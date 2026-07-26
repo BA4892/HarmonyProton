@@ -2190,3 +2190,71 @@ The native build passed and the AArch64 libvirglrenderer contains the
 `watched-descriptor` and `watched-update` markers. The signed HAP identity and
 physical-device result are intentionally pending and must be appended only
 after artifact validation and the actual run.
+
+## 26. 2026-07-27 first focused run invalid; bind-time trace replaces it
+
+The first focused artifact was built, validated and archived before install:
+
+    archive:
+      D:\MyProject\winehua-logs\manual\heaven-focused-ubo-20260727-052720
+    HAP SHA-256:
+      bdfa791be70adf7f964dfed26445b6931f8b39bed7e5eadae7231775eed5bb0b
+    wine-data SHA-256:
+      c06995a6d4f99f97cbe0617eb8ef5355d157c4a80c00f52e842fa8a2592153ce
+    source:
+      main b63083d, virglrenderer 26277cc8, DXVK c665707,
+      Mesa db8f4de, Wine 9978980
+    status:
+      INVALID-diagnostic-contract-incomplete
+
+The overwrite install succeeded, the existing prefix was explicitly checked
+ready before launch, and automation entered the real Heaven D3D11 scene. The
+NCP runtime proved the requested Host selector and
+`WINEHUA_VKR_TRACE_UBO_IDENTITY=focused`. The scene screenshot is archived, but
+this run has no valid visual or UBO verdict for two reasons:
+
+1. The actual Wine child entry parameters did not contain
+   `WINEHUA_DXVK_TRACE_CAMERA=1`. The persistent Wine log therefore had no
+   current DXVK frame-to-command records that could join the current Host run.
+   An analyzer selecting the historically busiest PID would silently choose an
+   old session, so explicit Unix/Windows process identity is mandatory.
+2. Descriptor-set allocation churn produced 327,045
+   `watched-descriptor` records and grew the Host log to 175 MB. Although the
+   data is real, this update-time log observes many sets that never contribute
+   to the target draw and adds unacceptable diagnostic overhead.
+
+The invalid run was stopped after the defect was measured. It must not be used
+to accept or reject the rollback hypothesis.
+
+virglrenderer commit `b815f4c9` replaces update-time descriptor logging with
+draw-relevant bind-time identity:
+
+    vkCmdBindDescriptorSets
+      -> record binding 3/4 physical mapping as bound-descriptor
+      -> register exact upload watch only for an actually bound range
+      -> remember mapping sequence
+
+    later descriptor remap after the bind
+      -> descriptor-remap-after-bind with old mapping sequence
+
+This removes the unbounded `watched-descriptor` phase. Bound-descriptor has an
+independent 50,000-record hard limit, watch overflow remains explicit, and no
+wait, barrier, copy, descriptor content or present behavior changes. The
+AArch64 Docker build passed and its library contains the new markers but not
+the removed marker.
+
+The analyzer now supports an explicit `--unix-pid`, keeps frame identities
+namespaced by Unix process, filters UBO frames by the joined Windows PID, and
+prefers `bound-descriptor` for exact physical-slice selection. The game launcher
+also injects `WINEHUA_DXVK_TRACE_CAMERA=1` through the encoded Want environment
+whenever the frame-association profile is selected, rather than relying on the
+Host NCP selector to imply a Wine child variable.
+
+The replacement run is valid only if all of these are observed together:
+
+    Wine child entry contains WINEHUA_DXVK_TRACE_CAMERA=1
+    current Wine Unix PID has WineHuaDxvkSubmit records
+    Host has bound-descriptor and watched-update records
+    watched-descriptor record count is zero
+    no watch-overflow or bound-descriptor trace limit
+    current Guest/Host command alignment has zero mismatch
