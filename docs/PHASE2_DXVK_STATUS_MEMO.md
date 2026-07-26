@@ -1768,4 +1768,57 @@ strictly increasing submit generations; a representative sample reached wait
 5640 at submit generation 8372 with result zero. Presenter cadence recovered
 from about 2.2 FPS to roughly 6-8 FPS. This remains slower than the 20+ FPS
 product path, but is sufficient to distinguish ordinary low cadence from an
-actual backward camera jump. The user verdict is still pending.
+actual backward camera jump. The user repeatedly confirmed that this exact
+installed candidate still shows backward camera jumps. It is therefore closed
+as:
+
+    FAIL-user-observed-camera-rollback
+
+This negative result materially lowers the probability that concurrent Host
+`vkUpdateDescriptorSets` reuse is the complete cause. Do not repeat the global
+or submit-generation `QueueWaitIdle` experiments unless new evidence directly
+contradicts this run.
+
+## 24. 2026-07-27 exact frame-association trace checkpoint
+
+The next candidate traces the exact runtime association instead of guessing a
+previous package or changing another broad synchronization behavior:
+
+    DXVK WineHuaUbo frame/binding/hash
+      -> Host descriptor set and dynamic offset
+      -> Guest command-buffer ID / Host command-buffer handle
+      -> Host queue-submit generation
+      -> private-present source image ID / Host image handle
+      -> present serial
+
+The diagnostic source has been checkpointed before installation:
+
+    main commit:
+      b9d49921f828a157877f882e80c51b5374b3d75d
+    virglrenderer commit:
+      8e737e623c7931d76877456c02e3a7acaa7b5aeb
+    HAP SHA-256:
+      aac9765c031460265598966c8bae4dad7f42d1252e21a990978553b435fb507b
+    wine-data SHA-256:
+      7653c8f11af5789e07b02c522899d1167795203c12b39c6436f93ce8917b3f17
+    archive:
+      D:\MyProject\winehua-logs\manual\heaven-frame-assoc-trace-20260727-015003
+    status:
+      ARCHIVED-READY-FOR-INSTALL
+
+The HAP is newer than every exact-trace source change, embeds the same
+`wine-data.zip`, contains x86-64 Guest EGL and AArch64 Host libraries, and its
+native binaries contain the expected frame-association markers. A device run is
+invalid unless it proves all of the following before logs are analyzed:
+
+    selector=inline-gpu-upload-frame-assoc-trace
+    WINEHUA_VKR_TRACE_CAPTURE=1
+    WINEHUA_DXVK_TRACE_CAMERA=1
+    WineHuaUbo:
+    WineHuaFrameAssoc: dynamic-offset
+    WineHuaFrameAssoc: queue-submit
+    WineHuaFrameAssoc: present
+
+The purpose is to locate the first generation regression. It is not a product
+performance profile, and visual smoothness under trace overhead is not an
+acceptance criterion.
