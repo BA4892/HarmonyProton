@@ -69,6 +69,60 @@ upload, image, or present behavior. The first non-monotonic generation in this
 joined trace determines the next code fix; broad synchronization experiments,
 frame dropping, and performance fast paths remain blocked until then.
 
+### 2026-07-27 generation-safe exact join result and next A/B
+
+The generation-safe trace candidate was built, archived, installed, and run on
+the physical device. Attempts 1 and 2 are invalid: the first was consumed by
+prefix upgrade timing, and the second used `DXVK_LOG_LEVEL=warn`, which filtered
+the `Logger::info` camera records. Attempt 3 explicitly used
+`WINEHUA_DXVK_TRACE_CAMERA=1`, `DXVK_LOG_LEVEL=info`,
+`shadow-precise-dirty-ring-frame-assoc-trace`, and a 5-second launcher click
+delay:
+
+    archive:
+      D:\MyProject\winehua-logs\manual\heaven-generation-safe-20260727-030635
+    HAP SHA-256:
+      45052dddec0f2ed208be0dc60a9cecf1aa08139b6f6a99572ff9a2904d687a20
+    wine-data SHA-256:
+      830ef1457c7e595d67fd858e79200f1d60300000f253986e55547a273f543b9e
+    source:
+      main eb04456, DXVK c665707, Mesa db8f4de,
+      virglrenderer 59a5cea, Wine 9978980
+    visual status:
+      REJECTED-user-observed-continuous-camera-rollback
+
+The strict joined scene interval contains 742 Heaven frames (`119..860`). All
+742 DXVK recording generations map to the exact Guest and Host queue-command
+occurrence. Guest and Host command sequences are identical during the scene;
+the only differences are a 52-command startup prefix and one startup-only Host
+`cmdId=355`. There are 844 DXVK submits and 844 source transitions, one per
+recording generation. Frames `119..858` map to strictly increasing present
+serials `105..844`; the final two frames were stopped before publication. The
+presenter recorded 1,147 matching `copy-submitted`, `source-release-ready`, and
+`published` stages with zero watchdog or serial regression. Camera UBO slot 163
+has 742 consecutive frame numbers, 742 unique hashes, and zero frame-number
+rollback.
+
+This rules out command-object reordering in DXVK/Guest/Host, Host present serial
+rollback, simple SurfaceQueue republication of an old source frame, and the
+simple case of releasing a source image before its present copy completes. The
+visual rollback is therefore inside the contents consumed by an otherwise
+monotonic frame generation; monotonic queue/present IDs alone cannot validate
+the contents.
+
+The next controlled hypothesis is an OHOS shadow upload prepare/retire race.
+The queue thread records a private upload while holding `object_mutex`, releases
+that mutex, then reacquires it in `sync_shadows_to_host` to clear dirty state. A
+primary-ring `vkFlushMappedMemoryRanges` can publish the next generation in that
+gap and have its new dirty ranges cleared by the previous submit. The required
+A/B serializes only remote flush against the `prepare -> dirty retirement`
+window and logs acquisition, contention, and wait time. It must remain
+environment-gated until a physical-device Heaven run proves both visual impact
+and acceptable FPS. If the A/B passes, replace the coarse diagnostic lock with
+generation-tagged retirement so an old submit can never retire a newer flush.
+If it fails, remove the A/B rather than carrying an unproven synchronization
+cost.
+
 ### 2026-07-27 full command identity attempt and namespace correction
 
 The first Wine/Mesa bridge candidate is archived and was run on the physical
