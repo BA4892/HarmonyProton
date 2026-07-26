@@ -205,6 +205,56 @@ enabled only by `WINEHUA_VKR_TRACE_UBO_IDENTITY=1`. The App sets it only for
 same FNV-1a64 convention as the DXVK `WineHuaUbo` record. It adds no wait,
 barrier, dirty-state mutation, descriptor mutation, or queue-order change.
 
+### 2026-07-27 Host UBO identity run: binding 4 closes, binding 3 remains
+
+The first Host UBO identity candidate is archived before installation:
+
+    archive:
+      D:\MyProject\winehua-logs\manual\heaven-host-ubo-identity-20260727-043000
+    HAP SHA-256:
+      9a17bb21e1f7101707c146e56c97ebad8b20364406375c9d9fcdf110366d6152
+    wine-data SHA-256:
+      315451a0c285726b844fe5738e358fef6c23755e4e30f4efd9bfdd29d1dc4fc1
+    source:
+      main a4a69e2, DXVK c665707, Mesa db8f4de,
+      virglrenderer a4bd4f26, Wine 9978980
+
+Attempt 1 is invalid because the new runtime triggered a Wine prefix update;
+the automatic launcher click expired before Heaven appeared. Attempt 2 reused
+the now-stable prefix, entered the real D3D11 scene, and captured 846 DXVK UBO
+frames. Static screenshots confirm the scene rendered; the continuous visual
+rollback verdict for this diagnostic-only package remains pending.
+
+`automation/analyze_heaven_host_ubo.py` joined the latest Wine process and Host
+context. All 9,243 Guest and Host command occurrences align exactly with zero
+sequence mismatch, and 829 DXVK submissions map to a concrete Host submit.
+For the fully traced early scene window:
+
+    binding 4:
+      144/144 descriptor candidates have flush, upload-range, and update proof
+      115/144 use an exact 1,536-byte range and exact DXVK-matching hash
+      29/144 are covered by a larger merged range
+      stale or mismatching exact update hashes: 0
+
+    binding 3:
+      141/141 descriptor candidates have upload-range and update coverage
+      exact 48-byte update hashes: unavailable
+      reason: Host merges/pads the 48-byte Camera range into 64/256-byte updates
+
+Frame 119 illustrates the legal one-submit lead: binding 4 hash
+`3b6f2bb102c34b83` is flushed and uploaded in Host submit 461, while the draw
+command executes in submit 462; no intervening overwrite exists. The correct
+invariant is therefore "the last covering update before draw has the expected
+hash", not "upload and draw share a submit".
+
+The first trace was too broad: descriptor, update, and upload-range phases each
+hit their 200,000-record limit, and the extracted identity log is about 208 MB.
+It closes binding 4 for the traced window but cannot prove binding 3 subrange
+contents or late frames. The next candidate must register only binding 3/4
+descriptor ranges and hash those exact watched subranges inside the actual
+private update. It must suppress generic descriptor/range/update spam and keep
+all rendering and synchronization behavior unchanged.
+
 ### 2026-07-27 full command identity attempt and namespace correction
 
 The first Wine/Mesa bridge candidate is archived and was run on the physical
