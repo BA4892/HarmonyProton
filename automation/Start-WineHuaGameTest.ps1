@@ -127,7 +127,7 @@ if ($GamePath) {
     # slashes in drive paths, and this preserves the Want parameter verbatim.
     $wantGamePath = $GamePath.Replace('\', '/')
     $gameArgumentsJson = if ($GameArguments.Count -gt 0) {
-        $GameArguments | ConvertTo-Json -Compress
+        ConvertTo-Json -InputObject @($GameArguments) -Compress
     } else {
         '[]'
     }
