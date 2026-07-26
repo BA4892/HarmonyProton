@@ -1453,3 +1453,58 @@ milestone:
   note or Cube-only result is not sufficient to mark Heaven fixed.
 * Never overwrite the only passing HAP; retain at least the current passing
   artifact and the immediately previous comparison artifact.
+
+## 18. 2026-07-26 Heaven camera-buffer reuse evidence
+
+The first camera candidate was wrong: pass 0, binding 1, resource slot 161,
+144 bytes is a fixed projection matrix.  The continuously changing view/camera
+matrix is pass 0, vertex uniform binding 3, DXVK resource slot 163, 48 bytes.
+Binding 4 / resource slot 164 is a separate dynamic 1536-byte block.
+
+The Guest trace from frames 119 through 249 recorded a unique camera hash on
+every frame and no exact old-hash replay.  The physical VkBuffer/offset backing
+that binding can be reused after only two frames; approximately 30 physical
+slices served 131 frames.  Monotonic Guest hashes therefore do not exonerate
+the Host mapped-memory bridge: an already queued Host shader read may still see
+a later CPU overwrite of the same mapped range.
+
+The current correctness/performance A/B is:
+
+* `shadow-precise-dirty-ring` enables a private Host GPU upload before Guest
+  submissions.  Its ALL_COMMANDS -> TRANSFER -> ALL_COMMANDS dependency and
+  `vkCmdUpdateBuffer` snapshot removed the observed replay in the captured run,
+  but Heaven fell to approximately 11-12 FPS because it adds a Host queue
+  submission.
+* `shadow-precise-dirty-ring-no-upload-fast` retains approximately 20+ FPS but
+  the user continues to observe camera rollback.  Monotonic SurfaceQueue
+  serials and NativeImage timestamps only exclude compositor buffer replay.
+* `DXVK_WINEHUA_FIFO_BUFFER_SLICES=1` changes host-visible uniform slice reuse
+  from newest-free-first to oldest-free-first.  It is a diagnostic A/B, not a
+  product fix.  The user still observes rollback, so it must not be marked as
+  resolved.
+
+The working root-cause model is a mapped-shadow generation hazard rather than
+a present-order problem: CPU memcpy/flush updates Host mapped memory outside
+the Vulkan queue, while a short-lived DXVK dynamic slice may still be consumed
+by an older Host submission.  The separate GPU-upload path snapshots the bytes
+into queue order, which explains its stronger correctness evidence and its
+submit overhead.
+
+The next product candidate must preserve that queue-ordered snapshot without
+one extra `vkQueueSubmit` call per Guest submit.  Preferred design: prepend a
+private upload command buffer and append an internal timeline-semaphore retire
+signal to the same Host `vkQueueSubmit` call as the Guest work.  The timeline
+value owns upload command-pool reuse; the Guest fence remains untouched.  Do
+not remove Guest fences, drop frames, or rely on FIFO slice order as the fix.
+
+Checkpoint and evidence:
+
+    DXVK diagnostic commit: 2c94fd5
+    Run root: D:\MyProject\winehua-logs\manual\heaven-camera-20260726-2030
+    GPU upload frames: frames-gpu-upload
+    Fast mapped frames: frames-fast-no-upload-212817
+    FIFO frames: frames-fast-fifo-214441
+
+Every future passing milestone must archive the exact HAP, embedded/runtime DLL
+hashes, profile/environment, logs, Heaven evidence, and Cube angle result before
+any newer package is deployed.
