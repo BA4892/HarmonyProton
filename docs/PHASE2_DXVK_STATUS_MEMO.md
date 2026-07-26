@@ -1361,3 +1361,30 @@ sync, or switch to CPU fallback until a trace records a real serial or
 timestamp regression. Next investigation is to split the long producer gap
 between guest command generation, shadow dirty-range synchronization, and
 present dispatch; optimize only the measured dominant segment.
+
+## 16. 2026-07-26 surface-selection regression investigation
+
+The user's latest manual run appeared to show the cube jumping between old
+positions. Comparing it with the frame-order fix in section 15 found no code
+rollback in the ring publication or precise shadow path: the live device log
+still reported monotonic cube `frame`/`angle`, `regress=0`, and monotonic Venus
+present serials. The more recent manual session had multiple Explorer/Wine
+children and therefore multiple live surface entries in the NCP presenter.
+
+The remaining lifecycle hazard was in the zero-copy consumer selection:
+
+* NCP `Query()` exposed `unordered_map` iteration order, so the first
+  unattached candidate was nondeterministic after a restart.
+* The main compositor did not require the candidate's Vulkan flag to match the
+  current product mode, allowing a stale GL surface to be selected for a DXVK
+  process (or vice versa).
+
+Commit `3340544` fixes only this boundary. NCP candidates are sorted by the
+most recent present time, serial, and surface key; the main consumer filters by
+the current Vulkan/non-Vulkan mode and releases a binding if its type changes.
+Fence, shadow synchronization, queue pacing, and frame dropping are unchanged.
+
+The rebuilt and installed HAP was verified with a clean process restart and
+`C:\smoke\x64\winehua_d3d_switch_cube.exe`: 80-87 FPS, increasing frame and
+angle values, `regress=0`, and no surface-type change warning. Existing
+uncommitted DXVK/Heaven investigation files remain separate from this fix.
