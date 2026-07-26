@@ -2314,3 +2314,57 @@ Decision after the exact run:
    and shadow-upload hypothesis. Investigation then moves to the next
    frame-global buffer or command-generation input, without another broad wait,
    frame drop, present reorder or global synchronization experiment.
+
+## 28. 2026-07-27 exact descriptor identity closes the UBO hypothesis
+
+The exact replacement run completed on the physical device and is archived:
+
+    archive:
+      D:\MyProject\winehua-logs\manual\heaven-exact-descriptor-20260727-064031
+    HAP SHA-256:
+      6b2b487551fe219af350a891eed9e37c6c39648e0c91e0e34ed9fc8b72fd5032
+    wine-data SHA-256:
+      253a5269f3d3f280ac2e3732b46ce4c073538072aa46f9b948a8f6ed46d555cf
+    source:
+      main 7bda263, DXVK 53b12ec, Mesa d190c6b,
+      virglrenderer b815f4c9, Wine 9978980
+    process identity:
+      Unix PID 61917, Windows PID 232, Host context 3, Host session 1
+
+The analyzer selected the correct session from a persistent Host log by exact
+Guest command-sequence alignment. There are 2,674 Guest submits and 2,674
+aligned Host submits, with one mismatch at the stopped tail, and 281 mapped
+DXVK frames. For both binding 3 and binding 4 the result is:
+
+    exact Guest descriptor-set identities: 91
+    exact Host descriptor candidates:      35
+    watched uploads with expected hash:    33
+    watched uploads with stale hash:       0
+
+The two uncovered Host candidates per binding are `UNKNOWN`, not failures: the
+bind-time watch was registered after their upload, so no earlier upload hash
+exists in the trace. There are zero suspicious joins. This proves that the
+target draw's camera UBO and binding 4 pass through the exact DXVK descriptor
+set, Guest Venus object, Host descriptor set, physical buffer slice and Host
+`vkCmdUpdateBuffer` with the expected bytes. Descriptor binding, these two UBO
+ranges and their shadow upload are closed as causes of the observed rollback.
+
+`automation/analyze_heaven_host_ubo.py` now splits persistent Host logs when a
+context's submit counter decreases, selects the session with the best Guest
+command-sequence match, and compares FNV hashes numerically so leading zeroes
+cannot create false mismatches.
+
+The next experiment traces the final private swapchain image identity, not the
+first scene render target:
+
+    DXVK Presenter acquire imageIndex + VkImage
+      -> DXVK Presenter present same imageIndex + VkImage
+      -> Wine private present imageIndex + VkImage + serial
+      -> Guest Venus raw VkImage + vn image object id
+      -> Host imageId + Host VkImage + serial
+
+DXVK may render through an internal backbuffer and copy into the acquired
+presenter image, so a scene attachment must never be compared directly with the
+Host-presented image. The trace must remain diagnostic-only and low volume. No
+queue wait, frame drop, present reorder or synchronization change is authorized
+until this identity chain shows a concrete mismatch.

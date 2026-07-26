@@ -35,6 +35,10 @@ def integer(value):
     return int(value, 16) if value.startswith("0x") else int(value)
 
 
+def hash_integer(value):
+    return int(value, 16) if value is not None else None
+
+
 def parse_fields(line):
     return {key: value.rstrip(",") for key, value in FIELD_RE.findall(line)}
 
@@ -115,8 +119,9 @@ def parse_wine_identity(path, requested_pid=None):
     }
 
 
-def parse_host_submits(path):
-    sessions = collections.defaultdict(list)
+def parse_host_submits(path, guest_submits):
+    sessions_by_context = collections.defaultdict(list)
+    current_by_context = {}
     with path.open("r", encoding="utf-8", errors="replace") as source:
         for line in source:
             if "WineHuaFrameAssoc: queue-submit" not in line:
@@ -125,13 +130,46 @@ def parse_host_submits(path):
             if not {"ctx", "submit", "cmdId"}.issubset(fields):
                 continue
             timestamp = int(TIMESTAMP_RE.search(line).group(1))
-            sessions[int(fields["ctx"])].append({
+            ctx = int(fields["ctx"])
+            submit = int(fields["submit"])
+            current = current_by_context.get(ctx)
+            if current is None or (current and submit < current[-1]["submit"]):
+                current = []
+                sessions_by_context[ctx].append(current)
+                current_by_context[ctx] = current
+            current.append({
                 "timestamp": timestamp,
-                "submit": int(fields["submit"]),
+                "submit": submit,
                 "cmdId": int(fields["cmdId"]),
             })
-    selected_ctx = max(sessions, key=lambda ctx: max(item["submit"] for item in sessions[ctx]))
-    return selected_ctx, sessions[selected_ctx]
+
+    candidates = []
+    for ctx, sessions in sessions_by_context.items():
+        for session_index, host_submits in enumerate(sessions):
+            alignment, mismatches = align_submit_sequences(
+                guest_submits, host_submits)
+            candidates.append({
+                "ctx": ctx,
+                "sessionIndex": session_index,
+                "hostSubmits": host_submits,
+                "aligned": len(alignment),
+                "mismatches": len(mismatches),
+                "lengthDelta": abs(len(guest_submits) - len(host_submits)),
+                "lastTimestamp": host_submits[-1]["timestamp"],
+            })
+    if not candidates:
+        raise ValueError("Host log has no queue-submit records")
+    selected = max(candidates, key=lambda item: (
+        item["aligned"], -item["mismatches"], -item["lengthDelta"],
+        item["lastTimestamp"],
+    ))
+    selection = [{key: value for key, value in item.items()
+                  if key != "hostSubmits"}
+                 for item in candidates]
+    return selected["ctx"], selected["hostSubmits"], {
+        "selectedSessionIndex": selected["sessionIndex"],
+        "candidates": selection,
+    }
 
 
 def parse_host_binds(path):
@@ -356,7 +394,7 @@ def bound_sets_for_submit(bind_events, host_item, previous_timestamp):
 
 def join_focused_binding(record, host_item, previous_timestamp,
                          focused_bound_descriptors, focused_updates):
-    expected_hash = record["hash"][2:]
+    expected_hash = hash_integer(record["hash"])
     size = record["bytes"]
     guest_descriptor = record.get("guestDescriptor")
     exact_set_id = guest_descriptor.get("setId") if guest_descriptor else None
@@ -380,7 +418,8 @@ def join_focused_binding(record, host_item, previous_timestamp,
             size), []) if item.get("submit", 0) <= host_item["submit"]]
         latest_update = update_events[-1] if update_events else None
         hash_match = bool(
-            latest_update and latest_update.get("sourceHash") == expected_hash)
+            latest_update and
+            hash_integer(latest_update.get("sourceHash")) == expected_hash)
         candidates.append({
             "setId": set_id,
             "descriptor": descriptor,
@@ -488,7 +527,8 @@ def main():
     args = parser.parse_args()
 
     identity = parse_wine_identity(args.wine_identity, args.unix_pid)
-    selected_ctx, host_submits = parse_host_submits(args.host_assoc)
+    selected_ctx, host_submits, host_session_selection = parse_host_submits(
+        args.host_assoc, identity["guestSubmits"])
     bind_events = parse_host_binds(args.host_bind or args.host_ubo)
     alignment, alignment_mismatches = align_submit_sequences(
         identity["guestSubmits"], host_submits)
@@ -590,6 +630,7 @@ def main():
         "selectedUnixPid": identity["selectedPid"],
         "selectedWindowsPids": identity["selectedWinPids"],
         "selectedHostContext": selected_ctx,
+        "hostSessionSelection": host_session_selection,
         "guestSubmitCount": len(identity["guestSubmits"]),
         "hostSubmitCommandCount": len(host_submits),
         "alignedSubmitCommandCount": len(alignment),
