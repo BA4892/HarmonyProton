@@ -247,6 +247,7 @@ bool IsAllowedHostEnv(const std::string& key)
            key == "VKR_WINEHUA_GPU_UPLOAD" ||
            key == "VKR_WINEHUA_GPU_UPLOAD_INLINE" ||
            key == "VKR_WINEHUA_GPU_UPLOAD_SERIALIZE" ||
+           key == "VKR_WINEHUA_SHADOW_GENERATION_SERIALIZE" ||
            key == "VKR_WINEHUA_DESCRIPTOR_UPDATE_SERIALIZE" ||
            key == "VKR_WINEHUA_SHADOW_DIRTY_LIST" ||
            key == "VKR_WINEHUA_BATCH_FLUSH" ||
@@ -478,6 +479,8 @@ extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainPr
                (inlineGpuUpload ? "1" : "0") +
             "|__env=VKR_WINEHUA_GPU_UPLOAD_SERIALIZE=" +
                (serializedGpuUpload ? "1" : "0") +
+            "|__env=VKR_WINEHUA_SHADOW_GENERATION_SERIALIZE=" +
+               (frameAssocTrace ? "1" : "0") +
             "|__env=VKR_WINEHUA_DESCRIPTOR_UPDATE_SERIALIZE=" +
                (descriptorSerialized ? "1" : "0") +
             "|__env=VKR_WINEHUA_SHADOW_DIRTY_LIST=" +

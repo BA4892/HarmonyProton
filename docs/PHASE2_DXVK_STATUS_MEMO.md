@@ -123,6 +123,17 @@ generation-tagged retirement so an old submit can never retire a newer flush.
 If it fails, remove the A/B rather than carrying an unproven synchronization
 cost.
 
+The diagnostic A/B is implemented in virglrenderer commit `39344384`. It adds
+one context-level `shadow_generation_mutex`; the frame-association trace profile
+sets `VKR_WINEHUA_SHADOW_GENERATION_SERIALIZE=1`, while all ordinary profiles
+set it to `0`. Queue submit holds the mutex from shadow-upload prepare through
+dirty retirement, and remote flush holds it while publishing a new dirty
+generation. The Host log records `role=submit|flush`, acquisition count,
+contention count, per-acquire wait, and cumulative wait. The lock is released
+before Host `vkQueueSubmit` and present. ARM64 `make native` passes. This is an
+A/B diagnostic, not yet a correctness fix or `KNOWN_GOOD` baseline; physical
+Heaven and Cube results are still required.
+
 ### 2026-07-27 full command identity attempt and namespace correction
 
 The first Wine/Mesa bridge candidate is archived and was run on the physical
