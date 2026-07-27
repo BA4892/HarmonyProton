@@ -2798,3 +2798,28 @@ The boundary-corrected Heaven candidate is now running for the user's continuous
 visual verdict. Until that verdict is recorded, `coverage-sort` remains an
 explicit A/B profile and the ordinary product default remains the accepted
 inline profile from section 32.
+
+### Boundary-corrected final Heaven run
+
+The exact committed build repeated the matched 2280..3120 window and confirmed
+that the zero-byte boundary correction did not change the performance result:
+
+    archive:
+      D:\MyProject\winehua-logs\manual\heaven-coverage-sort-final-20260727
+    source:
+      main 3b7ea0b, virglrenderer 3997c9d2,
+      Mesa 19fe8b6, DXVK df55b90, Wine 20559c87
+    HAP SHA-256:
+      0410f2d3049187d9a018c1e28e194d4ee2e5f293f1b585281d4a57a1bb2fe028
+    FPS:                       11.352 (+22.8% vs inline)
+    Host total ms/frame:      15.358
+    shadow prepare ms/frame:  11.172
+    dirty scan ms/frame:       1.203
+    buffer record ms/frame:    8.967
+    driver submit ms/frame:    4.117
+    upload KiB/frame:       1006.3
+
+Present count and successful serials were monotonic through more than 3360
+presents. There were no timestamp-regression, fallback, device-lost, or coverage
+scratch-allocation failure records. These machine checks do not substitute for
+the still-pending continuous visual rollback verdict.
