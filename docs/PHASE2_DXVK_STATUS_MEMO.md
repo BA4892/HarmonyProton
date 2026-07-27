@@ -2823,3 +2823,77 @@ Present count and successful serials were monotonic through more than 3360
 presents. There were no timestamp-regression, fallback, device-lost, or coverage
 scratch-allocation failure records. These machine checks do not substitute for
 the still-pending continuous visual rollback verdict.
+
+## 35. 2026-07-27 command-list mapped-flush candidate passes visual gate
+
+The earlier device-global pending-flush experiment is rejected. Although it
+raised Heaven from roughly 11 FPS to roughly 20 FPS, it delayed writes across
+an ownership boundary and visibly changed grass/terrain colours. It must never
+be restored or used as a product fallback.
+
+The replacement keeps each mapped write with the DXVK CS command that consumes
+it. The submission thread attaches the flush range and a strong resource
+reference to that command's `DxvkCommandList`, then calls
+`vkFlushMappedMemoryRanges` immediately before submitting that same command
+list. Overlapping ranges belonging to the same `VkDeviceMemory` are merged. A
+write that cannot be associated with a command list still uses the original
+synchronous flush. The candidate is explicitly gated by:
+
+    DXVK_WINEHUA_BATCH_MAPPED_FLUSH=1
+
+The mandatory present-order invariant remains unchanged:
+
+    DXVK final presenter-copy QueueSubmit
+      -> Venus primary ring
+      -> vn_ring_roundtrip(primary_ring)
+      -> vn_ring_wait_all(primary_ring)
+      -> private vtest present
+
+The exact installed candidate is archived at:
+
+    D:\MyProject\winehua-logs\manual\cmdlist-batch-heaven-20260727
+
+Artifact and source identity:
+
+    HAP SHA-256:
+      1f4e1b2bb5780017c83faada302f46b15c5a5b430e7d26bdab3320f85a864902
+    wine-data SHA-256:
+      e08158a8a3835343123f499b5f9e1e4d0a03f9c7f8773ee2da342238051b4eb6
+    build time:
+      2026-07-27 18:39:52 +0800
+    source at build:
+      main a67f8a3 plus DXVK command-list work,
+      Mesa 19fe8b6 plus diagnostic-only performance counters,
+      virglrenderer 3997c9d2, Wine 20559c87
+    immutable DXVK milestone after validation:
+      afc9c2a perf(winehua): batch mapped flushes per command list
+
+The same HAP first ran with batching disabled and passed the complete automated
+DXVK regression at:
+
+    D:\MyProject\winehua-logs\automation\phase2-20260727-184519
+
+Both x64 and x86 comprehensive D3D11 smoke passed, including descriptor
+identity/lifetime, mip/array/3D texture, BC, MSAA, compute/UAV, D24S8 and the
+Heaven mini-pipeline. Both visual gates passed, fallback remained false, and
+CPU full-frame read/upload remained zero.
+
+With command-list batching enabled, both x64 and x86 comprehensive smoke passed.
+The visible cube produced 496 frames in eight seconds, reported
+`angleRegressions=0`, and ran at approximately 79-82 FPS using the managed x64
+DXVK DLLs. The real Heaven scene reached approximately 26-28 App-compositor FPS
+and approximately 22.5-22.7 presenter FPS during the observed interval. Host
+shadow copies and normal CPU full-frame upload remained zero.
+
+Most importantly, the user continuously inspected the final Heaven candidate
+and confirmed that grass, terrain, stone and building materials were correct,
+with no visible backward frame/angle jump. This closes the visual gate for this
+explicit candidate and distinguishes it from the rejected device-global batch.
+It does not yet authorize enabling the environment switch by default. Promotion
+still requires automated propagation of the switch, per-run flush counters, a
+matched on/off performance archive, and another x64/x86 plus real-Heaven run
+from the committed DXVK milestone.
+
+The next measured costs are Host upload-command recording and the presenter's
+release wait. Optimize those independently. Do not alter final-present ordering,
+merge across unknown mapped generations, or trade resource semantics for FPS.
