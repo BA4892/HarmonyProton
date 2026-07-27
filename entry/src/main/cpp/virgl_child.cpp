@@ -252,6 +252,7 @@ bool IsAllowedHostEnv(const std::string& key)
            key == "VKR_WINEHUA_SHADOW_GENERATION_SERIALIZE" ||
            key == "VKR_WINEHUA_DESCRIPTOR_UPDATE_SERIALIZE" ||
            key == "VKR_WINEHUA_SHADOW_DIRTY_LIST" ||
+           key == "VKR_WINEHUA_BOUND_BUFFER_LIST" ||
            key == "VKR_WINEHUA_BATCH_FLUSH" ||
            key == "VKR_WINEHUA_SHADOW_MSYNC" ||
            key == "VKR_WINEHUA_SHADOW_SUBMIT_UNMAP_LARGE" ||
@@ -447,6 +448,7 @@ extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainPr
         const bool perfSummary = config.shadowTrace == "perf" ||
             config.shadowTrace == "no-gpu-upload" || inlineGpuUpload ||
             descriptorSerialized;
+        const bool boundBufferList = config.shadowTrace == "perf";
         const bool cpuShadowUpload = config.shadowTrace == "cpu-upload";
         const bool legacyHostSync = config.shadowTrace == "legacy-host-sync";
         const char* mergeRanges = getenv("VKR_WINEHUA_SHADOW_MERGE_RANGES");
@@ -492,6 +494,8 @@ extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainPr
                (descriptorSerialized ? "1" : "0") +
             "|__env=VKR_WINEHUA_SHADOW_DIRTY_LIST=" +
                (legacyHostSync ? "0" : "1") +
+            "|__env=VKR_WINEHUA_BOUND_BUFFER_LIST=" +
+               (boundBufferList ? "1" : "0") +
             "|__env=VKR_WINEHUA_BATCH_FLUSH=" +
                (legacyHostSync || noGpuUploadFast ? "0" : "1") +
             "|__env=VKR_WINEHUA_SHADOW_MERGE_RANGES=" + mergeRanges +

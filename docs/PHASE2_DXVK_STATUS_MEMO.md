@@ -2534,3 +2534,58 @@ images. The next performance work must profile and optimize, in order:
 A lower-overhead replacement is allowed only if it provides an equivalent
 explicit completion token, such as a Host-visible ring sequence or timeline
 value that private present waits before acquiring/submitting on the queue.
+
+## 31. 2026-07-27 rollback-free performance baseline and first safe A/B
+
+The user reconfirmed the `9a988b6` Mesa ring-drain build has no visible Heaven
+frame rollback. This is now the correctness baseline for all performance work.
+The exact reason the fix works is:
+
+    final DXVK presenter-copy QueueSubmit is encoded on the async Venus ring
+      -> vn_ring_roundtrip publishes the cross-transport marker
+      -> vn_ring_wait_all waits until the renderer has dispatched through it
+      -> only then may the synchronous private-vtest present acquire the Host
+         queue and submit the source-to-SurfaceQueue GPU copy
+
+The wait ends after Host command decode and the driver's `vkQueueSubmit`
+returns. It does not wait for GPU completion. Removing the drain, weakening it
+to `vn_ring_roundtrip()` alone, dropping frames, or presenting an older source
+image is not a performance optimization and is forbidden.
+
+The rollback-free performance run is archived at:
+
+    D:\MyProject\winehua-logs\manual\
+      heaven-correct-perf-baseline-20260727-105000
+
+For the last seven complete 120-present windows (present 2280..3120), the
+measured averages are:
+
+    presentation rate:             8.16 FPS
+    Host QueueSubmit calls/frame:  13.14
+    shadow prepare/frame:          24.609 ms
+    shadow upload submit/frame:     3.863 ms
+    application driver submit:      1.320 ms/frame
+    total Host submit path:         29.864 ms/frame
+    uploaded data:                  1118.4 KiB/frame
+    upload ranges/updates:          1344.7 / 1347.7 per frame
+
+`WineHuaPerfPrepare` further attributes nearly all prepare time to dirty-range
+processing and buffer upload-command recording. The final NCP GPU copy and
+Host driver submit are not the current primary CPU bottleneck.
+
+The first performance A/B is deliberately semantic-preserving:
+
+1. Keep `roundtrip + wait_all` unchanged.
+2. Keep every dirty allocation, range merge, `vkCmdUpdateBuffer`, barrier,
+   upload submit, Guest submit, fence, semaphore and present in the same order.
+3. Replace the per-submit full Vulkan object-table buffer scan with the
+   existing per-dirty-allocation `bound_buffers` lists, enabled only in the
+   `shadow-precise-dirty-ring-perf` diagnostic profile initially.
+4. Add rate-limited Guest ring-drain aggregate counters so normal perf runs no
+   longer need per-present trace logging.
+
+The bound-buffer list maintains create, successful bind/rebind, buffer destroy
+and memory free lifecycle under `ctx->object_mutex`. Its A/B is accepted only
+if the Host logs prove the selector is active, Heaven remains continuously
+rollback-free, Cube reports `angleRegressions=0`, and x64 DXVK smoke passes.
+Until all gates pass, the product profile remains unchanged.
