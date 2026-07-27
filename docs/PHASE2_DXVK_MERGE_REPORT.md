@@ -444,3 +444,27 @@ above.
 Modern DXVK, DirectPresent, true NativeBuffer import/zero-copy, D3D12 and broad
 game qualification remain later-stage work. They are not blockers for the
 current controlled DXVK Legacy development baseline.
+
+## 13. Final-candidate validation (2026-07-28)
+
+The ARM64 candidate was rebuilt in `winehua-master-ext4` after aligning
+`SpawnViaBroker()` with the broker's single `|__env=KEY=VALUE` protocol. The
+previous `ENV:<size>` trailer was ignored by the merged broker, which left
+smoke children with an empty DXVK environment and produced
+`0x887a0004`; no Vulkan or DXVK implementation change was required for that
+failure.
+
+Artifact:
+
+- signed HAP SHA-256: `c11a9249c1295ea69c3f1724d2f46dc5de947f09457ec25e7527e41a287a9c50`;
+- embedded `wine-data.zip` SHA-256: `32df8e8a991e338da031e39656e1311ba6f0f98f72e04ba5ea700626322ab336` (matches source);
+- Guest EGL: x86-64; host `libentry.so`: AArch64;
+- Windows HDC install: `install bundle successfully` on `5KPBB25818203996`.
+
+Run `manual-final-dxvk-20260728-0400` (`reuse`, `dxvk`) passed for both
+`dxvk-legacy-x64` and `dxvk-legacy-x86`: feature level 11.0, DXVK 1.10.3,
+Venus x86_64 loader/ICD, 60 presented frames, no fallback, no CPU full-frame
+readback/upload, and zero per-frame `vkDeviceWaitIdle`. Descriptor identity,
+rebind/lifetime, mip/array/explicit-LOD/barrier, BC1 emulation and sampled
+compute/depth matrices passed. The 60-minute gate and final three-run/clean
+matrix remain deferred per the current development-stage decision.

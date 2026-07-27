@@ -217,29 +217,21 @@ static pid_t SpawnViaBroker(const std::string& entryParams,
         return -1;
     }
 
+    /* The broker protocol has one authoritative environment channel:
+     * |__env=KEY=VALUE segments embedded in entryParams.  The old ENV blob
+     * trailer was removed with the broker-global session environment; leaving
+     * it here makes children silently inherit only Wine's baseline and causes
+     * DXVK/Venus smoke to resolve the builtin d3d11.dll. */
+    const std::string requestParams = entryParams + SerializeEnvToEntryParams(environment);
     static constexpr char header[] = "SPAWN\n";
-    std::string envBlob;
-    for (const std::string& line : environment) {
-        if (line.find('\0') != std::string::npos || line.find('|') != std::string::npos ||
-            line.find('\n') != std::string::npos || line.find('\r') != std::string::npos)
-            continue;
-        envBlob.append(line);
-        envBlob.push_back('\0');
-    }
-    std::string envHeader;
-    if (!envBlob.empty())
-        envHeader = "ENV:" + std::to_string(envBlob.size()) + "\n";
-    std::string requestTail = entryParams + "\n" + envHeader;
-    static constexpr char empty[] = "";
-    iovec iov[4] = {
+    std::string requestTail = requestParams + "\n";
+    iovec iov[2] = {
         {const_cast<char*>(header), sizeof(header) - 1},
         {const_cast<char*>(requestTail.data()), requestTail.size()},
-        {const_cast<char*>(envBlob.empty() ? empty : envBlob.data()), envBlob.size()},
-        {const_cast<char*>(""), 0},
     };
     msghdr message = {};
     message.msg_iov = iov;
-    message.msg_iovlen = envBlob.empty() ? 2 : 3;
+    message.msg_iovlen = 2;
     if (sendmsg(brokerFd, &message, MSG_NOSIGNAL) < 0)
     {
         close(brokerFd);
