@@ -3029,3 +3029,92 @@ This invariant prevents an older rendered source from being published after a
 newer frame. Any next optimization must first ask whether the synchronization
 or copy is necessary, test a semantics-preserving alternative as an explicit
 A/B profile, and re-pass automation plus continuous Heaven before promotion.
+
+## 37. 2026-07-27 qualified mapped flush promoted to the product path
+
+The command-list-owned mapped-flush implementation from section 36 is now the
+default for the DXVK Legacy product mode. This promotion changes launch policy
+only. It does not change DXVK, Mesa, virglrenderer, Wine, final-present ordering,
+resource ownership, or synchronization behavior.
+
+Committed source identity:
+
+    branch:          feature/render-element-completeness
+    main:            dccbc12226cee1ff3c7d35bc371e64e8921eb164
+    DXVK:            3618d7ead648a8d9352dde41888a77b3302529cf
+    Mesa:            ee411de9bb370b6d306e112f93af25e3d6281ee8
+    virglrenderer:   3997c9d281b545d7d16fff45297f25bc9964e5cd
+    Wine:            20559c87efb8fe08ed8f72bfea42fa5c742261c6
+    commit:          dccbc12 perf(dxvk): promote qualified mapped flush product path
+
+Final committed product artifact:
+
+    archive:
+      D:\MyProject\winehua-logs\manual\product-batch-default-20260727
+    signed HAP:
+      entry-default-signed-43654ab7.hap
+    HAP SHA-256:
+      43654ab7b363057f07ae9cd41b932b7ae5b0aed79126e3dc44563f8dfc558ed4
+    wine-data.zip SHA-256:
+      750fe135f2fb0c834238318c56aac417974fed98768edf84cf19c90af7dd78d8
+    build time:
+      2026-07-27 21:04:45 +0800
+
+Artifact checks passed: the HAP-embedded `wine-data.zip` exactly matches the
+assembled payload, Guest EGL is x86-64, Host `libentry.so` is AArch64, and HDC
+overwrite installation reported `install bundle successfully`.
+
+Committed-product automation evidence:
+
+    archive:
+      D:\MyProject\winehua-logs\automation\phase2-20260727-210903
+    status:           PASS
+    suite/prefix:     dxvk / reuse
+    perf profile:     shadow-precise-dirty-ring-inline-upload-coverage-sort
+    batch flush:      true
+    HAP SHA-256:      43654ab7b363057f07ae9cd41b932b7ae5b0aed79126e3dc44563f8dfc558ed4
+
+The x86 and x64 comprehensive DXVK D3D11 tests passed, and the x64 visible Cube
+passed. Both comprehensive tests loaded DXVK 1.10.3 and reported
+`fallbackDetected=false`. This re-qualifies the descriptor, texture/subresource,
+BC, MSAA, compute/UAV, depth/stencil, MRT, and Heaven mini-pipeline coverage
+after the product-default change.
+
+The product launch policy is deliberately asymmetric:
+
+    ordinary DXVK Legacy launch:
+      DXVK_WINEHUA_BATCH_MAPPED_FLUSH=1
+      DXVK_WINEHUA_BATCH_MAPPED_FLUSH_STATS is not enabled
+
+    SmokeRunner request with batchMappedFlush=false:
+      DXVK_WINEHUA_BATCH_MAPPED_FLUSH=0
+
+    Start-WineHuaGameTest.ps1 without -BatchMappedFlush:
+      DXVK_WINEHUA_BATCH_MAPPED_FLUSH=0
+
+This preserves real off-side A/B measurements after enabling the qualified
+product default. Statistics remain opt-in because their bookkeeping and log I/O
+can materially reduce Heaven performance.
+
+The equivalent pre-commit product candidate is archived in the same manual
+directory with HAP SHA-256
+`357d2cb066df9e01f249f93e2c49afbd347b417b4aaa8898d53de23eeee99c95`.
+Its ordinary Heaven run used no D3D environment override; logs confirmed the
+coverage-sort profile, batching enabled, DXVK log level `warn`, and no Guest
+performance summary. The user inspected that run and reported that it had no
+visible problem. Its screenshot is `heaven-product-default.jpeg`. The final
+committed HAP then re-passed automation and was launched with the same ordinary
+product environment. Keep section 36's `4cb5722f` package as the immutable
+restore baseline until the final committed HAP also receives a separately
+archived continuous visual verdict.
+
+Launch contract discovered during final verification: a game Want must specify
+`winehua.d3d_backend=dxvk_legacy` to select the DXVK product mode. Omitting the
+backend intentionally selects the WineD3D fallback; Heaven is DX11-only and
+will show its fatal-error window on that fallback. This is a launch-request
+mistake, not a Vulkan or DXVK regression.
+
+The 60-minute gate remains paused by user direction. Future performance work
+must retain the section 36 present-order invariant and must not restore the
+rejected device-global flush, async present, or unknown-generation dirty-gap
+merging.
