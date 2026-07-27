@@ -9,14 +9,15 @@
 
 ## 0. Visual correctness ledger and non-regression rule
 
-As of 2026-07-27, **no archived Heaven artifact is a known-good rollback-free
-baseline**. The user continuously observes backward camera-angle jumps on the
-currently installed frame-identity trace build and on every archived candidate
-listed in sections 19-24. A package seen around 12:40 was once reported as not
-jumping, but it was replaced before its HAP hash, source state, runtime hashes,
-profile, and continuous visual verdict were archived. It is therefore
-`UNKNOWN-NOT-RECOVERABLE`, not a valid baseline and not evidence that a later
-candidate fixed the issue.
+As of 2026-07-27, the command-list-owned mapped-flush build recorded in section
+36 is the first fully archived, user-confirmed `KNOWN_GOOD` Heaven baseline. Its
+HAP SHA-256 is
+`4cb5722fff73e2b16112a05cbc6b9d440deb818f7e6dd35a96f5ac311dd0d457`.
+The user continuously confirmed correct grass, terrain, stone, and building
+materials with no backward camera-angle frames. The earlier statement that no
+recoverable baseline existed applied to the historical incident in sections
+19-24; those candidates remain `UNKNOWN` or `REJECTED` and must not replace
+this baseline.
 
 This exposed a process failure: performance improvements, sparse screenshot
 checks, and temporary visual observations were allowed to advance without
@@ -2897,3 +2898,134 @@ from the committed DXVK milestone.
 The next measured costs are Host upload-command recording and the presenter's
 release wait. Optimize those independently. Do not alter final-present ordering,
 merge across unknown mapped generations, or trade resource semantics for FPS.
+
+## 36. 2026-07-27 final command-list flush `KNOWN_GOOD` baseline
+
+The final committed command-list-owned mapped-flush package passed the complete
+automated DXVK suite and the user's continuous real-Heaven visual gate. This is
+the first recoverable rollback-free and material-correct Heaven baseline. Future
+performance work starts as an explicit A/B profile from this source state and
+must preserve it unchanged.
+
+Source identity:
+
+    branch:          feature/render-element-completeness
+    main:            86838e2f9bf0b4886bdef3c6fc3d960db4d165ba
+    DXVK:            3618d7ead648a8d9352dde41888a77b3302529cf
+    Mesa:            ee411de9bb370b6d306e112f93af25e3d6281ee8
+    virglrenderer:   3997c9d281b545d7d16fff45297f25bc9964e5cd
+    Wine:            20559c87efb8fe08ed8f72bfea42fa5c742261c6
+    DXVK feature:    afc9c2a perf(winehua): batch mapped flushes per command list
+    DXVK diagnostic: 3618d7e diagnostic(winehua): count mapped flush batching
+
+Immutable artifact identity:
+
+    archive:
+      D:\MyProject\winehua-logs\manual\cmdlist-batch-heaven-20260727
+    signed HAP:
+      entry-default-signed-4cb5722f.hap
+    HAP SHA-256:
+      4cb5722fff73e2b16112a05cbc6b9d440deb818f7e6dd35a96f5ac311dd0d457
+    wine-data.zip SHA-256:
+      750fe135f2fb0c834238318c56aac417974fed98768edf84cf19c90af7dd78d8
+
+Do not confuse this HAP with `entry-default-signed.hap` in the same directory.
+That file is the older candidate with SHA-256
+`1f4e1b2bb5780017c83faada302f46b15c5a5b430e7d26bdab3320f85a864902`
+and is not the final `KNOWN_GOOD` package. Restore the accepted package with:
+
+    & 'C:\Program Files\Huawei\DevEco Studio\sdk\default\openharmony\toolchains\hdc.exe' `
+      -t 5KPBB25818203996 install -r `
+      'D:\MyProject\winehua-logs\manual\cmdlist-batch-heaven-20260727\entry-default-signed-4cb5722f.hap'
+
+The command must exit successfully and report `install bundle successfully`.
+
+Automation evidence:
+
+    archive:
+      D:\MyProject\winehua-logs\automation\phase2-20260727-193134
+    status:           PASS
+    suite/prefix:     dxvk / reuse
+    perf profile:     shadow-precise-dirty-ring-inline-upload-coverage-sort
+    batch flush:      true
+    HAP SHA-256:      4cb5722fff73e2b16112a05cbc6b9d440deb818f7e6dd35a96f5ac311dd0d457
+
+The x86 and x64 comprehensive DXVK D3D11 tests passed, as did the x64 visible
+Cube. The result covers descriptor identity and lifetime, mip/array/3D texture,
+BC, MSAA, compute/UAV, D24S8, MRT, and the Heaven mini-pipeline matrices. Key
+invariants were:
+
+    fallbackDetected=false
+    cpuReadBytes=0
+    cpuUploadBytes=0
+    perFrameDeviceWaitIdle=0
+    Cube frames=512
+    Cube angleRegressions=0
+
+Continuous Heaven evidence:
+
+    screenshot:
+      heaven-4cb5722f-user-confirmed.jpeg
+    screenshot SHA-256:
+      38f3c596c4589eebffb35989f66c300323dfa9f9c58e87285da1394be174ef7b
+    DXGI log:
+      heaven-4cb5722f-dxgi.log
+    DXGI log SHA-256:
+      7fe461480df3a0350732d4332d293a0583aa9a9263cc6c2f7db610361ab25256
+    D3D11 log:
+      heaven-4cb5722f-d3d11.log
+    D3D11 log SHA-256:
+      909faa9156ff62594788951a75b654efdcd25199c7132d3e76e1ab8153dfcff1
+    loaded DXVK:
+      v1.10.3-25-g3618d7e
+    user verdict:
+      PASS - materials correct and no backward frame/angle jump
+
+The final long-run mapped-flush counters were:
+
+    lists=59280
+    queued_ranges=25584931
+    emitted_ranges=19193370
+    calls=112276
+    queued_bytes=41196851200
+    emitted_bytes=13413811968
+    whole_ranges=0
+    failures=0
+
+This is about 25% fewer range records and 67% fewer flushed bytes, with no
+failed flushes. The gain comes from precise merging within the consuming
+`DxvkCommandList`; it does not skip required synchronization. The accepted
+architecture is:
+
+    mapped write
+      -> attach exact range and strong resource reference to consuming CS command
+      -> command list owns and merges ranges per VkDeviceMemory
+      -> vkFlushMappedMemoryRanges immediately before that list's QueueSubmit
+
+Unassociated writes retain the original synchronous flush. The rejected
+device-global pending-flush experiment crossed resource ownership/generation
+boundaries and changed grass/terrain colours; it must never be restored.
+
+The qualification run explicitly used:
+
+    DXVK_WINEHUA_BATCH_MAPPED_FLUSH=1
+    DXVK_WINEHUA_BATCH_MAPPED_FLUSH_STATS=1
+    automation/Invoke-WineHuaAutomation.ps1 -BatchMappedFlush
+
+Commit `86838e2` intentionally leaves batching off by default for ordinary
+product launch. This visual PASS qualifies the opt-in implementation; promoting
+it to the product default remains a separate release decision. The 60-minute
+gate remains paused by user direction.
+
+Finally, no optimization may remove or weaken the root ordering fix:
+
+    DXVK final presenter-copy QueueSubmit
+      -> Venus primary ring
+      -> vn_ring_roundtrip(primary_ring)
+      -> vn_ring_wait_all(primary_ring)
+      -> private vtest present
+
+This invariant prevents an older rendered source from being published after a
+newer frame. Any next optimization must first ask whether the synchronization
+or copy is necessary, test a semantics-preserving alternative as an explicit
+A/B profile, and re-pass automation plus continuous Heaven before promotion.
