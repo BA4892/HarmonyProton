@@ -3184,3 +3184,86 @@ the missing synchronization is identified and implemented explicitly.
 
 Do not repeat the full-summary-off experiment, do not accept its higher FPS,
 and do not weaken the known-good present/resource ordering to reproduce it.
+
+## 39. 2026-07-27 duplicate Host performance forwarding removed safely
+
+The follow-up isolation retained the complete renderer performance-summary
+path and disabled only the independent NCP file-to-hilog forwarding thread for
+the qualified coverage-sort product selector. The renderer still records Host
+submit timing and atomic counters in `winehua_virgl_host.log`; dirty tracking,
+mapped upload, fences, resource lifetime, queue submission, and final-present
+ordering are unchanged. Diagnostic profiles continue to forward summaries to
+hilog for live investigation.
+
+Candidate source identity before commit:
+
+    main:            15e8518e0cb4b234c933e448dd7691712b9dbc59
+    DXVK:            3618d7ead648a8d9352dde41888a77b3302529cf
+    Mesa:            ee411de9bb370b6d306e112f93af25e3d6281ee8
+    virglrenderer:   3997c9d281b545d7d16fff45297f25bc9964e5cd
+    Wine:            20559c87efb8fe08ed8f72bfea42fa5c742261c6
+    changed source:  entry/src/main/cpp/virgl_child.cpp
+
+Qualified artifact:
+
+    archive:
+      D:\MyProject\winehua-logs\performance\host-perf-forward-off-20260727-2149
+    signed HAP:
+      entry-default-signed-07013f8c.hap
+    HAP SHA-256:
+      07013f8c8e0c02e824bd35a0db55b962e95ce5ad29bf660ec2db2c01b2e066c1
+    wine-data.zip SHA-256:
+      750fe135f2fb0c834238318c56aac417974fed98768edf84cf19c90af7dd78d8
+    build time:
+      2026-07-27 21:48:19 +0800
+
+Runtime isolation confirmed:
+
+    VKR_WINEHUA_PERF_SUMMARY=1
+    renderer WineHuaPerf records continue
+    forwarded WineHuaPerf hilog lines=0
+    profile=shadow-precise-dirty-ring-inline-upload-coverage-sort
+    DXVK_WINEHUA_BATCH_MAPPED_FLUSH=1
+
+Six continuous display-FPS windows after scene initialization were:
+
+    23.545, 27.200, 18.540, 31.654, 30.933, 20.521
+
+Their range is 18.540 to 31.654 FPS and median is 25.373 FPS. Archived day and
+night frames retain the expected Heaven geometry, material textures, lighting,
+and colour. No fallback, device lost, ring fatal, timestamp regression, or
+frame-angle regression was found. The user continuously inspected this exact
+candidate and reported `PASS - this version has no problem`.
+
+Post-visual automation evidence:
+
+    archive:
+      D:\MyProject\winehua-logs\automation\phase2-20260727-220057
+    status:           PASS
+    suite/prefix:     dxvk / reuse
+    perf profile:     shadow-precise-dirty-ring-inline-upload-coverage-sort
+    batch flush:      true
+    HAP SHA-256:      07013f8c8e0c02e824bd35a0db55b962e95ce5ad29bf660ec2db2c01b2e066c1
+
+Both x86 and x64 comprehensive DXVK D3D11 tests passed, including descriptor
+identity/lifetime, sampled and storage resources, mip/array/3D textures, BC,
+MSAA, compute/UAV, D24S8, MRT, and Heaven mini-pipeline coverage. Both visual
+validators passed. The x64 visible Cube completed 467 frames with
+`angleRegressions=0`; the selected backend remained DXVK Legacy with no
+WineD3D fallback.
+
+This result qualifies removal of duplicate hilog I/O, not removal of renderer
+timing. The rejected full-summary-off candidate remains evidence of a latent
+timing sensitivity and must not be restored. Future performance work should
+profile Host `buffer_record` and queue submission while preserving:
+
+    DXVK final presenter-copy QueueSubmit
+      -> Venus primary ring
+      -> vn_ring_roundtrip(primary_ring)
+      -> vn_ring_wait_all(primary_ring)
+      -> private vtest present
+
+The next realistic target is to raise Heaven's low intervals above 20 FPS and
+stabilize its median around 25-30 FPS. Any optimization must be a separately
+selectable A/B, retain exact resource-generation ownership and release-fence
+semantics, and pass the same DXVK automation plus continuous Heaven review.

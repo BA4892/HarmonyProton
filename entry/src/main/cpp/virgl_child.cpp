@@ -515,7 +515,10 @@ extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainPr
         OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][NCP] starting persistent vtest server");
         std::atomic<bool> perfLogStop{false};
         std::thread perfLogThread;
-        if (perfSummary)
+        /* The renderer file remains the authoritative performance record.
+         * Avoid duplicating each summary into hilog for the product selector;
+         * diagnostic profiles retain the live forwarding behavior. */
+        if (perfSummary && !coverageSort)
             perfLogThread = std::thread(ForwardPerfSummary, config.logPath,
                                         std::ref(perfLogStop));
         Main(args);
