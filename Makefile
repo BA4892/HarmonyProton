@@ -30,7 +30,11 @@ CONFIG    := $(NATIVE_ARCH)
 BUILD_DIR := $(ROOT)/build
 STAMPS    := $(BUILD_DIR)/.stamps
 SCRIPTS   := $(ROOT)/scripts
-DXVK_SENTINEL := $(BUILD_DIR)/dxvk/legacy/x64/bin/d3d11.dll
+DXVK_ARTIFACTS := \
+	$(BUILD_DIR)/dxvk/legacy/x64/bin/d3d11.dll \
+	$(BUILD_DIR)/dxvk/legacy/x64/bin/dxgi.dll \
+	$(BUILD_DIR)/dxvk/legacy/x86/bin/d3d11.dll \
+	$(BUILD_DIR)/dxvk/legacy/x86/bin/dxgi.dll
 DXVK_STAMP := $(STAMPS)/dxvk-legacy
 DXVK_SOURCE_INPUTS := $(shell find $(ROOT)/thirdparty/dxvk/src -type f 2>/dev/null; find $(ROOT)/thirdparty/dxvk -maxdepth 1 -type f 2>/dev/null)
 
@@ -66,6 +70,14 @@ $(DXVK_STAMP): $(SCRIPTS)/build_dxvk.sh $(DXVK_SOURCE_INPUTS) | $(STAMPS)
 	@echo "=== dxvk legacy ==="
 	bash $(SCRIPTS)/build_dxvk.sh
 	touch $@
+
+# DXVK is produced as a four-file side effect of the stamp recipe.  Give each
+# packaged DLL an explicit rule so a clean checkout can resolve the assemble
+# dependency before the stamp exists (the previous bare sentinel made CI stop
+# with "No rule to make target .../d3d11.dll").  The size check also prevents
+# packaging a partial or truncated DXVK install.
+$(DXVK_ARTIFACTS): $(DXVK_STAMP)
+	@test -s "$@" || { echo "ERROR: DXVK artifact missing after build: $@" >&2; exit 1; }
 ifeq ($(BUILD_GUEST_VULKAN),1)
 ASSEMBLE_GUEST_INPUTS += $(wildcard $(GUEST_VULKAN_SENTINEL))
 endif
@@ -299,7 +311,7 @@ define assemble_rule
 
 assemble-$(1): $$(STAMPS)/$(1)/assemble
 
-$$(STAMPS)/$(1)/assemble: $(SCRIPTS)/assemble.sh $(SCRIPTS)/env.sh $(DXVK_SENTINEL) $(DXVK_STAMP) \
+$$(STAMPS)/$(1)/assemble: $(SCRIPTS)/assemble.sh $(SCRIPTS)/env.sh $(DXVK_ARTIFACTS) \
 	$(ROOT)/smoke/winehua_d3d_switch_cube.c \
 	$(ROOT)/smoke/winehua_win32_driver.c \
 	$$(STAMPS)/deps $$(STAMPS)/wine-$(1) $$(STAMPS)/$(1)/native \

@@ -29,7 +29,7 @@ permissions:
 
 jobs:
   build:
-    name: make NATIVE_ARCH=arm64-v8a hap
+    name: make NATIVE_ARCH=arm64-v8a hap (DXVK Legacy x64+x86)
     runs-on: ubuntu-26.04
     timeout-minutes: 180
 
@@ -154,6 +154,8 @@ jobs:
           meson --version
           ninja --version
           python3 --version
+          x86_64-w64-mingw32-g++ --version | head -1
+          i686-w64-mingw32-g++ --version | head -1
           java -version 2>&1 | head -1
           echo "== OHOS SDK =="
           ls /apps/harmony/sdk/default/openharmony/native/llvm/bin/clang
@@ -161,10 +163,31 @@ jobs:
           echo "== nproc =="
           nproc
 
+      # Build DXVK explicitly before the full HAP so CI reports DXVK failures
+      # separately from Wine/Venus/HAP failures.  The top-level Makefile also
+      # retains these DLLs as assemble prerequisites for non-CI clean builds.
+      - name: Build DXVK Legacy (x64 + x86)
+        run: |
+          set -euxo pipefail
+          make NATIVE_ARCH=arm64-v8a dxvk
+          for dll in \
+            build/dxvk/legacy/x64/bin/d3d11.dll \
+            build/dxvk/legacy/x64/bin/dxgi.dll \
+            build/dxvk/legacy/x86/bin/d3d11.dll \
+            build/dxvk/legacy/x86/bin/dxgi.dll; do
+            test -s "$dll"
+          done
+          file build/dxvk/legacy/x64/bin/d3d11.dll \
+               build/dxvk/legacy/x64/bin/dxgi.dll \
+               build/dxvk/legacy/x86/bin/d3d11.dll \
+               build/dxvk/legacy/x86/bin/dxgi.dll
+          sha256sum build/dxvk/legacy/{x64,x86}/bin/{d3d11,dxgi}.dll
+
       - name: Build HAP
         env:
           NATIVE_ARCH: arm64-v8a
           BUILD_GUEST_GFX: '0'
+          BUILD_GUEST_VULKAN: '1'
           BUILD_WINE_MONO: '0'
         run: |
           set -euxo pipefail
@@ -181,6 +204,69 @@ jobs:
           else
             echo "hap=$out_dir/entry-default-signed.hap" >> "$GITHUB_OUTPUT"
           fi
+
+      # A successful PE build is not enough: verify that the exact fork commit
+      # and all four DLLs reached the nested wine-data.zip in the HAP.  This
+      # catches stale staging, wrong architecture and accidental WineD3D-only
+      # packages before publishing an artifact.
+      - name: Verify embedded DXVK runtime
+        env:
+          HAP_PATH: ${{ steps.art.outputs.hap }}
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import io
+          import json
+          import os
+          import struct
+          import subprocess
+          import zipfile
+
+          hap_path = os.environ["HAP_PATH"]
+          expected_commit = subprocess.check_output(
+              ["git", "-C", "thirdparty/dxvk", "rev-parse", "HEAD"], text=True
+          ).strip()
+
+          with zipfile.ZipFile(hap_path) as hap:
+              payload = hap.read("resources/rawfile/wine-data.zip")
+              runtime_manifest = json.loads(
+                  hap.read("resources/rawfile/wine-runtime-manifest.json")
+              )
+
+          payload_sha = hashlib.sha256(payload).hexdigest()
+          assert runtime_manifest["payloadSha256"] == payload_sha, (
+              runtime_manifest["payloadSha256"], payload_sha
+          )
+
+          required = {
+              "dxvk/legacy/x64/d3d11.dll": 0x8664,
+              "dxvk/legacy/x64/dxgi.dll": 0x8664,
+              "dxvk/legacy/x86/d3d11.dll": 0x014C,
+              "dxvk/legacy/x86/dxgi.dll": 0x014C,
+          }
+          with zipfile.ZipFile(io.BytesIO(payload)) as wine_data:
+              dxvk_manifest = json.loads(wine_data.read("dxvk/manifest.json"))
+              assert dxvk_manifest["profile"] == "legacy"
+              assert dxvk_manifest["version"] == "1.10.3"
+              assert dxvk_manifest["commit"] == expected_commit, (
+                  dxvk_manifest["commit"], expected_commit
+              )
+              for name, expected_machine in required.items():
+                  image = wine_data.read(name)
+                  assert len(image) > 4096, (name, len(image))
+                  assert image[:2] == b"MZ", name
+                  pe_offset = struct.unpack_from("<I", image, 0x3C)[0]
+                  assert image[pe_offset:pe_offset + 4] == b"PE\0\0", name
+                  machine = struct.unpack_from("<H", image, pe_offset + 4)[0]
+                  assert machine == expected_machine, (
+                      name, hex(machine), hex(expected_machine)
+                  )
+                  print(f"[dxvk] {name}: machine={machine:#06x} size={len(image)}")
+
+          print(f"[dxvk] commit={expected_commit}")
+          print(f"[dxvk] wine-data.zip sha256={payload_sha}")
+          PY
 
       - name: Upload HAP
         uses: actions/upload-artifact@v4
