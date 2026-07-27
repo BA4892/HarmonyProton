@@ -11,6 +11,7 @@ param(
     [int]$LongSeconds = 3600,
     [switch]$Gate,
     [switch]$SkipBuild,
+    [switch]$BatchMappedFlush,
     [string]$DeviceId = '',
     [string]$ReplayFragmentSpv = '',
     [string]$ReplayVertexSpv = '',
@@ -533,7 +534,8 @@ function Invoke-OneRun {
     # starting Wayland, wineserver or Wine.
     Invoke-Hdc shell 'power-shell wakeup' | Out-Null
     Invoke-Hdc shell 'hilog -x' | Out-Null
-    $startCommand = "aa start -a $Ability -b $Bundle --ps winehua.mode smoke --ps winehua.run_id $RunId --ps winehua.suite $RunSuite --ps winehua.prefix $RunPrefix --ps winehua.perf_profile $PerfProfile --ps winehua.long_seconds $LongSeconds"
+    $batchMappedFlushValue = if ($BatchMappedFlush) { '1' } else { '0' }
+    $startCommand = "aa start -a $Ability -b $Bundle --ps winehua.mode smoke --ps winehua.run_id $RunId --ps winehua.suite $RunSuite --ps winehua.prefix $RunPrefix --ps winehua.perf_profile $PerfProfile --ps winehua.long_seconds $LongSeconds --ps winehua.batch_mapped_flush $batchMappedFlushValue"
     $startOutput = Invoke-Hdc shell $startCommand
     if (($startOutput -join "`n") -match '10106102') {
         # Devices without a credential can be dismissed with one deterministic
@@ -669,6 +671,7 @@ function Invoke-OneRun {
         suite = $RunSuite
         prefix = $RunPrefix
         perfProfile = $PerfProfile
+        batchMappedFlush = [bool]$BatchMappedFlush
         appStatus = $summary.status
         visualStatus = if ($visualPass) { 'PASS' } else { 'FAIL' }
         coverageStatus = if ($null -eq $coverage) { 'NOT_APPLICABLE' } else { $coverage.status }
@@ -808,6 +811,7 @@ if ($Suite -eq 'capabilities') {
     hapSha256 = $artifact.hapSha256
     gate = [bool]$Gate
     perfProfile = $PerfProfile
+    batchMappedFlush = [bool]$BatchMappedFlush
     status = if ($allPassed) { 'PASS' } else { 'FAIL' }
     runs = $runRecords
     capabilityHashes = if ($capabilityMatrix) {

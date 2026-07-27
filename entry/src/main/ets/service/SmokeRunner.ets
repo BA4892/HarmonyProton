@@ -17,6 +17,7 @@ export interface SmokeLaunchRequest {
   suite: string;
   prefixMode: string;
   longSeconds: number;
+  batchMappedFlush: boolean;
 }
 
 interface SmokeTestSpec {
@@ -181,7 +182,8 @@ function latestReplayShaderDirectory(prefix: string, current: string): string {
 }
 
 export function defaultSmokeRequest(): SmokeLaunchRequest {
-  return { mode: '', runId: '', suite: 'core', prefixMode: 'reuse', longSeconds: 3600 };
+  return { mode: '', runId: '', suite: 'core', prefixMode: 'reuse', longSeconds: 3600,
+    batchMappedFlush: false };
 }
 
 export function parseSmokeRequest(text: string): SmokeLaunchRequest {
@@ -195,7 +197,8 @@ export function parseSmokeRequest(text: string): SmokeLaunchRequest {
       suite: safeId(value.suite, 'core').toLowerCase(),
       prefixMode: value.prefixMode === 'clean' ? 'clean' : 'reuse',
       longSeconds: value.longSeconds >= 60 && value.longSeconds <= 3600 ?
-        Math.floor(value.longSeconds) : 3600
+        Math.floor(value.longSeconds) : 3600,
+      batchMappedFlush: value.batchMappedFlush === true
     };
   } catch (_) {
     return fallback;
@@ -1235,6 +1238,10 @@ export class SmokeRunner {
         smokeEnvironment['DXVK_SHADER_DUMP_PATH'] = `C:\\smoke\\results\\${this.request.runId}`;
         smokeEnvironment['DXVK_WINEHUA_DUMP_REMAPPED_SPIRV'] = '1';
         smokeEnvironment['DXVK_STATE_CACHE'] = '0';
+        if (this.request.batchMappedFlush) {
+          smokeEnvironment['DXVK_WINEHUA_BATCH_MAPPED_FLUSH'] = '1';
+          smokeEnvironment['DXVK_WINEHUA_BATCH_MAPPED_FLUSH_STATS'] = '1';
+        }
         if (this.perfProfile === 'shadow-precise' ||
           this.perfProfile === 'shadow-precise-single-ring' ||
           this.perfProfile === 'shadow-precise-sync-submit' ||

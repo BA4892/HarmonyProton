@@ -9,6 +9,7 @@ param(
     [string]$GamePath = '',
     [string[]]$GameArguments = @(),
     [hashtable]$D3DEnvironment = @{},
+    [switch]$BatchMappedFlush,
     [string]$ClickTitlePrefix = '',
     [string]$ClickButtonText = '',
     [ValidateRange(0, 30000)]
@@ -76,6 +77,13 @@ if ($PerfProfile -eq 'shadow-precise-dirty-ring-present-image-trace') {
     if (-not $D3DEnvironment.ContainsKey('WINEHUA_DXVK_TRACE_PRESENT_IMAGE')) {
         $D3DEnvironment['WINEHUA_DXVK_TRACE_PRESENT_IMAGE'] = '1'
     }
+    if (-not $D3DEnvironment.ContainsKey('DXVK_LOG_LEVEL')) {
+        $D3DEnvironment['DXVK_LOG_LEVEL'] = 'info'
+    }
+}
+if ($BatchMappedFlush) {
+    $D3DEnvironment['DXVK_WINEHUA_BATCH_MAPPED_FLUSH'] = '1'
+    $D3DEnvironment['DXVK_WINEHUA_BATCH_MAPPED_FLUSH_STATS'] = '1'
     if (-not $D3DEnvironment.ContainsKey('DXVK_LOG_LEVEL')) {
         $D3DEnvironment['DXVK_LOG_LEVEL'] = 'info'
     }
@@ -193,6 +201,7 @@ if (-not $startedPid) {
 
 Write-Host "WineHua desktop requested with D3D backend: $D3DBackend"
 Write-Host "Performance profile: $PerfProfile"
+Write-Host "Command-list mapped flush batching: $([bool]$BatchMappedFlush)"
 if ($GamePath) {
     if ($GamePreset) {
         Write-Host "Game preset: $GamePreset"

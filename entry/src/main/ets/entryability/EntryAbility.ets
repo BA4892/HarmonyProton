@@ -147,7 +147,8 @@ export default class EntryAbility extends UIAbility {
       runId: value('winehua.run_id', `${Date.now()}`),
       suite: suite,
       prefixMode: value('winehua.prefix', 'reuse'),
-      longSeconds: Number(value('winehua.long_seconds', '3600'))
+      longSeconds: Number(value('winehua.long_seconds', '3600')),
+      batchMappedFlush: value('winehua.batch_mapped_flush', '0') === '1'
     });
     AppStorage.setOrCreate<string>('winehua.smoke.request', request);
     AppStorage.set<string>('winehua.smoke.request', request);
