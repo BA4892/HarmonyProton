@@ -3118,3 +3118,69 @@ The 60-minute gate remains paused by user direction. Future performance work
 must retain the section 36 present-order invariant and must not restore the
 rejected device-global flush, async present, or unknown-generation dirty-gap
 merging.
+
+## 38. 2026-07-27 Host performance-summary removal is rejected
+
+An A/B candidate disabled `VKR_WINEHUA_PERF_SUMMARY` only for the qualified
+coverage-sort product selector. The source review showed that this switch
+controls Host submit-path clocks and atomic counters, periodic renderer log
+formatting, and the NCP `ForwardPerfSummary` file-to-hilog thread. It does not
+directly select dirty ranges, GPU upload commands, fences, resource ownership,
+or final-present ordering. Nevertheless, removing the timing work changed real
+device behavior and therefore cannot be treated as a safe logging cleanup.
+
+Rejected candidate identity:
+
+    source:
+      main 1428cab plus an uncommitted two-file A/B change
+    signed HAP archive:
+      D:\MyProject\winehua-logs\performance\host-perf-summary-off-20260727-2130\entry-default-signed-616bf882.hap
+    HAP SHA-256:
+      616bf88291f3ba6adbfb47c8726a7f781bc9cf9b64c3de6e7d66dbdd566c1d75
+    wine-data.zip SHA-256:
+      750fe135f2fb0c834238318c56aac417974fed98768edf84cf19c90af7dd78d8
+    exact changed behavior:
+      coverage-sort VKR_WINEHUA_PERF_SUMMARY=1 -> 0
+
+The runtime log confirmed that all other selected product state was unchanged:
+
+    backend=dxvk_legacy
+    DXVK version=1.10.3
+    profile=shadow-precise-dirty-ring-inline-upload-coverage-sort
+    batchMappedFlush=1
+    present_mode=fifo
+    fallback not selected
+
+Observed display-FPS samples were:
+
+    16.695, 14.986, 17.911, 23.491, 18.382, 20.308
+
+The higher intervals are not an accepted performance gain. During continuous
+inspection the user observed frames flashing incorrect miscellaneous colours
+(`跳杂色`) and marked the image wrong. The candidate is therefore
+`REJECTED-user-observed-colour-corruption` regardless of its FPS.
+
+The two source changes were fully reverted without a commit. The device was
+restored with the product HAP from section 37:
+
+    HAP SHA-256:
+      43654ab7b363057f07ae9cd41b932b7ae5b0aed79126e3dc44563f8dfc558ed4
+    install result:
+      install bundle successfully
+    restored runtime:
+      coverage-sort, perf_summary=1, batchMappedFlush=1
+
+After Heaven was relaunched from a fully stopped process tree, the user
+confirmed that this restored version had no visual problem. This is the active
+device baseline for the next isolation.
+
+This result proves timing dependence, not that diagnostic logging is a valid
+long-term synchronization primitive. The next isolation must retain renderer
+submit timing/counters and remove only the independent NCP log-forwarding
+thread. If that is correct, it can remove duplicate hilog I/O without changing
+submit timing. If it also corrupts the image, the forwarding thread is pacing a
+latent resource-generation race and no logging component may be removed before
+the missing synchronization is identified and implemented explicitly.
+
+Do not repeat the full-summary-off experiment, do not accept its higher FPS,
+and do not weaken the known-good present/resource ordering to reproduce it.
