@@ -45,4 +45,5 @@
 	branch = OpenHarmony-6.0-Beta1
 [submodule "thirdparty/dxvk"]
 	path = thirdparty/dxvk
-	url = https://github.com/doitsujin/dxvk.git
+	url = https://github.com/winehua/dxvk.git
+	branch = dxvk-legacy-1.10.3
