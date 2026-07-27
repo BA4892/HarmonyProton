@@ -133,13 +133,16 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
         !strcmp(profile, "shadow-precise-dirty-ring-no-upload-fast");
     const bool preciseDirtyDescriptorSerialized =
         !strcmp(profile, "shadow-precise-dirty-ring-inline-upload-descriptor-serialized");
+    const bool preciseDirtyCoverageSort =
+        !strcmp(profile, "shadow-precise-dirty-ring-inline-upload-coverage-sort");
     const bool preciseDirtyFrameAssocTrace =
         !strcmp(profile, "shadow-precise-dirty-ring-frame-assoc-trace");
     const bool preciseDirtyPresentImageTrace =
         !strcmp(profile, "shadow-precise-dirty-ring-present-image-trace");
     const bool preciseDirtyInlineUpload =
         !strcmp(profile, "shadow-precise-dirty-ring-inline-upload") ||
-        preciseDirtyDescriptorSerialized || preciseDirtyFrameAssocTrace;
+        preciseDirtyCoverageSort || preciseDirtyDescriptorSerialized ||
+        preciseDirtyFrameAssocTrace;
     const bool preciseDirtyInlineUploadSerialized =
         !strcmp(profile, "shadow-precise-dirty-ring-inline-upload-serialized");
     const bool preciseDirtyRing =
@@ -180,6 +183,7 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
      * this selector to the concrete renderer flags before vtest starts. */
     const char* shadowSelector =
         legacyHostSync ? "legacy-host-sync" :
+        preciseDirtyCoverageSort ? "inline-gpu-upload-coverage-sort" :
         preciseDirtyDescriptorSerialized ? "inline-gpu-upload-descriptor-serialized" :
         preciseDirtyFrameAssocTrace ? "inline-gpu-upload-frame-assoc-trace" :
         preciseDirtyPresentImageTrace ? "present-image-trace" :

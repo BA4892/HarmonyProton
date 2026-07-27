@@ -127,6 +127,7 @@ export default class EntryAbility extends UIAbility {
       'shadow-precise-dirty-ring', 'shadow-precise-dirty-ring-perf', 'shadow-precise-dirty-ring-no-merge', 'shadow-precise-dirty-ring-no-upload',
       'shadow-precise-dirty-ring-no-upload-fast',
       'shadow-precise-dirty-ring-inline-upload',
+      'shadow-precise-dirty-ring-inline-upload-coverage-sort',
       'shadow-precise-dirty-ring-inline-upload-serialized',
       'shadow-precise-dirty-ring-inline-upload-descriptor-serialized',
       'shadow-precise-dirty-ring-frame-assoc-trace',

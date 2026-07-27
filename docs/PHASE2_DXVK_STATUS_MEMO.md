@@ -2682,3 +2682,119 @@ Host-visible staging buffer plus `vkCmdCopyBuffer` regions (or another measured
 method that reduces command count) without merging across unknown gaps. It must
 preserve exact dirty ranges, queue order, slot retirement, the ring drain, and
 the same Heaven/Cube/D3D11 correctness gates before any default change.
+
+## 33. 2026-07-27 staging upload A/B rejected
+
+Three isolated staging variants replaced approximately 1200-1400
+`vkCmdUpdateBuffer` records per frame with one multi-region `vkCmdCopyBuffer`
+per destination buffer. All variants preserved exact dirty ranges, the inline
+submit, upload-slot retirement, and the mandatory `roundtrip + wait_all`
+private-present boundary. None improved the accepted inline baseline:
+
+                              inline       staging v1    staging v2    staging v3
+    FPS                        9.245          8.953         8.840         8.804
+    shadow prepare ms/frame   22.735         29.594        28.673        29.146
+    Host total ms/frame       27.264         34.333          n/a         34.052
+
+Variant 1 allocated temporary copy-region storage per target buffer. Variant 2
+reused per-slot `VkBufferCopy` storage. Variant 3 additionally selected the
+device's HOST_CACHED, non-coherent memory type and flushed atom-aligned mapped
+ranges. The v3 matched present window was 2280..3120 (840 frames), with:
+
+    HAP SHA-256:
+      9871d7a9ce237d2de9ce9e877d8e8cf1df1b4f051780000330cd5ec24dfef141
+    archive:
+      D:\MyProject\winehua-logs\manual\heaven-staging-v3-cached-20260727
+    source:
+      main b253993, virglrenderer fb4c20ee plus archived uncommitted A/B,
+      Mesa 19fe8b6, DXVK df55b90, Wine 20559c87
+    dirty scan:          18.445 ms/frame
+    buffer/copy record:   9.634 ms/frame
+    staging regions:       1293.6/frame
+    copy commands:          547.0/frame
+    uploaded data:         1074.7 KiB/frame
+
+Reducing Vulkan command count did not pay for copying all source bytes into a
+second mapped allocation, and HOST_CACHED memory did not change that result.
+The complete v1/v2/v3 artifacts and source diffs are archived. The staging code
+and profile wiring were removed after the measurement; the product remains on
+the committed inline path from section 32.
+
+The next A/B targets the measured 18.4 ms dirty-coverage scan without changing
+upload data or ordering. It must rebuild a sorted coverage interval view from
+the current `bound_buffers` list for each prepare call, rather than carrying a
+cross-frame resource cache. This keeps destruction and rebind behavior exact.
+Allocation failure must fall back to the existing coverage algorithm. Promotion
+still requires the user's continuous Heaven no-rollback verdict, Cube
+`angleRegressions=0`, and the comprehensive x64 DXVK smoke.
+
+## 34. 2026-07-27 sorted coverage candidate: +24% Heaven A/B
+
+The coverage-sort A/B replaces only the allocation coverage predicate used to
+decide whether the normal Host mapped-memory copy may be skipped. The legacy
+predicate repeatedly scans every bound buffer while walking each dirty range.
+The candidate rebuilds the current transfer-destination buffer intervals under
+`object_mutex`, sorts and merges them, and checks the already sorted dirty
+ranges against that union. It does not cache buffer identity across submits;
+only scratch allocation capacity is reused. Allocation failure calls the legacy
+predicate.
+
+The private upload still records the same precise intersections and
+`vkCmdUpdateBuffer` data in the same order. Barriers, inline submit, timeline
+retirement, Guest fences, present serials, and the mandatory
+`vn_ring_roundtrip() + vn_ring_wait_all()` boundary are unchanged.
+
+Matched presents 2280..3120 measured:
+
+                                  inline       coverage sort       delta
+    FPS                            9.245          11.468           +24.0%
+    Host total ms/frame           27.264          15.450           -11.814
+    shadow prepare ms/frame       22.735          11.199           -11.535
+    dirty coverage scan ms/frame  13.091           1.222           -11.869
+    buffer record ms/frame        10.073           9.608            -0.465
+    driver submit ms/frame         4.466           4.183            -0.283
+    upload ranges/frame         1275.4          1169.9              scene variation
+    upload updates/frame        1278.5          1173.2              scene variation
+    upload KiB/frame            1118.3          1006.2              scene variation
+
+The CPU scan reduction, not fewer presents or weakened synchronization,
+explains the gain. The performance artifact is archived at:
+
+    D:\MyProject\winehua-logs\manual\heaven-coverage-sort-v1-20260727
+    HAP SHA-256:
+      21edef3f25ff88c983bde22fca43f5be75d1377aaaf62ff01781add69057e7cd
+
+A randomized property test compared the exact legacy and sorted predicates for
+1,000,000 generated allocation/dirty/buffer interval sets. It found one initial
+zero-byte clipping difference that could only cause an extra CPU fallback. The
+candidate was corrected to preserve the legacy result, after which all one
+million cases matched.
+
+The boundary-corrected HAP was rebuilt and overwrite-installed successfully:
+
+    HAP SHA-256:
+      0410f2d3049187d9a018c1e28e194d4ee2e5f293f1b585281d4a57a1bb2fe028
+    wine-data SHA-256:
+      2126b3c967405219092ae564d0419d4076854590dfeb666f9e811143c5ec7e73
+    automation:
+      D:\MyProject\winehua-logs\automation\phase2-20260727-134737
+
+Automation results with the boundary-corrected build:
+
+    x64 comprehensive DXVK D3D11 smoke: PASS (11.809 s)
+      feature level 11.0 / shader model 5
+      descriptor, subresource, 3D texture, BC, depth/cube, MRT,
+      compute/UAV, MSAA, stencil and Heaven mini-pipeline matrices pass
+      CPU full-frame read/upload zero, no per-frame device idle, no fallback
+
+    x64 D3D11 cube: PASS
+      frames=506, angleRegressions=0, init/present HRESULT=0
+
+    x86 comprehensive smoke: existing 180-second startup timeout
+      This is the same pre-existing WoW64 gate issue and is not a coverage-sort
+      failure; it remains open independently.
+
+The boundary-corrected Heaven candidate is now running for the user's continuous
+visual verdict. Until that verdict is recorded, `coverage-sort` remains an
+explicit A/B profile and the ordinary product default remains the accepted
+inline profile from section 32.

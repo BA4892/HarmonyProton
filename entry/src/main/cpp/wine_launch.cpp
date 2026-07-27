@@ -281,6 +281,8 @@ static void AppendStableDesktopDxvkEnv(std::vector<std::string>& env,
             selectedProfile = "shadow-precise-dirty-ring-inline-upload-descriptor-serialized";
         else if (shadowTrace && !strcmp(shadowTrace, "inline-gpu-upload-serialized"))
             selectedProfile = "shadow-precise-dirty-ring-inline-upload-serialized";
+        else if (shadowTrace && !strcmp(shadowTrace, "inline-gpu-upload-coverage-sort"))
+            selectedProfile = "shadow-precise-dirty-ring-inline-upload-coverage-sort";
         else if (shadowTrace && !strcmp(shadowTrace, "inline-gpu-upload"))
             selectedProfile = "shadow-precise-dirty-ring-inline-upload";
         else if (shadowTrace && !strcmp(shadowTrace, "no-gpu-upload-fast"))

@@ -248,6 +248,7 @@ bool IsAllowedHostEnv(const std::string& key)
            key == "VKR_WINEHUA_PERF_SUMMARY" ||
            key == "VKR_WINEHUA_GPU_UPLOAD" ||
            key == "VKR_WINEHUA_GPU_UPLOAD_INLINE" ||
+           key == "VKR_WINEHUA_COVERAGE_SORT" ||
            key == "VKR_WINEHUA_GPU_UPLOAD_SERIALIZE" ||
            key == "VKR_WINEHUA_SHADOW_GENERATION_SERIALIZE" ||
            key == "VKR_WINEHUA_DESCRIPTOR_UPDATE_SERIALIZE" ||
@@ -438,13 +439,15 @@ extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainPr
             noGpuUploadFast;
         const bool serializedGpuUpload =
             config.shadowTrace == "inline-gpu-upload-serialized";
+        const bool coverageSort =
+            config.shadowTrace == "inline-gpu-upload-coverage-sort";
         const char* descriptorEnv = getenv("VKR_WINEHUA_DESCRIPTOR_UPDATE_SERIALIZE");
         const bool descriptorSerialized =
             (descriptorEnv && descriptorEnv[0] == 49 && !descriptorEnv[1]) ||
             config.shadowTrace == "inline-gpu-upload-descriptor-serialized";
         const bool inlineGpuUpload =
             config.shadowTrace == "inline-gpu-upload" || serializedGpuUpload ||
-            descriptorSerialized || frameAssocTrace;
+            coverageSort || descriptorSerialized || frameAssocTrace;
         const bool perfSummary = config.shadowTrace == "perf" ||
             config.shadowTrace == "no-gpu-upload" || inlineGpuUpload ||
             descriptorSerialized;
@@ -486,6 +489,8 @@ extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainPr
                (noGpuUpload || cpuShadowUpload || legacyHostSync ? "0" : (captureTrace ? "1" : "auto")) +
             "|__env=VKR_WINEHUA_GPU_UPLOAD_INLINE=" +
                (inlineGpuUpload ? "1" : "0") +
+            "|__env=VKR_WINEHUA_COVERAGE_SORT=" +
+               (coverageSort ? "1" : "0") +
             "|__env=VKR_WINEHUA_GPU_UPLOAD_SERIALIZE=" +
                (serializedGpuUpload ? "1" : "0") +
             "|__env=VKR_WINEHUA_SHADOW_GENERATION_SERIALIZE=" +
