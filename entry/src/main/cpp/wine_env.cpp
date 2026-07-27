@@ -161,6 +161,10 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
         "WINEDLLOVERRIDES=d3d11=n;dxgi=n",
         "DXVK_WINEHUA_COMMAND_QUERY_RESET=1",
         "DXVK_WINEHUA_FLUSH_DYNAMIC_MAPPED=1",
+        /* This path is qualified by the command-list ownership and continuous
+         * Heaven gates. Keep per-range statistics opt-in so production avoids
+         * diagnostic bookkeeping and log I/O. */
+        "DXVK_WINEHUA_BATCH_MAPPED_FLUSH=1",
         "VN_WINEHUA_REMOTE_MEMORY_SYNC=1",
         "WINEDLLPATH=" + wineDllPath,
         "WINEDLLDIR0=" + overlay64,

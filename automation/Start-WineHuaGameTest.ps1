@@ -87,6 +87,10 @@ if ($BatchMappedFlush) {
     if (-not $D3DEnvironment.ContainsKey('DXVK_LOG_LEVEL')) {
         $D3DEnvironment['DXVK_LOG_LEVEL'] = 'info'
     }
+} elseif (-not $D3DEnvironment.ContainsKey('DXVK_WINEHUA_BATCH_MAPPED_FLUSH')) {
+    # The runtime enables the qualified product path. A missing switch in this
+    # A/B driver must still mean an explicit off-side run.
+    $D3DEnvironment['DXVK_WINEHUA_BATCH_MAPPED_FLUSH'] = '0'
 }
 
 $environmentPairs = @($D3DEnvironment.GetEnumerator() | Sort-Object { [string]$_.Key })

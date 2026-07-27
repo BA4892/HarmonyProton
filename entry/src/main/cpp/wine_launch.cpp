@@ -291,7 +291,7 @@ static void AppendStableDesktopDxvkEnv(std::vector<std::string>& env,
             selectedProfile = "shadow-precise-dirty-ring-no-upload";
         else
             selectedProfile = guestPerf ? "shadow-precise-strong-ring-perf"
-                                        : "shadow-precise-dirty-ring-inline-upload";
+                                        : "shadow-precise-dirty-ring-inline-upload-coverage-sort";
     }
 
     /* Explorer-launched programs inherit the desktop process environment and

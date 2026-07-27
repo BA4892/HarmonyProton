@@ -1241,6 +1241,10 @@ export class SmokeRunner {
         if (this.request.batchMappedFlush) {
           smokeEnvironment['DXVK_WINEHUA_BATCH_MAPPED_FLUSH'] = '1';
           smokeEnvironment['DXVK_WINEHUA_BATCH_MAPPED_FLUSH_STATS'] = '1';
+        } else {
+          /* AppendD3dBackendEnv enables the qualified product path. Override
+           * it here so a false request remains a real off-side A/B run. */
+          smokeEnvironment['DXVK_WINEHUA_BATCH_MAPPED_FLUSH'] = '0';
         }
         if (this.perfProfile === 'shadow-precise' ||
           this.perfProfile === 'shadow-precise-single-ring' ||
