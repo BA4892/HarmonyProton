@@ -4,6 +4,8 @@
 
 #undef LOG_TAG
 #define LOG_TAG "WL_FPS"
+#undef LOG_DOMAIN
+#define LOG_DOMAIN 0x0000
 #include <hilog/log.h>
 
 // 轻量 FPS 计数器，每 10 秒输出一次帧率

@@ -1,7 +1,9 @@
 import { AbilityConstant, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
+import { deviceInfo } from '@kit.BasicServicesKit';
 import { WineWindowManager } from '../service/WineWindowManager';
+import testNapi from 'libentry.so';
 
 const DOMAIN = 0x0000;
 
@@ -200,6 +202,9 @@ export default class EntryAbility extends UIAbility {
   onWindowStageCreate(windowStage: window.WindowStage): void {
     // Main window is created, set main page for this ability
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onWindowStageCreate');
+
+    // 手机走 fork-shim，必须在 Index.doInit 的首次 NCP 调用前设置。
+    testNapi.setPhoneMode(deviceInfo.deviceType === 'phone');
 
     // 初始化多窗口管理器
     WineWindowManager.getInstance().init(windowStage, this.context);

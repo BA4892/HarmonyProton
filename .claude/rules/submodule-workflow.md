@@ -37,7 +37,7 @@ git commit -m "feat: xxx"
 git push origin feature/<name>
 
 # d) 回到主仓库，登记指针（此时指向 feature/<name>）
-cd /data/share/wineohos
+cd ../..
 git add thirdparty/<name>
 git commit -m "submodule: <name> → feature/<name>"
 ```
@@ -53,7 +53,7 @@ git commit -m "feat: xxx"
 ### 4. 自测
 
 ```bash
-make NATIVE_ARCH=arm64-v8a DEVICE_TYPE=pad
+make NATIVE_ARCH=arm64-v8a
 # 部署测试
 ./scripts/check-submodules.sh   # 确认 submodule commit 已推送到 remote
 ```
@@ -109,7 +109,7 @@ git fetch origin
 git checkout <default>
 git merge feature/<name>
 git push origin <default>
-cd /data/share/wineohos
+cd ../..
 ```
 
 **d) 更新主仓库 submodule 指针（指回 default 分支）：**
@@ -117,7 +117,7 @@ cd /data/share/wineohos
 ```bash
 cd thirdparty/<name>
 git checkout <default> && git pull
-cd /data/share/wineohos
+cd ../..
 git add thirdparty/<name>
 git commit -m "submodule: <name> 指针更新到 <default>"
 ```
@@ -132,7 +132,7 @@ git log --oneline master..feature/<name>   # commit 历史
 ### 4. 构建测试
 
 ```bash
-make NATIVE_ARCH=arm64-v8a DEVICE_TYPE=pad
+make NATIVE_ARCH=arm64-v8a
 # 部署测试
 ```
 

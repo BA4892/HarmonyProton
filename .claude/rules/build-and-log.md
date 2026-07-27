@@ -2,13 +2,7 @@
 
 ## 构建
 
-项目根目录 `/data/share/wineohos/Makefile` 是**唯一**构建入口。
-
-**⚠️ 绝对禁止手动 `make -C build/wine-ohos` 或 `make -C build/wine-native`！** 必须通过顶层 `make`，因为它会：
-- 通过 `scripts/env.sh` 正确设置 `NATIVE_ARCH`、交叉编译工具链
-- 正确 configure Wine（`--host=x86_64-linux-ohos`、OHOS 头文件修复等）
-- 通过 stamp 机制做增量构建，跳过无需重编的模块
-- 正确运行 assemble → HAP → 签名 全流程
+项目根目录 `Makefile` 是**唯一**构建入口。必须通过顶层 `make` 构建
 
 ### 构建命令
 
@@ -28,8 +22,6 @@ make NATIVE_ARCH=x86_64
 ```
 
 **注意:**
-- 默认 `make` = `make NATIVE_ARCH=x86_64` (x86_64 全量构建)
-- 改 Wine C 源码 (`thirdparty/wine/`) 后 `make NATIVE_ARCH=arm64-v8a` 会自动检测并重编 Wine
 - 改 Wine C 源码后，**必须 `make NATIVE_ARCH=arm64-v8a`（完整构建）**，因为 assemble 需要重新打包 wine-data.zip
 - 只改 ArkTS → `make ... hap` 足够
 - 只改 C++ (entry/src/main/cpp/) → `make ... hap` 足够
@@ -49,7 +41,7 @@ H="hdc -t <device_ip>"
 
 # 完整部署流程 (改 Wine 后需卸载重装)
 $H shell "bm uninstall -n app.hackeris.winehua"
-$H file send "/data/share/wineohos/entry/build/default/outputs/default/entry-default-signed.hap" "/data/local/tmp/winehua.hap"
+$H file send "entry/build/default/outputs/default/entry-default-signed.hap" "/data/local/tmp/winehua.hap"
 $H shell "bm install -p /data/local/tmp/winehua.hap"
 $H shell "rm -rf /data/app/el2/100/base/app.hackeris.winehua/files/.wine /data/app/el2/100/base/app.hackeris.winehua/files/wine"
 $H shell "aa start -a EntryAbility -b app.hackeris.winehua"
@@ -60,6 +52,22 @@ $H file send "..." "/data/local/tmp/winehua.hap"
 $H shell "bm install -p /data/local/tmp/winehua.hap"
 $H shell "aa start -a EntryAbility -b app.hackeris.winehua"
 ```
+
+### 沙箱路径映射
+
+hdc 命令中使用的路径是宿主机视角。App 沙箱内代码（C++/ArkTS）使用不同的路径：
+
+| hdc 视角 | App 沙箱视角 | 说明 |
+|----------|-------------|------|
+| `/data/app/el2/100/base/app.hackeris.winehua/` | `/data/storage/el2/base/` | 应用根目录 |
+| `.../files/` | `/data/storage/el2/base/files/` | 文件目录（Wine prefix、wine data） |
+| `.../temp/` | `/data/storage/el2/base/temp/` | 临时文件（stderr 日志） |
+| `.../cache/` | `/data/storage/el2/base/cache/` | 缓存目录（zero-copy marker、VirGL 日志） |
+| `.../files/.wine/` | `/data/storage/el2/base/files/.wine/` | Wine prefix |
+| `.../files/wine/bin/` | `/data/storage/el2/base/files/wine/bin/` | Wine 数据（rawfile 解压） |
+| `/storage/media/100/local/files/Docs/Download/app.hackeris.winehua/` | `{Z:}` | 用户 Download 目录（Wine Z: + HOME，由 DocumentViewPicker 获取） |
+
+> **注意：** 以上 hdc 命令中的 `rm -rf .../files/.wine` 等价于清空沙箱内的 `/data/storage/el2/base/files/.wine/`。
 
 ### Wine 子进程 stderr 日志
 
@@ -118,7 +126,7 @@ hdc -t <device_ip> shell "hilog -z 200" | grep -iE 'crash|fault|SIGSEGV|SIGABRT|
 | `KBD-PIPE` | ArkTS `WineWindow.ets` | 键盘事件: ArkTS→NAPI→Inject 完整链路 |
 | `WL_Plugin` | C++ `plugin_manager.cpp` | XComponent 注册、Surface 创建/销毁、renderer 管理 |
 | `WL_EGL` | C++ `egl_renderer.cpp` | EGL 初始化、render loop |
-| `WL_Server` | C++ `wayland_server.cpp` | Wayland compositor、帧 buffer、toplevel commit、资源快照 |
+| `WL_Server` | C++ `wayland_server.cpp` + `compositor/*` | Wayland compositor、帧 buffer、toplevel commit、资源快照 |
 | `WL_Xdg` | C++ `xdg_shell.cpp` | xdg_toplevel 协议、window_geometry、min/max size |
 | `WL_Input` | C++ `input_manager.cpp` | 事件注入 (InjectEnter/Button/Key)、丢帧统计 |
 | `WL_Seat` | C++ `seat.cpp` | wl_seat 注册/绑定、pointer/keyboard 生命周期 |
@@ -128,10 +136,9 @@ hdc -t <device_ip> shell "hilog -z 200" | grep -iE 'crash|fault|SIGSEGV|SIGABRT|
 | `WL-STAT` | C++ `wayland_server.cpp` | 定期资源快照 (toplevel/surface/renderer 数, 30s) |
 | `Input-DROP` | C++ `input_manager.cpp` | 丢帧统计汇总 (60s, 分类 enter/button/key/motion) |
 | `CRASH` | C++ `napi_init.cpp` | Wine/wineboot 进程崩溃信号 (SIGSEGV/SIGABRT 等) |
-| `MW-SUBSURF` | C++ `wayland_server.cpp` | subsurface 生命周期: 创建/位置/存储/销毁/NULL buffer |
-| `MW-MOVE` | C++ `wayland_server.cpp` | 交互式窗口移动: grab 开始/移动/结束 |
-| `MW-TAKE` | C++ `wayland_server.cpp` | 帧合成输出: 尺寸、children/subsurfaces 数量 |
-| `MW-DIAG` | C++ `wayland_server.cpp` | 临时诊断日志 (问题排查用) |
+| `MW-SUBSURF` | C++ `wayland_server.cpp` + `compositor/desktop_compositor.cpp` | subsurface 生命周期: 创建/位置/存储/销毁/NULL buffer |
+| `MW-MOVE` | C++ `wayland_server.cpp` + `compositor/move_grab.cpp` | 交互式窗口移动: grab 开始/移动/结束 |
+| `MW-TAKE` | C++ `compositor/desktop_compositor.cpp` | 帧合成输出: 尺寸、children/subsurfaces 数量 |
 | `WineChild-stderr` | C++ `wine_child.cpp` | Wine 进程 stderr 转发 (TRACE/ERR/printf) |
 
 ### 事件流水线
@@ -161,7 +168,7 @@ hdc -t <device_ip> shell "hilog -z 200" | grep -iE 'crash|fault|SIGSEGV|SIGABRT|
 
 ```bash
 # Pad 设备
-H="hdc -t 192.168.1.6:33363"
+H="hdc -t <device_ip>"
 
 # 完整事件流水线
 $H hilog | grep -E 'CLICK-PIPE|KBD-PIPE|PIPE'
@@ -179,20 +186,20 @@ $H hilog | grep -E 'CRASH|WL-ERR|SIGSEGV|SIGABRT'
 $H hilog | grep -E 'WL_Input.*Inject(Enter|Button|Key)'
 
 # Wineboot 初始化诊断
-$H shell "hilog -z 500 -t app" | grep -E 'wineboot-stderr|PAD-WB|Launch-Async|drive_c|wine\.inf|__wine_main|preloader_exec|spawn'
+$H shell "hilog -z 500 -t app" | grep -E 'Launch-Async|drive_c|wine\.inf|__wine_main|preloader_exec|spawn'
 ```
 
 ### 日志采集到本地
 
 ```bash
 # Pad: 实时采集并保存
-timeout 60 hdc -t 192.168.1.6:33363 hilog > /tmp/winehua.log 2>/dev/null
+timeout 60 hdc -t <device_ip> hilog > /tmp/winehua.log 2>/dev/null
 
 # Pad: 只取最近 N 行 app 日志
-hdc -t 192.168.1.6:33363 shell "hilog -z 5000 -t app" > /tmp/winehua_dump.log
+hdc -t <device_ip> shell "hilog -z 5000 -t app" > /tmp/winehua_dump.log
 
 # 过滤关键 tag 存入文件
-grep -E 'CLICK-PIPE|KBD-PIPE|PIPE|winehua|WineWM|WL_Plugin|WL_Seat|WL_Input|WWA|WL-ERR|WL-STAT|Input-DROP|CRASH|PAD-WB|wineboot-stderr' /tmp/winehua_dump.log > /tmp/winehua_filtered.log
+grep -E 'CLICK-PIPE|KBD-PIPE|PIPE|winehua|WineWM|WL_Plugin|WL_Seat|WL_Input|WWA|WL-ERR|WL-STAT|Input-DROP|CRASH' /tmp/winehua_dump.log > /tmp/winehua_filtered.log
 ```
 
 ## 输入事件（鼠标/键盘）调试工作流
@@ -202,7 +209,7 @@ grep -E 'CLICK-PIPE|KBD-PIPE|PIPE|winehua|WineWM|WL_Plugin|WL_Seat|WL_Input|WWA|
 ### 1. 构建 + 部署 + 启动 App
 
 ```bash
-cd /data/share/wineohos && bash build.sh hap && bash build.sh deploy <device_ip>
+make NATIVE_ARCH=arm64-v8a hap && bash build.sh deploy <device_ip>
 hdc -t <device_ip> shell "aa start -a EntryAbility -b app.hackeris.winehua"
 ```
 
@@ -210,10 +217,10 @@ hdc -t <device_ip> shell "aa start -a EntryAbility -b app.hackeris.winehua"
 
 ```bash
 # 清空旧日志，开始实时采集并过滤关键事件
-: > /data/share/wineohos/.temp/live-monitor.log
+: > .temp/live-monitor.log
 hdc -t <device_ip> hilog 2>/dev/null | grep --line-buffered -E \
-  'honwine.*(wl_seat.*registered|client bound|wl_pointer|wl_keyboard|keymap|CLICK-PIPE|KBD-PIPE|Seat\].*ERR|Seat\].*pipe|ptrRes=|needsEnter=|MW-FwdMouse|NAPI-Fwd|DROPPED|button dropped|motion dropped|InjectEnter|InjectButton|InjectKey|SCROLL|InjectAxis|InjectKbdModifiers)' \
-  >> /data/share/wineohos/.temp/live-monitor.log
+  'winehua.*(wl_seat.*registered|client bound|wl_pointer|wl_keyboard|keymap|CLICK-PIPE|KBD-PIPE|Seat\].*ERR|Seat\].*pipe|ptrRes=|needsEnter=|MW-FwdMouse|NAPI-Fwd|DROPPED|button dropped|motion dropped|InjectEnter|InjectButton|InjectKey|SCROLL|InjectAxis|InjectKbdModifiers)' \
+  >> .temp/live-monitor.log
 ```
 
 ### 3. 用户操作
@@ -224,14 +231,5 @@ hdc -t <device_ip> hilog 2>/dev/null | grep --line-buffered -E \
 
 ```bash
 # 分析采集到的日志
-cat /data/share/wineohos/.temp/live-monitor.log
+cat .temp/live-monitor.log
 ```
-
-### 过滤关键词覆盖的排查维度
-
-| 维度 | 关键词 | 排查问题 |
-|------|--------|---------|
-| Seat 生命周期 | `wl_seat.*registered`, `client bound`, `wl_pointer`, `wl_keyboard` | 资源反复创建/销毁 |
-| 鼠标完整链路 | `CLICK-PIPE`, `MW-FwdMouse`, `ptrRes=`, `needsEnter=`, `SCROLL`, `InjectAxis` | action 值错位、enter 缺失、滚轮事件 |
-| 键盘完整链路 | `KBD-PIPE`, `NAPI-Fwd`, `DROPPED`, `modifiers`, `InjectKbdModifiers` | enter/key 丢弃、修饰键状态 |
-| 注入层错误 | `Seat].*ERR`, `button dropped`, `motion dropped` | Inject 失败原因 |

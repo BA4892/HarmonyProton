@@ -4,11 +4,14 @@
 #include "wayland_server.h"
 #include <chrono>
 #include <atomic>
+#include <cmath>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
 
+#undef LOG_DOMAIN
 #undef LOG_TAG
+#define LOG_DOMAIN 0x0000
 #define LOG_TAG "WL_Input"
 #include <hilog/log.h>
 
@@ -113,7 +116,7 @@ wl_fixed_t InputManager::CoordTransform(double px, double py, uint32_t tl,
                                          wl_fixed_t* outX, wl_fixed_t* outY) {
     auto* r = PluginManager::GetInstance()->GetRendererForToplevel(tl);
     // Desktop 模式 fallback: root 切换后可能用旧 ID 查 renderer
-    if (!r && WaylandServer::GetInstance()->IsDesktopMode()) {
+    if (!r && WaylandServer::GetInstance()->Policy().RootCompositing()) {
         uint32_t rootId = WaylandServer::GetInstance()->GetDesktopRootToplevelId();
         if (rootId != tl) r = PluginManager::GetInstance()->GetRendererForToplevel(rootId);
     }
@@ -124,28 +127,85 @@ wl_fixed_t InputManager::CoordTransform(double px, double py, uint32_t tl,
     }
     int surfW = r->GetWidth();
     int surfH = r->GetHeight();
-    int fw = r->GetFrameWidth();
-    int fh = r->GetFrameHeight();
-    int vpX = r->GetVpX();
-    int vpY = r->GetVpY();
-    int vpW = r->GetVpW();
-    int vpH = r->GetVpH();
+    const FitRect& lb = r->GetLetterbox();
 
-    if (surfW <= 0 || surfH <= 0 || fw <= 0 || fh <= 0 || vpW <= 0 || vpH <= 0) {
+    if (surfW <= 0 || surfH <= 0 || lb.dstW <= 0 || lb.dstH <= 0) {
         *outX = 0; *outY = 0;
         return wl_fixed_from_int(0);
     }
 
-    // Letterbox 坐标映射: (px - viewport_offset) / viewport_size * frame_size
-    wl_fixed_t wx = wl_fixed_from_double((px - vpX) * fw / vpW);
-    wl_fixed_t wy = wl_fixed_from_double((py - vpY) * fh / vpH);
+    // Letterbox 逆映射 (geometry.h 统一实现): 物理像素 → 去黑边 → 按帧尺寸缩放
+    // 注意用取整后 dst 尺寸的变体 — 与 glViewport 实际显示的整数像素严格一致
+    wl_fixed_t wx = wl_fixed_from_double(FitUnmapDisplayX(lb, px));
+    wl_fixed_t wy = wl_fixed_from_double(FitUnmapDisplayY(lb, py));
     *outX = wx; *outY = wy;
 
     OH_LOG_DEBUG(LOG_APP, "[Input] CoordTransform px=(%{public}.0f,%{public}.0f) vp=(%{public}d,%{public}d %{public}dx%{public}d)"
                  " surf=%{public}dx%{public}d frame=%{public}dx%{public}d → wine=(%{public}.0f,%{public}.0f)",
-                 px, py, vpX, vpY, vpW, vpH, surfW, surfH, fw, fh,
+                 px, py, lb.offX, lb.offY, lb.dstW, lb.dstH, surfW, surfH, lb.srcW, lb.srcH,
                  wl_fixed_to_double(wx), wl_fixed_to_double(wy));
     return wx;
+}
+
+// ========================================================================
+//  指针 warp (wp_pointer_warp_v1) — Wayland 线程调用
+// ========================================================================
+
+void InputManager::OnPointerWarp(wl_resource* surface, double sx, double sy) {
+    auto* ws = WaylandServer::GetInstance();
+    // warp 补偿仅对 ZC 游戏 (PAL2 等 dinput 相对模式) 生效:
+    // ZC 游戏 warp_check ~10ms 回中 + dinput 读差值 → 必须补偿;
+    // SHM 游戏 (红警2 等) 读绝对坐标 — 激活会破坏绝对映射, 必须放过。
+    if (!ws->IsSurfaceFromZcGame(surface)) {
+        OH_LOG_INFO(LOG_APP, "[Input] WARP skip: surf=%{public}p not ZC game (SHM)",
+                    static_cast<void*>(surface));
+        return;
+    }
+    double lx = sx, ly = sy;
+    if (ws->IsDesktopMode()) {
+        // 锚点换到桌面坐标空间, 与 SendPointerEvent 桌面分支的输入空间一致
+        if (!ws->SurfaceLocalToDesktop(surface, sx, sy, lx, ly)) {
+            OH_LOG_WARN(LOG_APP, "[Input] WARP anchor failed: surf=%{public}p not mapped",
+                        static_cast<void*>(surface));
+            return;
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lk(warpMutex_);
+        warpLogicalX_ = lx;
+        warpLogicalY_ = ly;
+        warpActive_ = true;
+        warpSurface_ = surface;
+    }
+    static uint32_t sWarpN = 0;
+    if (++sWarpN % 120 == 1)
+        OH_LOG_INFO(LOG_APP, "[Input] WARP anchor logical=(%{public}.1f,%{public}.1f) desktop=%{public}d n=%{public}u",
+                    lx, ly, ws->IsDesktopMode() ? 1 : 0, sWarpN);
+}
+
+// warpMutex_ 已持有。
+// MOVE/PRESS 一致走 warp 补偿: 输出构造位置 (锚点+增量), wineserver 光标
+// 不再被设备绝对位置拽走 → dinput 差分 = 真实位移, 点击命中也正确。
+// PRESS 不重置 warp 状态 — 点击后 MOVE 继续补偿。
+void InputManager::ApplyWarpLogicLocked(wl_resource* surface, double userX,
+                                        double userY, bool isPress,
+                                        double& outX, double& outY) {
+    bool warpForThisSurface = warpActive_ && warpSurface_ &&
+                              (warpSurface_ == surface);
+    if (warpForThisSurface && hasLastUser_) {
+        // 增量模式: 用户输入只提供 delta, 锚点在 warp 位置
+        outX = warpLogicalX_ + (userX - lastUserX_);
+        outY = warpLogicalY_ + (userY - lastUserY_);
+    } else {
+        outX = userX;
+        outY = userY;
+        if (!isPress) warpActive_ = false;
+    }
+    warpLogicalX_ = outX;
+    warpLogicalY_ = outY;
+    lastUserX_ = userX;
+    lastUserY_ = userY;
+    hasLastUser_ = true;
 }
 
 // ========================================================================
@@ -292,27 +352,91 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
     // 坐标转换
     wl_fixed_t wx, wy;
     auto* ws = WaylandServer::GetInstance();
-    if (ws->IsDesktopMode() && tl != ws->GetDesktopRootToplevelId()) {
+    // Desktop 模式: 按桌面坐标解析精确输入目标 (菜单 subsurface 有自己的
+    // wl_surface, 必须 enter 它并用层相对坐标 — 经父窗口 surface 的越界
+    // 坐标会被 winewayland 的 motion clamp 夹回窗口内, 菜单伸出部分点不中)
+    wl_resource* targetSurf = nullptr;
+    if (ws->Policy().CompositorRoutesInput() && tl != ws->GetDesktopRootToplevelId()) {
         CoordTransform(px, py, ws->GetDesktopRootToplevelId(), &wx, &wy);
-        wx -= wl_fixed_from_int(ws->GetToplevelX(tl));
-        wy -= wl_fixed_from_int(ws->GetToplevelY(tl));
+        // warp/增量模式 (dinput 游戏 SetCursorPos 回中, 见 input_manager.h 尾部):
+        // warpActive_ 时用户输入只提供 delta, 逻辑位置 = warp 锚点 + 增量累加。
+        // 补偿在桌面坐标空间做, 与 OnPointerWarp 的锚点空间一致
+        double logicalX = wl_fixed_to_double(wx);
+        double logicalY = wl_fixed_to_double(wy);
+        {
+            // 用当前事件 toplevel 的真实 surface 做 warp 归属判定:
+            // 从游戏切到桌面时焦点可能还停在游戏 surface, warp 不能误生效
+            wl_resource* warpTestSurface = ws->GetSurfaceForToplevel(tl);
+            std::lock_guard<std::mutex> lk(warpMutex_);
+            ApplyWarpLogicLocked(warpTestSurface, logicalX, logicalY,
+                                 action == ACT_PRESS, logicalX, logicalY);
+        }
+        WaylandServer::InputTarget target;
+        if (ws->FindInputTargetAt(static_cast<int>(lround(logicalX)),
+                                  static_cast<int>(lround(logicalY)), target)) {
+            // 全屏黑边: 只吞 PRESS (防幻影点击/焦点切换)。MOVE/RELEASE 照常透传 —
+            // 越界坐标由 winewayland 的 motion clamp 夹回窗口边缘;
+            // 吞掉 RELEASE 会让 pressedButtons_ 永不清位 (按键卡死)
+            if (target.swallow && action == ACT_PRESS) return;
+            tl = target.toplevelId;
+            targetSurf = target.surface;
+            // 桌面坐标 → surface 局部坐标 (即 geometry.h 的 FitUnmapX/Y;
+            // target.origin/scale 由 InputResolver 的 ComputeFitRect 给出)。
+            // target.scale > 1 表示全屏窗口保比例放大显示, 局部坐标需按同一缩放除回来
+            const double localX = (logicalX - target.originX) / target.scale;
+            const double localY = (logicalY - target.originY) / target.scale;
+            wx = wl_fixed_from_double(localX);
+            wy = wl_fixed_from_double(localY);
+        } else {
+            // 目标 surface 不可用: 退回旧路径 (父窗口相对坐标)
+            wx = wl_fixed_from_double(logicalX - ws->GetToplevelX(tl));
+            wy = wl_fixed_from_double(logicalY - ws->GetToplevelY(tl));
+        }
     } else {
         CoordTransform(px, py, tl, &wx, &wy);
+        // PC 模式: warp 补偿在窗口局部坐标空间 (锚点 = wine 的 surface 局部坐标)
+        double logicalX = wl_fixed_to_double(wx);
+        double logicalY = wl_fixed_to_double(wy);
+        {
+            wl_resource* warpTestSurface = ws->GetSurfaceForToplevel(tl);
+            std::lock_guard<std::mutex> lk(warpMutex_);
+            ApplyWarpLogicLocked(warpTestSurface, logicalX, logicalY,
+                                 action == ACT_PRESS, logicalX, logicalY);
+        }
+        wx = wl_fixed_from_double(logicalX);
+        wy = wl_fixed_from_double(logicalY);
     }
 
-    OH_LOG_INFO(LOG_APP, "[Input] PTR action=%{public}d tl=%{public}u btn=0x%{public}x px=(%{public}.0f,%{public}.0f)"
-                " wine=(%{public}.0f,%{public}.0f) ptrRes=%{public}d needsEnter=%{public}d pressedBits=0x%{public}x",
-                action, tl, button, px, py,
-                wl_fixed_to_double(wx), wl_fixed_to_double(wy),
-                seat->HasPointerResource(), NeedsPointerEnter(), pressedButtons_);
+    // MOVE 是高频路径 (hover 移动 ~125Hz), 全量日志会刷爆 hilog → 抽样 120:1;
+    // PRESS/RELEASE 低频且诊断价值高, 保持全量
+    if (action != ACT_MOVE) {
+        OH_LOG_INFO(LOG_APP, "[Input] PTR action=%{public}d tl=%{public}u btn=0x%{public}x px=(%{public}.0f,%{public}.0f)"
+                    " wine=(%{public}.0f,%{public}.0f) ptrRes=%{public}d needsEnter=%{public}d pressedBits=0x%{public}x",
+                    action, tl, button, px, py,
+                    wl_fixed_to_double(wx), wl_fixed_to_double(wy),
+                    seat->HasPointerResource(), NeedsPointerEnter(), pressedButtons_);
+    } else {
+        static uint32_t sMoveLogN = 0;
+        if (++sMoveLogN % 120 == 0)
+            OH_LOG_INFO(LOG_APP, "[Input] PTR MOVE tl=%{public}u px=(%{public}.0f,%{public}.0f)"
+                        " wine=(%{public}.0f,%{public}.0f) focusedTl=%{public}u n=%{public}u",
+                        tl, px, py, wl_fixed_to_double(wx), wl_fixed_to_double(wy),
+                        pointerFocusedToplevel_.load(), sMoveLogN);
+    }
 
     switch (action) {
         case ACT_PRESS: {
             // 每次都发 enter: Wine 在两次点击间需要新的 pointer focus
             {
-                wl_resource* surf = ws->GetSurfaceForToplevel(tl);
+                wl_resource* surf = targetSurf ? targetSurf : ws->GetSurfaceForToplevel(tl);
                 if (surf) {
-                    if (pointerFocusedToplevel_.load() != 0 && pointerFocusedToplevel_.load() != tl)
+                    // desktop: surface 级比较 (菜单层与父窗口同 toplevelId);
+                    // 其余模式保持 toplevel 级比较 (一窗一 surface, 语义等价)
+                    wl_resource* focused = pointerFocusedSurface_.load();
+                    const bool needLeave = targetSurf
+                        ? (focused != nullptr && focused != surf)
+                        : (pointerFocusedToplevel_.load() != 0 && pointerFocusedToplevel_.load() != tl);
+                    if (needLeave)
                         Enqueue(InputEvent::PTR_LEAVE, 0, nullptr, 0, 0, 0, 0);
                     Enqueue(InputEvent::PTR_ENTER, tl, surf, wx, wy, 0, 0);
                 }
@@ -371,14 +495,22 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
             break;
         }
         case ACT_MOVE: {
-            OH_LOG_INFO(LOG_APP, "[Input] MOVE tl=%{public}u wine=(%{public}.0f,%{public}.0f) needsEnter=%{public}d focusedTl=%{public}u ptrRes=%{public}d",
-                        tl, wl_fixed_to_double(wx), wl_fixed_to_double(wy),
-                        NeedsPointerEnter(), pointerFocusedToplevel_.load(), seat->HasPointerResource());
-            if (NeedsPointerEnter() || pointerFocusedToplevel_.load() != tl) {
-                wl_resource* surf = WaylandServer::GetInstance()->GetSurfaceForToplevel(tl);
+            // 高频路径不打全量日志 (入口已有 120:1 抽样); MOVE-ENTER 是低频
+            // 焦点切换事件, 保留全量日志
+            // desktop: surface 级焦点判定 — 鼠标从窗口移入菜单层 (同 toplevelId,
+            // 不同 surface) 时必须重新 enter, 否则 motion 继续发给窗口 surface
+            const bool needEnter = targetSurf
+                ? (NeedsPointerEnter() || pointerFocusedSurface_.load() != targetSurf)
+                : (NeedsPointerEnter() || pointerFocusedToplevel_.load() != tl);
+            if (needEnter) {
+                wl_resource* surf = targetSurf ? targetSurf : ws->GetSurfaceForToplevel(tl);
                 OH_LOG_INFO(LOG_APP, "[Input] MOVE-ENTER try surf=%{public}p for tl=%{public}u", surf, tl);
                 if (surf) {
-                    if (pointerFocusedToplevel_.load() != 0 && pointerFocusedToplevel_.load() != tl)
+                    wl_resource* focused = pointerFocusedSurface_.load();
+                    const bool needLeave = targetSurf
+                        ? (focused != nullptr && focused != surf)
+                        : (pointerFocusedToplevel_.load() != 0 && pointerFocusedToplevel_.load() != tl);
+                    if (needLeave)
                         Enqueue(InputEvent::PTR_LEAVE, 0, nullptr, 0, 0, 0, 0);
                     Enqueue(InputEvent::PTR_ENTER, tl, surf, wx, wy, 0, 0);
                     OH_LOG_INFO(LOG_APP, "[Input] MOVE-ENTER enqueued OK");
@@ -410,7 +542,7 @@ void InputManager::SendKeyEvent(uint32_t tl, int evdevCode, bool pressed) {
 
     // 键盘 enter 管理: 立即设置状态防止重复 enter (参考旧代码)
     // 桌面模式: 键盘事件永远发到 root, 不应覆盖点击建立的子窗口焦点
-    if (pressed && !WaylandServer::GetInstance()->IsDesktopMode()
+    if (pressed && !WaylandServer::GetInstance()->Policy().CompositorRoutesInput()
         && (!keyboardEntered_.load() || keyboardFocusedToplevel_.load() != tl)) {
         wl_resource* surf = WaylandServer::GetInstance()->GetSurfaceForToplevel(tl);
         if (surf) {
@@ -615,10 +747,11 @@ void InputManager::InjectPointerEnter(uint32_t tl, wl_resource* surface, wl_fixe
         return;
     }
 
-    // 防御: surface 可能在入队后到 flush 前被 Wine 销毁
-    // 通过 toplevelSurfaceMap_ 验证 surface 仍然有效
-    if (!WaylandServer::GetInstance()->GetSurfaceForToplevel(tl)) {
-        OH_LOG_WARN(LOG_APP, "[Input] InjectEnter DROP tl=%{public}u: surface no longer in map (destroyed before flush?)", tl);
+    // 防御: surface 可能在入队后到 flush 前被 Wine 销毁。
+    // 用 surfaceResources_ 精确验证该 surface 本体仍存活 —
+    // 菜单 subsurface 不在 toplevelSurfaceMap_ 里, 不能用 tl 的映射代替
+    if (!WaylandServer::GetInstance()->IsSurfaceAlive(surface)) {
+        OH_LOG_WARN(LOG_APP, "[Input] InjectEnter DROP tl=%{public}u surf=%{public}p: surface destroyed before flush", tl, surface);
         gDropEnter.fetch_add(1); MaybeReportDrops();
         return;
     }
@@ -651,8 +784,11 @@ void InputManager::InjectPointerMotion(wl_fixed_t sx, wl_fixed_t sy) {
             wl_pointer_send_frame(ptr);
         }
     }
-    OH_LOG_INFO(LOG_APP, "[Input] InjectMotion sx=%{public}.1f sy=%{public}.1f OK n=%{public}zu",
-                wl_fixed_to_double(sx), wl_fixed_to_double(sy), ptrs.size());
+    // 高频路径 (hover ~125Hz) 抽样 120:1, 防止刷爆 hilog
+    static uint32_t sInjMotionLogN = 0;
+    if (++sInjMotionLogN % 120 == 0)
+        OH_LOG_INFO(LOG_APP, "[Input] InjectMotion sx=%{public}.1f sy=%{public}.1f OK n=%{public}u ptrs=%{public}zu",
+                    wl_fixed_to_double(sx), wl_fixed_to_double(sy), sInjMotionLogN, ptrs.size());
 }
 
 void InputManager::InjectPointerButton(uint32_t button, uint32_t state) {
@@ -684,12 +820,14 @@ void InputManager::InjectPointerAxis(int axis, wl_fixed_t value) {
     uint32_t t = NowMs();
     for (auto* ptr : ptrs) {
         if (ptr) {
-            // winewayland.drv 只处理 axis_discrete/axis_value120, axis 是空函数
-            wl_pointer_send_axis(ptr, t, axisEnum, value);
+            // winewayland.drv 只处理 axis_discrete/axis_value120, axis 是空函数。
+            // 协议规定 discrete 在配对 axis 之前; steps 直接比较 wl_fixed 原值,
+            // 避免 wl_fixed_to_int 截断把 |值|<1 的正向滚动 (触控板细步) 误判成反向
             if (wl_resource_get_version(ptr) >= WL_POINTER_AXIS_DISCRETE_SINCE_VERSION) {
-                int32_t steps = (wl_fixed_to_int(value) > 0) ? 1 : -1;
+                int32_t steps = (value > 0) ? 1 : -1;
                 wl_pointer_send_axis_discrete(ptr, axisEnum, steps);
             }
+            wl_pointer_send_axis(ptr, t, axisEnum, value);
             wl_pointer_send_frame(ptr);
             nSent++;
         }
@@ -700,8 +838,17 @@ void InputManager::InjectPointerAxis(int axis, wl_fixed_t value) {
 
 void InputManager::InjectPointerLeave() {
     auto ptrs = Seat::GetInstance()->GetAllPointerResources();
-    wl_resource* surf = pointerFocusedSurface_;
+    wl_resource* surf = pointerFocusedSurface_.load();
     if (ptrs.empty() || !surf) return;
+    // 防御: surface 可能在 leave 入队后到 flush 前被销毁 — 对已复用的
+    // 对象 id 发 leave 会让 client 报 "invalid object ... leave(uo)" 并断开
+    if (!WaylandServer::GetInstance()->IsSurfaceAlive(surf)) {
+        OH_LOG_WARN(LOG_APP, "[Input] InjectLeave SKIP surf=%{public}p: destroyed before flush", surf);
+        pointerFocusedToplevel_ = 0;
+        pointerFocusedSurface_ = nullptr;
+        pointerEnterSerial_ = 0;
+        return;
+    }
     uint32_t s = serial_++;
     struct wl_client* surfClient = wl_resource_get_client(surf);
     for (auto* ptr : ptrs) {
@@ -787,6 +934,14 @@ void InputManager::InjectKeyboardLeave() {
     auto kbds = Seat::GetInstance()->GetAllKeyboardResources();
     wl_resource* surf = keyboardFocusedSurface_;
     if (kbds.empty() || !keyboardEntered_.load() || !surf) return;
+    // 防御: 同 InjectPointerLeave — 对已销毁/复用的对象 id 发 leave 会断开 client
+    if (!WaylandServer::GetInstance()->IsSurfaceAlive(surf)) {
+        OH_LOG_WARN(LOG_APP, "[Input] InjectKbdLeave SKIP surf=%{public}p: destroyed before flush", surf);
+        keyboardEntered_ = false;
+        keyboardFocusedToplevel_ = 0;
+        keyboardFocusedSurface_ = nullptr;
+        return;
+    }
     uint32_t s = serial_++;
     struct wl_client* surfClient = wl_resource_get_client(surf);
     for (auto* kbd : kbds) {

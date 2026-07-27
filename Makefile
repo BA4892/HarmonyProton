@@ -228,27 +228,6 @@ $(STAMPS)/wine-$(CONFIG): $(SCRIPTS)/build_wine.sh $(SCRIPTS)/env.sh $(STAMPS)/d
 	fi
 
 # ============================================================
-# wine32 — 32-bit PE DLL (i686-mingw32, WoW64 必需)
-# ============================================================
-WINE32_SENTINEL := $(BUILD_DIR)/wine-i386-pe/dlls/ntdll/i386-windows/ntdll.dll
-
-.PHONY: wine32
-wine32: $(STAMPS)/wine32
-
-$(STAMPS)/wine32: $(SCRIPTS)/build_wine32_pe.sh $(SCRIPTS)/env.sh $(STAMPS)/deps FORCE | $(STAMPS)
-	@if [ -f $@ ] && [ -f $(WINE32_SENTINEL) ] && \
-	    ! find $(ROOT)/thirdparty/wine \
-	           -newer $@ -type f \
-	           \( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.cc' \
-	              -o -name '*.rc' -o -name '*.spec' -o -name '*.idl' \) \
-	           2>/dev/null | grep -q .; then \
-	    echo "  [wine32] up to date"; \
-	else \
-	    echo "=== wine32 ==="; \
-	    bash $(SCRIPTS)/build_wine32_pe.sh && touch $@; \
-	fi
-
-# ============================================================
 # box64 — ARM64 翻译器 (始终 arm64-v8a 架构, 编译为 box64.so dlopen 加载)
 # ============================================================
 .PHONY: box64
@@ -332,8 +311,8 @@ $$(STAMPS)/$(1)/assemble: $(SCRIPTS)/assemble.sh $(SCRIPTS)/env.sh $(DXVK_SENTIN
 endef
 $(foreach a,arm64-v8a x86_64,$(eval $(call assemble_rule,$(a))))
 
-# arm64 assemble 额外依赖 box64 + wine32 (WoW64 32-bit PE DLL)
-$(STAMPS)/arm64-v8a/assemble: $(STAMPS)/box64-arm64-v8a $(STAMPS)/wine32
+# arm64 assemble 额外依赖 box64 (32-bit PE DLL 已由 wine 主构建 --enable-archs=i386 提供)
+$(STAMPS)/arm64-v8a/assemble: $(STAMPS)/box64-arm64-v8a
 
 # ============================================================
 # hap — HAP 构建 + 签名 (统一 rawfile zip)
@@ -345,6 +324,20 @@ hap: assemble
 	@echo ""
 	@echo "HAP: $(ROOT)/entry/build/default/outputs/default/entry-default-signed.hap"
 	@ls -lh $(ROOT)/entry/build/default/outputs/default/entry-default-signed.hap 2>/dev/null || true
+
+# ============================================================
+# test: 宿主机单元测试 (纯函数, 不依赖 OHOS SDK, 用宿主 g++ 编译)
+# ============================================================
+HOST_TEST_DIR := $(BUILD_DIR)/host_tests
+
+.PHONY: test
+test:
+	@mkdir -p $(HOST_TEST_DIR)
+	g++ -std=c++17 -Wall -Wextra -I $(ROOT)/entry/src/main/cpp \
+	    -o $(HOST_TEST_DIR)/geometry_test \
+	    $(ROOT)/host_tests/geometry_test.cpp \
+	    $(ROOT)/entry/src/main/cpp/compositor/geometry.cpp
+	$(HOST_TEST_DIR)/geometry_test
 
 # ============================================================
 # clean

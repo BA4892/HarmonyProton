@@ -20,7 +20,8 @@ class DesktopController extends XComponentController {
     if (rootId > 0) {
       try {
         testNapi.resizeRenderer(rootId, rect.surfaceWidth, rect.surfaceHeight);
-        const s = 2.0;
+        // 统一经 getEffectiveScale, 不再硬编码 2.0
+        const s = WineWindowManager.getInstance().getEffectiveScale();
         testNapi.notifyToplevelResize(rootId,
           Math.round(rect.surfaceWidth / s), Math.round(rect.surfaceHeight / s));
       } catch (_) {}
@@ -68,6 +69,10 @@ struct DesktopPage {
   private twoFingerAccumY: number = 0;
   private twoFingerAccumX: number = 0;
   private static readonly SCROLL_STEP_PX: number = 40; // 物理像素/滚动步, winewayland.drv 只处理 discrete
+  // 物理鼠标右键: Press 时捕获目标 tl, Release 发给同一 tl (按下捕获语义)
+  private rightBtnTl: number = 0;
+  // hover 移动抽样日志计数
+  private hoverLogCounter: number = 0;
 
   build() {
     Stack() {
@@ -266,6 +271,60 @@ struct DesktopPage {
           }
         } catch (e) {
           hilog.error(DOMAIN, 'CLICK-PIPE', '[ArkTS] TOUCH handler exception: %{public}s', JSON.stringify(e));
+        }
+      })
+
+      // ── 物理鼠标: hover 移动 + 右键直通 ──
+      // 左键不在此处理: OHOS 把鼠标左键合成 touch 事件, 由 onTouch 手势状态机
+      // 处理 (此处再处理会双发); 右键不合成 touch 事件, 没有本处理器则物理
+      // 鼠标右键完全丢失 (触屏长按合成右键不受影响)。
+      .onMouse((ev: MouseEvent) => {
+        try {
+          // ── hover 移动直通 (指针跟随/高亮/tooltip/光标形状依赖 WM_MOUSEMOVE) ──
+          if (ev.action === MouseAction.Move) {
+            // touch 手势进行中: 左键按住移动等由 onTouch 状态机发 motion
+            // (OHOS 对左键同时派发合成 touch 和 mouse 事件, 此处再发会双发)
+            if (this.touchPending || this.isDragging || this.twoFingerActive) return;
+            const px = Math.round(vp2px(ev.x));
+            const py = Math.round(vp2px(ev.y));
+            // 右键按住拖动: 发给按下捕获的 tl; 否则按当前位置找目标
+            // (跨窗口 enter/leave 由注入层 ACT_MOVE 的焦点判定处理)
+            let tl = this.rightBtnTl;
+            if (tl <= 0) {
+              tl = testNapi.findToplevelAt(px, py) as number;
+              if (tl <= 0) return;
+            }
+            if (++this.hoverLogCounter % 120 === 0) {
+              hilog.info(DOMAIN, 'CLICK-PIPE', '[ArkTS] MOUSE-MOVE tl=%{public}d px=(%{public}d,%{public}d) n=%{public}d',
+                tl, px, py, this.hoverLogCounter);
+            }
+            testNapi.sendPointerEvent(tl, MouseAction.Move, px, py, 0);
+            return;
+          }
+          if (ev.button !== MouseButton.Right) return;
+          if (ev.action !== MouseAction.Press && ev.action !== MouseAction.Release) return;
+          const px = Math.round(vp2px(ev.x));
+          const py = Math.round(vp2px(ev.y));
+          const btnRight = mapMouseButton(2);
+          if (ev.action === MouseAction.Press) {
+            const tl: number = testNapi.findToplevelAt(px, py) as number;
+            if (tl <= 0) {
+              this.rightBtnTl = 0;
+              hilog.info(DOMAIN, 'CLICK-PIPE', '[ArkTS] MOUSE-RIGHT skipped (no toplevel at %{public}d,%{public}d)', px, py);
+              return;
+            }
+            this.rightBtnTl = tl;
+            testNapi.raiseToplevel(tl);
+            hilog.info(DOMAIN, 'CLICK-PIPE', '[ArkTS] MOUSE-RIGHT press tl=%{public}d px=(%{public}d,%{public}d)', tl, px, py);
+            testNapi.sendPointerEvent(tl, MouseAction.Press, px, py, btnRight);
+          } else {
+            if (this.rightBtnTl <= 0) return;
+            hilog.info(DOMAIN, 'CLICK-PIPE', '[ArkTS] MOUSE-RIGHT release tl=%{public}d px=(%{public}d,%{public}d)', this.rightBtnTl, px, py);
+            testNapi.sendPointerEvent(this.rightBtnTl, MouseAction.Release, px, py, btnRight);
+            this.rightBtnTl = 0;
+          }
+        } catch (e) {
+          hilog.error(DOMAIN, 'CLICK-PIPE', '[ArkTS] MOUSE handler exception: %{public}s', JSON.stringify(e));
         }
       })
 

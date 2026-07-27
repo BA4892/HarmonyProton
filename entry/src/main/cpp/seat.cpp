@@ -11,6 +11,8 @@
 #include <sys/stat.h>
 
 #undef LOG_TAG
+#undef LOG_DOMAIN
+#define LOG_DOMAIN 0x0000
 #define LOG_TAG "WL_Seat"
 #include <hilog/log.h>
 
@@ -224,78 +226,4 @@ void Seat::keyboard_destroy(wl_resource* r) {
         InputManager::GetInstance()->ResetKeyboardEnter();
     }
     OH_LOG_INFO(LOG_APP, "[Seat] wl_keyboard destroyed (remaining=%{public}d)", self->kbdCount_.load());
-}
-
-// ========================================================================
-//  Keycode 映射 (保留向后兼容)
-// ========================================================================
-
-uint32_t Seat::MapKeycode(int32_t ohos) {
-    switch (ohos) {
-        // -- 数字行 --
-        case 2000: return 11;   case 2001: return 2;    case 2002: return 3;
-        case 2003: return 4;    case 2004: return 5;    case 2005: return 6;
-        case 2006: return 7;    case 2007: return 8;    case 2008: return 9;
-        case 2009: return 10;
-
-        // -- 方向键 --
-        case 2012: return 103;  case 2013: return 108;
-        case 2014: return 105;  case 2015: return 106;
-
-        // -- 字母 A-Z --
-        case 2017: return 30;   case 2018: return 48;   case 2019: return 46;
-        case 2020: return 32;   case 2021: return 18;   case 2022: return 33;
-        case 2023: return 34;   case 2024: return 35;   case 2025: return 23;
-        case 2026: return 36;   case 2027: return 37;   case 2028: return 38;
-        case 2029: return 50;   case 2030: return 49;   case 2031: return 24;
-        case 2032: return 25;   case 2033: return 16;   case 2034: return 19;
-        case 2035: return 31;   case 2036: return 20;   case 2037: return 22;
-        case 2038: return 47;   case 2039: return 17;   case 2040: return 45;
-        case 2041: return 21;   case 2042: return 44;
-
-        // -- 标点 --
-        case 2043: return 51;   case 2044: return 52;   case 2056: return 41;
-        case 2057: return 12;   case 2058: return 13;   case 2059: return 26;
-        case 2060: return 27;   case 2061: return 43;   case 2062: return 39;
-        case 2063: return 40;   case 2064: return 53;
-
-        // -- 修饰键 --
-        case 2045: return 56;   case 2046: return 100;  case 2047: return 42;
-        case 2048: return 54;   case 2072: return 29;   case 2073: return 97;
-        case 2074: return 58;   case 2076: return 125;  case 2077: return 126;
-
-        // -- 常用键 --
-        case 2049: return 15;   case 2050: return 57;   case 2054: return 28;
-        case 2070: return 1;    case 2055: return 14;   case 2071: return 111;
-        case 2067: return 139;
-
-        // -- 导航键 --
-        case 2068: return 104;  case 2069: return 109;
-        case 2081: return 102;  case 2082: return 107;
-        case 2083: return 110;  case 2052: return 150;
-        case 2053: return 155;  case 2084: return 159;
-
-        // -- F1-F12 --
-        case 2090: return 59;   case 2091: return 60;   case 2092: return 61;
-        case 2093: return 62;   case 2094: return 63;   case 2095: return 64;
-        case 2096: return 65;   case 2097: return 66;   case 2098: return 67;
-        case 2099: return 68;   case 2100: return 87;   case 2101: return 88;
-
-        // -- 小键盘 --
-        case 2102: return 69;   case 2103: return 82;   case 2104: return 79;
-        case 2105: return 80;   case 2106: return 81;   case 2107: return 75;
-        case 2108: return 76;   case 2109: return 77;   case 2110: return 71;
-        case 2111: return 72;   case 2112: return 73;   case 2113: return 98;
-        case 2114: return 55;   case 2115: return 74;   case 2116: return 78;
-        case 2117: return 83;   case 2119: return 96;
-
-        // -- 媒体键 --
-        case 2085: return 207;  case 2086: return 119;
-        case 2087: return 128;  case 2089: return 167;
-
-        // -- 系统键 --
-        case 2051: return 99;
-
-        default: return 0;
-    }
 }

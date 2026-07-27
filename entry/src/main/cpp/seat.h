@@ -45,9 +45,6 @@ public:
     static void seat_get_touch(wl_client*, wl_resource*, uint32_t id);
     static void seat_release(wl_client*, wl_resource*);
 
-    // -- Keycode 映射: OHOS KEY_* → Linux evdev (保留向后兼容, 新路径用 ArkTS KeyMap) --
-    static uint32_t MapKeycode(int32_t ohosKeycode);
-
 private:
     Seat() = default;
 

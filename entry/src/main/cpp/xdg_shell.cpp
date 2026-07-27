@@ -8,6 +8,8 @@
 #include <cstdio>
 
 #undef LOG_TAG
+#undef LOG_DOMAIN
+#define LOG_DOMAIN 0x0000
 #define LOG_TAG "WL_Xdg"
 #include <hilog/log.h>
 
@@ -26,26 +28,28 @@ static void tl_resource_destroy(wl_resource* r) {
 }
 static void tl_set_parent(wl_client*, wl_resource*, wl_resource*) {}
 static void tl_set_title(wl_client*, wl_resource* tlRes, const char* title) {
-    OH_LOG_INFO(LOG_APP, "[XDG] title=%{public}s", title ? title : "(null)");
     auto* td = static_cast<ToplevelData*>(wl_resource_get_user_data(tlRes));
     if (!td || !td->xdgSurface) return;
     auto* xdg = static_cast<XdgSurface*>(wl_resource_get_user_data(td->xdgSurface));
     if (!xdg || !xdg->wlSurface) return;
     auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(xdg->wlSurface));
     if (!sd) return;
+    OH_LOG_INFO(LOG_APP, "[XDG] title tl=%{public}u %{public}s",
+                sd->toplevelId, title ? title : "(null)");
     sd->title = title ? title : "";
     char json[512];
     snprintf(json, sizeof(json), "{\"title\":\"%s\"}", sd->title.c_str());
     WaylandServer::GetInstance()->FireToplevelEvent(sd->toplevelId, "title", json);
 }
 static void tl_set_app_id(wl_client*, wl_resource* tlRes, const char* appId) {
-    OH_LOG_INFO(LOG_APP, "[XDG] app_id=%{public}s", appId ? appId : "(null)");
     auto* td = static_cast<ToplevelData*>(wl_resource_get_user_data(tlRes));
     if (!td || !td->xdgSurface) return;
     auto* xdg = static_cast<XdgSurface*>(wl_resource_get_user_data(td->xdgSurface));
     if (!xdg || !xdg->wlSurface) return;
     auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(xdg->wlSurface));
     if (!sd) return;
+    OH_LOG_INFO(LOG_APP, "[XDG] app_id tl=%{public}u %{public}s",
+                sd->toplevelId, appId ? appId : "(null)");
     sd->appId = appId ? appId : "";
 }
 static void tl_show_window_menu(wl_client*, wl_resource*, wl_resource*, uint32_t, int32_t, int32_t) {}
@@ -82,6 +86,19 @@ static void tl_set_min_size(wl_client*, wl_resource* tlRes, int32_t w, int32_t h
     fire_limits_event(sd);
 }
 
+// Wine 最大化时不调 xdg_toplevel.set_maximized, 只把 max_size 设为
+// 工作区尺寸 → compositor 以此推断 maximize 意图, 主动补发 MAXIMIZED
+// configure (否则 Wine 永远等不到最大化确认)。
+// 全屏窗口排除在外: 全屏时 Wine 会把 min/max 设为输出尺寸, 若触发本启发式
+// 会补发一个工作区尺寸的 MAXIMIZED configure, 与 FULLSCREEN configure 打架,
+// 使窗口落入 max+fs 混合态 (实测游戏全屏后 client 变成 1400x900, 画面下移)。
+static bool ShouldInferMaximizeFromMaxSize(WaylandServer* ws, SurfaceData* sd,
+                                           int32_t w, int32_t h, int32_t workH) {
+    return !ws->IsToplevelFullscreen(sd->toplevelId) && !sd->maximized &&
+           w >= ws->outputW_ && h >= workH &&
+           sd->toplevelId != ws->GetDesktopRootToplevelId();
+}
+
 static void tl_set_max_size(wl_client* client, wl_resource* tlRes, int32_t w, int32_t h) {
     auto* td = static_cast<ToplevelData*>(wl_resource_get_user_data(tlRes));
     if (!td || !td->xdgSurface) return;
@@ -94,11 +111,9 @@ static void tl_set_max_size(wl_client* client, wl_resource* tlRes, int32_t w, in
     sd->maxHeight = h;
     sd->hasSizeLimits = true;
 
-    // Wine 最大化时不调 set_maximized, 只设 max_size → 主动发 configure
     auto* ws = WaylandServer::GetInstance();
     int32_t workH = ws->GetWorkAreaHeight();
-    if (!sd->maximized && w >= ws->outputW_ && h >= workH &&
-        sd->toplevelId != ws->GetDesktopRootToplevelId()) {
+    if (ShouldInferMaximizeFromMaxSize(ws, sd, w, h, workH)) {
         sd->preMaxW = ws->GetToplevelW(sd->toplevelId);
         sd->preMaxH = ws->GetToplevelH(sd->toplevelId);
         sd->maximized = true;
@@ -129,18 +144,22 @@ static void tl_set_maximized(wl_client* client, wl_resource* tlRes) {
     auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(xdg->wlSurface));
     if (!sd) return;
 
-    if (sd->minimized) {
-        WaylandServer::GetInstance()->SetToplevelRestored(sd->toplevelId);
+    auto* ws = WaylandServer::GetInstance();
+    // 全屏窗口不接受最大化: MAXIMIZED configure 会与 FULLSCREEN 打架
+    if (ws->IsToplevelFullscreen(sd->toplevelId)) {
+        OH_LOG_INFO(LOG_APP, "[XDG] tl_set_maximized tl=%{public}u ignored (fullscreen)", sd->toplevelId);
+        return;
+    }
+    if (ws->IsToplevelMinimized(sd->toplevelId)) {
+        ws->SetToplevelRestored(sd->toplevelId);
     }
     if (!sd->maximized) {
-        auto* ws = WaylandServer::GetInstance();
         sd->preMaxW = ws->GetToplevelW(sd->toplevelId);
         sd->preMaxH = ws->GetToplevelH(sd->toplevelId);
         sd->maximized = true;
         ws->SetToplevelMaximized(sd->toplevelId);
     }
     // 发 configure 让 Wine 渲染到工作区尺寸 (排除任务栏)
-    auto* ws = WaylandServer::GetInstance();
     int32_t mw = ws->outputW_, mh = ws->GetWorkAreaHeight();
     wl_array states;
     wl_array_init(&states);
@@ -164,6 +183,12 @@ static void tl_unset_maximized(wl_client* client, wl_resource* tlRes) {
     auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(xdg->wlSurface));
     if (!sd) return;
 
+    // 全屏窗口不接受 unmaximize: 否则会发出不带 FULLSCREEN 状态的 configure,
+    // 把 Wine 的窗口状态机打出全屏
+    if (WaylandServer::GetInstance()->IsToplevelFullscreen(sd->toplevelId)) {
+        OH_LOG_INFO(LOG_APP, "[XDG] tl_unset_maximized tl=%{public}u ignored (fullscreen)", sd->toplevelId);
+        return;
+    }
     sd->maximized = false;
     // 发 configure 用最大化前尺寸, 不能用 0,0 (Wine 0,0+state → SWP_NOSIZE → 不resize)
     int32_t w = sd->preMaxW > 0 ? sd->preMaxW : 0;
@@ -180,8 +205,76 @@ static void tl_unset_maximized(wl_client* client, wl_resource* tlRes) {
     OH_LOG_INFO(LOG_APP, "[XDG] tl_unset_maximized tl=%{public}u → configure(%{public}d,%{public}d)",
                 sd->toplevelId, w, h);
 }
-static void tl_set_fullscreen(wl_client*, wl_resource*, wl_resource*) {}
-static void tl_unset_fullscreen(wl_client*, wl_resource*) {}
+static void tl_set_fullscreen(wl_client* client, wl_resource* tlRes, wl_resource*) {
+    auto* td = static_cast<ToplevelData*>(wl_resource_get_user_data(tlRes));
+    if (!td || !td->xdgSurface) return;
+    auto* xdg = static_cast<XdgSurface*>(wl_resource_get_user_data(td->xdgSurface));
+    if (!xdg || !xdg->wlSurface) return;
+    auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(xdg->wlSurface));
+    if (!sd) return;
+    auto* ws = WaylandServer::GetInstance();
+
+    if (ws->IsToplevelMinimized(sd->toplevelId)) {
+        ws->SetToplevelRestored(sd->toplevelId);
+    }
+    if (!ws->IsToplevelFullscreen(sd->toplevelId)) {
+        sd->preFsW = ws->GetToplevelW(sd->toplevelId);
+        sd->preFsH = ws->GetToplevelH(sd->toplevelId);
+        // 全屏 configure 不含 MAXIMIZED, Wine 会据此清掉 WS_MAXIMIZE;
+        // 合成器侧的标志位必须同步清, 否则后续 configure 会持续误带 MAXIMIZED
+        // (fullscreen 生效状态由 SetToplevelFullscreen 写入 ToplevelState, 唯一权威)
+        sd->maximized = false;
+        ws->SetToplevelFullscreen(sd->toplevelId, true);
+        // 全屏置顶 (RaiseToplevel 对全屏窗口跳过任务栏 pin)。
+        // 注意走默认 userInitiated=false: 显示模式切换时 Wine 会批量连带
+        // 标记旧窗口 fullscreen, 此处若取号, 全屏优先级就退回请求到达
+        // 顺序决定论 (旧窗口压游戏, 见 ToplevelState::fsPriority 注释)
+        ws->RaiseToplevel(sd->toplevelId);
+    }
+    // 按 xdg-shell 协议回 configure: FULLSCREEN 状态 + 整个输出尺寸 (含任务栏区,
+    // 全屏应覆盖)。Wine 可保持自己的分辨率不变 (fullscreen 对任意尺寸兼容,
+    // 见 winewayland wayland_surface_config_is_compatible), 缩放由合成器完成
+    int32_t fw = ws->outputW_, fh = ws->outputH_;
+    wl_array states;
+    wl_array_init(&states);
+    uint32_t* st = static_cast<uint32_t*>(wl_array_add(&states, sizeof(uint32_t)));
+    *st = XDG_TOPLEVEL_STATE_FULLSCREEN;
+    st = static_cast<uint32_t*>(wl_array_add(&states, sizeof(uint32_t)));
+    *st = XDG_TOPLEVEL_STATE_ACTIVATED;
+    xdg_toplevel_send_configure(tlRes, fw, fh, &states);
+    wl_array_release(&states);
+    wl_display* dpy = wl_client_get_display(client);
+    xdg_surface_send_configure(xdg->xdgSurface, wl_display_next_serial(dpy));
+    ws->FireToplevelEvent(sd->toplevelId, "fullscreen");
+    OH_LOG_INFO(LOG_APP, "[XDG] tl_set_fullscreen tl=%{public}u → configure(%{public}d,%{public}d)",
+                sd->toplevelId, fw, fh);
+}
+static void tl_unset_fullscreen(wl_client* client, wl_resource* tlRes) {
+    auto* td = static_cast<ToplevelData*>(wl_resource_get_user_data(tlRes));
+    if (!td || !td->xdgSurface) return;
+    auto* xdg = static_cast<XdgSurface*>(wl_resource_get_user_data(td->xdgSurface));
+    if (!xdg || !xdg->wlSurface) return;
+    auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(xdg->wlSurface));
+    if (!sd) return;
+    auto* ws = WaylandServer::GetInstance();
+    if (!ws->IsToplevelFullscreen(sd->toplevelId)) return;  // 非全屏: 幂等忽略
+
+    ws->SetToplevelFullscreen(sd->toplevelId, false);
+    // 恢复全屏前尺寸, 不能用 0,0 (Wine 0,0+state → SWP_NOSIZE → 不resize)
+    int32_t w = sd->preFsW > 0 ? sd->preFsW : 0;
+    int32_t h = sd->preFsH > 0 ? sd->preFsH : 0;
+    wl_array states;
+    wl_array_init(&states);
+    uint32_t* st = static_cast<uint32_t*>(wl_array_add(&states, sizeof(uint32_t)));
+    *st = XDG_TOPLEVEL_STATE_ACTIVATED;
+    xdg_toplevel_send_configure(tlRes, w, h, &states);
+    wl_array_release(&states);
+    wl_display* dpy = wl_client_get_display(client);
+    xdg_surface_send_configure(xdg->xdgSurface, wl_display_next_serial(dpy));
+    ws->FireToplevelEvent(sd->toplevelId, "unfullscreen");
+    OH_LOG_INFO(LOG_APP, "[XDG] tl_unset_fullscreen tl=%{public}u → configure(%{public}d,%{public}d)",
+                sd->toplevelId, w, h);
+}
 static void tl_set_minimized(wl_client*, wl_resource* tlRes) {
     auto* td = static_cast<ToplevelData*>(wl_resource_get_user_data(tlRes));
     if (!td || !td->xdgSurface) return;
@@ -190,7 +283,8 @@ static void tl_set_minimized(wl_client*, wl_resource* tlRes) {
     auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(xdg->wlSurface));
     if (!sd) return;
 
-    sd->minimized = true;
+    // 生效状态唯一权威是 ToplevelState.minimized
+    // (NotifyToplevelMinimized → SetToplevelMinimized 写入, 本处不再存协议侧副本)
     WaylandServer::GetInstance()->NotifyToplevelMinimized(sd->toplevelId, sd->geoX, sd->geoY);
     WaylandServer::GetInstance()->FireToplevelEvent(sd->toplevelId, "minimized");
     OH_LOG_INFO(LOG_APP, "[XDG] tl_set_minimized tl=%{public}u", sd->toplevelId);
@@ -251,8 +345,12 @@ static void xs_get_toplevel(wl_client* client, wl_resource* xsRes, uint32_t id) 
             d->toplevelId = sd->toplevelId;
             td->toplevelId = sd->toplevelId;
             WaylandServer::GetInstance()->RegisterToplevelResource(sd->toplevelId, tl);
-            WaylandServer::GetInstance()->FireToplevelEvent(sd->toplevelId, "created",
-                "{\"w\":640,\"h\":480}");
+            // PC 模式: created 延迟到首帧 commit (此时才知 wl_shm 格式,
+            // ARGB 异型窗口需走子窗口路线而非 ability, 见 surface_commit)
+            if (!WaylandServer::GetInstance()->Policy().OhosWindowPerToplevel()) {
+                WaylandServer::GetInstance()->FireToplevelEvent(sd->toplevelId, "created",
+                    "{\"w\":640,\"h\":480}");
+            }
         }
     }
 

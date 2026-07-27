@@ -92,6 +92,39 @@ Broker (`broker.cpp`) 中继 Wine 内部 `CreateProcess` → NCP 的转换，支
 | noexec 文件系统 | 可执行段用匿名 mmap + pread 替代文件映射 |
 | dosdevices | symlink 不可用，四条代码路径硬编码 fallback |
 
+### Wayland compositor 模块结构 (entry/src/main/cpp)
+
+- `wayland_server.{h,cpp}` — display 生命周期、global 注册、toplevel 策略
+  (RaiseToplevel / SetToplevel*)、事件派发；单例 WaylandServer 是各模块组装点
+- `wl_core.cpp` — wl_compositor / wl_surface / wl_region / wl_subcompositor /
+  wl_subsurface / wp_viewporter / wl_output 协议实现；`surface_commit` 按职责
+  分段 (HandleNullBufferCommit → BeginShmAccess → ComputeContentArea →
+  UpdateToplevelFrameOnCommit → CheckDesktopRootOnCommit →
+  UpdateSubsurface(Layer)OnCommit / UpdatePopupOnCommit → FinishCommit)
+- `xdg_shell.cpp` — xdg_wm_base / xdg_surface / xdg_toplevel 协议实现
+- `compositor/` — owning classes，各管一摊状态（不变式见各类头注释）：
+  - `toplevel_manager` — toplevel/popup 聚合状态 + z-order（唯一存放处）
+  - `desktop_compositor` — 帧合成（root 帧为基底）+ zero-copy/subsurface layer
+  - `input_resolver` — Desktop 模式输入命中裁决（全屏→层→toplevel→root）
+  - `desktop_root_manager` — desktop root 识别/切换
+  - `move_grab` — xdg_toplevel.move 交互式窗口移动
+  - `display_policy.h` — PC/Desktop 模式差异的策略查询唯一入口（四类：
+    事件派发 / subsurface / 渲染取帧 / 输入命中；phone 模式不经此，传输层隔离）
+  - `geometry.{h,cpp}` — 保比例 letterbox 纯函数（`make test` 宿主单测覆盖）
+  - `compositor_constants.h` / `compositor_utils.{h,cpp}` — 命名常量与启发式
+  - `debug_assert.h` — MW_ASSERT 不变式断言（默认编译为空）
+- `input_manager.cpp` / `seat.cpp` — 输入事件注入与 wl_seat
+- `egl_renderer.cpp` / `graphics_broker.cpp` — EGL/GLES 上屏与 zero-copy 桥
+
+#### 日志纪律
+
+- 单一 hilog TAG `WL_Server`（刻意不分多 TAG）：hilog 过滤粒度过粗，
+  模块区分靠消息前缀（`[MW]` `[MW-POPUP]` `[MW-SUBSURF]` `[XDG]` `[Input]`
+  `[VIRGL-ZC]` 等）；采集统一 `hilog | grep 'app.hackeris.winehua/WL_Server'`
+- 每帧级日志必须降采样（serial % N 或仅状态变化时），禁止逐帧 INFO
+- 诊断插桩随用随删，或单独 chore 提交，不留长期桩
+- 重构原则与执行记录见 [CPP_REFACTOR_PLAN.md](CPP_REFACTOR_PLAN.md)
+
 ---
 
 ## 3. 信号处理

@@ -1,5 +1,7 @@
 #include "egl_renderer.h"
 #include "graphics_broker.h"
+#include "perf_utils.h"
+#include "shader_utils.h"
 #include "wayland_server.h"
 #include "fps_counter.h"
 #include <algorithm>
@@ -18,6 +20,8 @@
 #include <unistd.h>
 
 #undef LOG_TAG
+#undef LOG_DOMAIN
+#define LOG_DOMAIN 0x0000
 #define LOG_TAG "WL_EGL"
 #include <hilog/log.h>
 
@@ -25,156 +29,28 @@
 static EGLDisplay gSharedDisplay = EGL_NO_DISPLAY;
 static std::once_flag gDisplayOnce;
 
-namespace {
-
-using PerfClock = std::chrono::steady_clock;
-
-static uint64_t PerfNowUs()
-{
-    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
-        PerfClock::now().time_since_epoch()).count());
-}
+using winehua::PerfClock;
+using winehua::PerfNowUs;
+using winehua::RendererPerfWindow;
 
 static bool TraceFrameOrder()
 {
     const char* trace = std::getenv("VKR_WINEHUA_SHADOW_TRACE");
-    return trace && ((!strcmp(trace, "1")) ||
-                     !strcmp(trace, "present-image-trace"));
+    return trace && ((!strcmp(trace, "1")) || !strcmp(trace, "present-image-trace"));
 }
 
-struct RendererPerfWindow {
-    static constexpr size_t kSamples = 120;
-
-    std::array<uint64_t, kSamples> takeUs{};
-    std::array<uint64_t, kSamples> uploadUs{};
-    std::array<uint64_t, kSamples> swapUs{};
-    std::array<uint64_t, kSamples> totalUs{};
-    size_t count = 0;
-    uint64_t displayed = 0;
-    uint64_t windowDisplayed = 0;
-    uint64_t failedSwaps = 0;
-    uint64_t uploadBytes = 0;
-    uint64_t startedUs = PerfNowUs();
-    uint64_t publishStartedUs = startedUs;
-    uint64_t publishFrames = 0;
-    uint64_t publishSequence = 0;
-
-    void PublishDisplayedFps(uint32_t toplevelId, uint64_t nowUs)
-    {
-        std::string path = "/data/storage/el2/base/files/.wine/drive_c/windows/temp/winehua_display_fps.txt";
-        const winehua::GraphicsBackendState graphicsState =
-            winehua::GraphicsBroker::GetInstance().GetState();
-        static constexpr const char* kGraphicsSuffix = "/graphics";
-        if (graphicsState.runtimeDir.size() > strlen(kGraphicsSuffix) &&
-            graphicsState.runtimeDir.compare(
-                graphicsState.runtimeDir.size() - strlen(kGraphicsSuffix),
-                strlen(kGraphicsSuffix), kGraphicsSuffix) == 0)
-        {
-            path = graphicsState.runtimeDir.substr(
-                0, graphicsState.runtimeDir.size() - strlen(kGraphicsSuffix));
-            path += "/drive_c/windows/temp/winehua_display_fps.txt";
-        }
-        const char* kPath = path.c_str();
-        const uint64_t elapsedUs = nowUs - publishStartedUs;
-        if (elapsedUs < 1000000) return;
-
-        const double fps = static_cast<double>(publishFrames) * 1000000.0 /
-                           static_cast<double>(std::max<uint64_t>(1, elapsedUs));
-        char tempPath[192];
-        char payload[128];
-        const unsigned long long nextSequence =
-            static_cast<unsigned long long>(publishSequence + 1);
-        const int payloadLength = std::snprintf(
-            payload, sizeof(payload), "%llu %.3f %u\n", nextSequence, fps, toplevelId);
-        std::snprintf(tempPath, sizeof(tempPath), "%s.tmp.%d.%p",
-                      kPath, getpid(), static_cast<void*>(this));
-
-        const int fd = payloadLength > 0 && payloadLength < static_cast<int>(sizeof(payload))
-            ? open(tempPath, O_WRONLY | O_CREAT | O_TRUNC, 0666) : -1;
-        if (fd >= 0)
-        {
-            const ssize_t written = write(fd, payload, static_cast<size_t>(payloadLength));
-            close(fd);
-            if (written == payloadLength && !rename(tempPath, kPath))
-                publishSequence++;
-            else
-                unlink(tempPath);
-        }
-
-        publishFrames = 0;
-        publishStartedUs = nowUs;
+static void ComposeZeroCopySamplingTransform(const float* nativeTransform,
+                                             bool flipY,
+                                             float* samplingTransform)
+{
+    if (!nativeTransform || !samplingTransform) return;
+    std::copy(nativeTransform, nativeTransform + 16, samplingTransform);
+    if (!flipY) return;
+    for (int row = 0; row < 4; ++row) {
+        samplingTransform[4 + row] = -nativeTransform[4 + row];
+        samplingTransform[12 + row] = nativeTransform[4 + row] + nativeTransform[12 + row];
     }
-
-    static uint64_t Percentile(std::array<uint64_t, kSamples> values, size_t count,
-                               unsigned int percentile)
-    {
-        std::sort(values.begin(), values.begin() + count);
-        const size_t index = std::min(count - 1, (count * percentile + 99) / 100 - 1);
-        return values[index];
-    }
-
-    void Add(uint32_t toplevelId, uint64_t take, uint64_t upload, uint64_t swap,
-             uint64_t total, size_t bytes, bool swapOk)
-    {
-        takeUs[count] = take;
-        uploadUs[count] = upload;
-        swapUs[count] = swap;
-        totalUs[count] = total;
-        ++count;
-        if (swapOk)
-        {
-            ++displayed;
-            ++windowDisplayed;
-            ++publishFrames;
-        }
-        uploadBytes += bytes;
-        if (!swapOk) ++failedSwaps;
-
-        const uint64_t nowUs = PerfNowUs();
-        PublishDisplayedFps(toplevelId, nowUs);
-
-        if (count != kSamples) return;
-
-        const double fps = static_cast<double>(windowDisplayed) * 1000000.0 /
-                           static_cast<double>(std::max<uint64_t>(1, nowUs - startedUs));
-        OH_LOG_INFO(LOG_APP,
-                    "[GL-PERF] tl=%{public}u displayed=%{public}llu fps=%{public}.2f "
-                    "upload_bytes=%{public}llu failed_swaps=%{public}llu "
-                    "take_us=%{public}llu/%{public}llu/%{public}llu/%{public}llu "
-                    "upload_us=%{public}llu/%{public}llu/%{public}llu/%{public}llu "
-                    "swap_us=%{public}llu/%{public}llu/%{public}llu/%{public}llu "
-                    "total_us=%{public}llu/%{public}llu/%{public}llu/%{public}llu",
-                    toplevelId, static_cast<unsigned long long>(displayed), fps,
-                    static_cast<unsigned long long>(uploadBytes),
-                    static_cast<unsigned long long>(failedSwaps),
-                    static_cast<unsigned long long>(Percentile(takeUs, count, 50)),
-                    static_cast<unsigned long long>(Percentile(takeUs, count, 95)),
-                    static_cast<unsigned long long>(Percentile(takeUs, count, 99)),
-                    static_cast<unsigned long long>(*std::max_element(takeUs.begin(), takeUs.end())),
-                    static_cast<unsigned long long>(Percentile(uploadUs, count, 50)),
-                    static_cast<unsigned long long>(Percentile(uploadUs, count, 95)),
-                    static_cast<unsigned long long>(Percentile(uploadUs, count, 99)),
-                    static_cast<unsigned long long>(*std::max_element(uploadUs.begin(), uploadUs.end())),
-                    static_cast<unsigned long long>(Percentile(swapUs, count, 50)),
-                    static_cast<unsigned long long>(Percentile(swapUs, count, 95)),
-                    static_cast<unsigned long long>(Percentile(swapUs, count, 99)),
-                    static_cast<unsigned long long>(*std::max_element(swapUs.begin(), swapUs.end())),
-                    static_cast<unsigned long long>(Percentile(totalUs, count, 50)),
-                    static_cast<unsigned long long>(Percentile(totalUs, count, 95)),
-                    static_cast<unsigned long long>(Percentile(totalUs, count, 99)),
-                    static_cast<unsigned long long>(*std::max_element(totalUs.begin(), totalUs.end())));
-
-        count = 0;
-        windowDisplayed = 0;
-        uploadBytes = 0;
-        failedSwaps = 0;
-        startedUs = nowUs;
-    }
-};
-
-} // namespace
-
-float EglRenderer::globalDisplayScale_ = 1.0f;
+}
 
 void EglRenderer::OnVSync(long long timestamp, void* data)
 {
@@ -213,66 +89,10 @@ EGLDisplay EglRenderer::GetSharedDisplay() {
     return gSharedDisplay;
 }
 
-// -- 全屏 quad 着色器 (Wayland ARGB = BGRA 内存序, 像素着色器中 swizzle) --
-static const char* kVS = R"(#version 300 es
-layout(location=0) in vec2 aPos;
-layout(location=1) in vec2 aUV;
-out vec2 vUV;
-void main() { vUV = aUV; gl_Position = vec4(aPos, 0, 1); }
-)";
-
-static const char* kFS = R"(#version 300 es
-precision mediump float;
-in vec2 vUV;
-out vec4 oColor;
-uniform sampler2D uTex;
-void main() { oColor = vec4(texture(uTex, vUV).bgr, 1.0); }
-)";
-
-static const char* kZeroCopyFS = R"(#version 300 es
-#extension GL_OES_EGL_image_external_essl3 : require
-precision mediump float;
-in vec2 vUV;
-out vec4 oColor;
-uniform samplerExternalOES uTex;
-uniform mat4 uTransform;
-void main() {
-    vec4 coord = uTransform * vec4(vUV, 0.0, 1.0);
-    oColor = texture(uTex, coord.xy);
-}
-)";
-
-/* Keep the NativeImage transform intact and apply the Vulkan-only image-origin
- * correction on its input. The VirGL/OpenGL producer keeps the existing path. */
-static void ComposeZeroCopySamplingTransform(const float* nativeTransform,
-                                             bool flipY,
-                                             float* samplingTransform)
-{
-    if (!nativeTransform || !samplingTransform) return;
-    std::copy(nativeTransform, nativeTransform + 16, samplingTransform);
-    if (!flipY) return;
-
-    // sampling = native * (u, 1-v), in column-major OpenGL layout.
-    for (int row = 0; row < 4; ++row)
-    {
-        samplingTransform[4 + row] = -nativeTransform[4 + row];
-        samplingTransform[12 + row] = nativeTransform[4 + row] + nativeTransform[12 + row];
-    }
-}
-
-static GLuint CompileShader(GLenum type, const char* src) {
-    GLuint s = glCreateShader(type);
-    glShaderSource(s, 1, &src, nullptr);
-    glCompileShader(s);
-    GLint ok = 0;
-    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
-    if (!ok) {
-        char log[1024] = {};
-        glGetShaderInfoLog(s, sizeof(log), nullptr, log);
-        OH_LOG_ERROR(LOG_APP, "[EGL] shader compile: %{public}s", log);
-    }
-    return s;
-}
+using winehua::kFullscreenQuadVS;
+using winehua::kFullscreenQuadFS;
+using winehua::kZeroCopyExternalFS;
+using winehua::CompileShader;
 
 bool EglRenderer::InitZeroCopyConsumer()
 {
@@ -280,8 +100,8 @@ bool EglRenderer::InitZeroCopyConsumer()
         winehua::GraphicsBroker::GetInstance().GetState().active != winehua::GraphicsBackend::Virgl)
         return false;
 
-    GLuint vertex = CompileShader(GL_VERTEX_SHADER, kVS);
-    GLuint fragment = CompileShader(GL_FRAGMENT_SHADER, kZeroCopyFS);
+    GLuint vertex = CompileShader(GL_VERTEX_SHADER, kFullscreenQuadVS);
+    GLuint fragment = CompileShader(GL_FRAGMENT_SHADER, kZeroCopyExternalFS);
     zeroCopyProgram_ = glCreateProgram();
     glAttachShader(zeroCopyProgram_, vertex);
     glAttachShader(zeroCopyProgram_, fragment);
@@ -313,21 +133,22 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
     if (zeroCopyRegistered_)
     {
         WaylandServer::ZeroCopyLayerInfo layer;
-        if (!server->GetZeroCopyLayerInfo(
-                zeroCopySurfaceKey_, rendererToplevelId,
-                zeroCopySourceW_, zeroCopySourceH_, layer))
+        if (!server->GetZeroCopyLayerInfo(zeroCopySurfaceKey_, rendererToplevelId,
+                                          zeroCopySourceW_, zeroCopySourceH_, layer))
         {
             ReleaseZeroCopyBinding();
         }
         else
         {
             if (zeroCopyLayerX_ != layer.x || zeroCopyLayerY_ != layer.y ||
-                zeroCopyLayerW_ != layer.width || zeroCopyLayerH_ != layer.height)
+                zeroCopyLayerW_ != layer.width || zeroCopyLayerH_ != layer.height ||
+                zeroCopyFullscreen_ != (layer.fullscreen && server->Policy().RootCompositing()))
                 zeroCopyGeometryDirty_ = true;
             zeroCopyLayerX_ = layer.x;
             zeroCopyLayerY_ = layer.y;
             zeroCopyLayerW_ = layer.width;
             zeroCopyLayerH_ = layer.height;
+            zeroCopyFullscreen_ = layer.fullscreen && server->Policy().RootCompositing();
             if (zeroCopyFallbackPending_ &&
                 layer.shmCommitSerial > zeroCopyFallbackShmSerial_)
             {
@@ -355,14 +176,7 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
         for (const auto& surface : surfaces)
         {
             if (surface.surfaceKey != zeroCopySurfaceKey_) continue;
-            if (surface.vulkan != broker.IsVulkanPresentMode())
-            {
-                OH_LOG_WARN(LOG_APP,
-                            "[VIRGL-ZC][MAIN] bound surface type changed; releasing "
-                            "key=%{public}llu surface_vulkan=%{public}s mode_vulkan=%{public}s",
-                            static_cast<unsigned long long>(zeroCopySurfaceKey_),
-                            surface.vulkan ? "yes" : "no",
-                            broker.IsVulkanPresentMode() ? "yes" : "no");
+            if (surface.vulkan != broker.IsVulkanPresentMode()) {
                 ReleaseZeroCopyBinding();
                 break;
             }
@@ -378,15 +192,11 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
     for (const auto& surface : surfaces)
     {
         if (!surface.surfaceKey || surface.attached) continue;
-        // A stale GL surface and a live Venus surface can coexist while an
-        // Explorer/Wine client is restarted. Never attach across the backend
-        // boundary; doing so presents another client's history as this game.
         if (surface.vulkan != wantVulkanSurface) continue;
         WaylandServer::ZeroCopyLayerInfo layer;
-        if (!server->GetZeroCopyLayerInfo(
-                surface.surfaceKey, rendererToplevelId,
-                static_cast<int>(surface.width), static_cast<int>(surface.height), layer))
-            continue;
+        if (!server->GetZeroCopyLayerInfo(surface.surfaceKey, rendererToplevelId,
+                                          static_cast<int>(surface.width),
+                                          static_cast<int>(surface.height), layer)) continue;
 
         glGenTextures(1, &zeroCopyTexture_);
         glBindTexture(GL_TEXTURE_EXTERNAL_OES, zeroCopyTexture_);
@@ -457,17 +267,13 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
         OH_LOG_INFO(LOG_APP,
                     "[VIRGL-ZC][MAIN] consumer attached tl=%{public}u key=%{public}llu "
                     "pid=%{public}u surface=%{public}u source=%{public}dx%{public}d "
-                    "layer=%{public}dx%{public}d+%{public}d,%{public}d "
-                    "parent=%{public}u geometry=%{public}s queue=%{public}d "
-                    "source_kind=%{public}s "
+                    "layer=%{public}dx%{public}d+%{public}d,%{public}d queue=%{public}d "
                     "size_ret=%{public}d usage_ret=%{public}d drop_ret=%{public}d",
                     rendererToplevelId,
                     static_cast<unsigned long long>(zeroCopySurfaceKey_),
                     zeroCopyClientPid_, zeroCopySurfaceId_,
                     zeroCopySourceW_, zeroCopySourceH_, zeroCopyLayerW_, zeroCopyLayerH_,
-                    zeroCopyLayerX_, zeroCopyLayerY_, layer.parentToplevel,
-                    layer.protocolOnly ? "protocol" : "shm", queueSize,
-                    zeroCopyVulkanSource_ ? "vulkan" : "virgl",
+                    zeroCopyLayerX_, zeroCopyLayerY_, queueSize,
                     sizeResult, usageResult, dropResult);
         return true;
     }
@@ -483,8 +289,7 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
     const uint64_t signalCount = zeroCopyFrameSignals_.load(std::memory_order_acquire);
     const uint64_t signalDelta = signalCount >= zeroCopyLastConsumedSignal_
         ? signalCount - zeroCopyLastConsumedSignal_ : 0;
-    if (signalDelta > 1)
-        zeroCopyCoalescedSignals_ += signalDelta - 1;
+    if (signalDelta > 1) zeroCopyCoalescedSignals_ += signalDelta - 1;
     zeroCopyLastConsumedSignal_ = signalCount;
     ++zeroCopyUpdates_;
 
@@ -507,11 +312,10 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
             WaylandServer::ZeroCopyLayerInfo layer;
             uint32_t rendererToplevelId = toplevelId_;
             WaylandServer* server = WaylandServer::GetInstance();
-            if (server->IsDesktopMode())
+            if (server->Policy().RootCompositing())
                 rendererToplevelId = server->GetDesktopRootToplevelId();
-            if (server->GetZeroCopyLayerInfo(
-                    zeroCopySurfaceKey_, rendererToplevelId,
-                    zeroCopySourceW_, zeroCopySourceH_, layer))
+            if (server->GetZeroCopyLayerInfo(zeroCopySurfaceKey_, rendererToplevelId,
+                                              zeroCopySourceW_, zeroCopySourceH_, layer))
                 zeroCopyFallbackShmSerial_ = layer.shmCommitSerial;
             winehua::GraphicsBroker::GetInstance().SetZeroCopySurfaceReady(
                 zeroCopySurfaceKey_, false);
@@ -528,29 +332,9 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
         return false;
     }
 
-    ComposeZeroCopySamplingTransform(
-        zeroCopyTransform_, zeroCopyVulkanSource_, zeroCopySamplingTransform_);
-    if (zeroCopyFrames_ == 0)
-    {
-        OH_LOG_INFO(LOG_APP,
-                    "[VIRGL-ZC][MAIN] transform source=%{public}s flip_y=%{public}s "
-                    "native_r0=(%{public}.3f,%{public}.3f,%{public}.3f,%{public}.3f) "
-                    "native_r1=(%{public}.3f,%{public}.3f,%{public}.3f,%{public}.3f) "
-                    "sample_r0=(%{public}.3f,%{public}.3f,%{public}.3f,%{public}.3f) "
-                    "sample_r1=(%{public}.3f,%{public}.3f,%{public}.3f,%{public}.3f)",
-                    zeroCopyVulkanSource_ ? "vulkan" : "virgl",
-                    zeroCopyVulkanSource_ ? "yes" : "no",
-                    zeroCopyTransform_[0], zeroCopyTransform_[4],
-                    zeroCopyTransform_[8], zeroCopyTransform_[12],
-                    zeroCopyTransform_[1], zeroCopyTransform_[5],
-                    zeroCopyTransform_[9], zeroCopyTransform_[13],
-                    zeroCopySamplingTransform_[0], zeroCopySamplingTransform_[4],
-                    zeroCopySamplingTransform_[8], zeroCopySamplingTransform_[12],
-                    zeroCopySamplingTransform_[1], zeroCopySamplingTransform_[5],
-                    zeroCopySamplingTransform_[9], zeroCopySamplingTransform_[13]);
-    }
-
     zeroCopyConsecutiveFailures_ = 0;
+    ComposeZeroCopySamplingTransform(zeroCopyTransform_, zeroCopyVulkanSource_,
+                                      zeroCopySamplingTransform_);
     const int64_t imageTimestamp = OH_NativeImage_GetTimestamp(zeroCopyImage_);
     const int64_t previousTimestamp = zeroCopyLastTimestamp_;
     int64_t timestampDeltaUs = 0;
@@ -559,8 +343,7 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
         if (previousTimestamp > 0)
         {
             timestampDeltaUs = (imageTimestamp - previousTimestamp) / 1000;
-            if (imageTimestamp < previousTimestamp)
-            {
+            if (imageTimestamp < previousTimestamp) {
                 ++zeroCopyTimestampRegressions_;
                 if (zeroCopyTimestampRegressions_ == 1 || zeroCopyTimestampRegressions_ % 60 == 0)
                     OH_LOG_WARN(LOG_APP,
@@ -569,9 +352,7 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
                                 toplevelId_, static_cast<long long>(imageTimestamp),
                                 static_cast<long long>(previousTimestamp),
                                 static_cast<unsigned long long>(zeroCopyTimestampRegressions_));
-            }
-            else if (imageTimestamp == previousTimestamp)
-            {
+            } else if (imageTimestamp == previousTimestamp) {
                 ++zeroCopyDuplicateTimestamps_;
             }
         }
@@ -582,10 +363,9 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
     WaylandServer::ZeroCopyLayerInfo layer;
     uint32_t rendererToplevelId = toplevelId_;
     WaylandServer* server = WaylandServer::GetInstance();
-    if (server->IsDesktopMode()) rendererToplevelId = server->GetDesktopRootToplevelId();
-    if (!server->GetZeroCopyLayerInfo(
-            zeroCopySurfaceKey_, rendererToplevelId,
-            zeroCopySourceW_, zeroCopySourceH_, layer))
+    if (server->Policy().RootCompositing()) rendererToplevelId = server->GetDesktopRootToplevelId();
+    if (!server->GetZeroCopyLayerInfo(zeroCopySurfaceKey_, rendererToplevelId,
+                                      zeroCopySourceW_, zeroCopySourceH_, layer))
     {
         ReleaseZeroCopyBinding();
         return false;
@@ -594,6 +374,7 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
     zeroCopyLayerY_ = layer.y;
     zeroCopyLayerW_ = layer.width;
     zeroCopyLayerH_ = layer.height;
+    zeroCopyFullscreen_ = layer.fullscreen && server->Policy().RootCompositing();
     width = zeroCopySourceW_;
     height = zeroCopySourceH_;
     zeroCopyHasFrame_ = true;
@@ -620,17 +401,15 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
     if (TraceFrameOrder() && zeroCopyFrames_ <= 600)
         OH_LOG_INFO(LOG_APP,
                     "[VENUS-ORDER][MAIN] frame=%{public}llu signals=%{public}llu "
-                    "updates=%{public}llu signal_delta=%{public}llu "
-                    "coalesced=%{public}llu timestamp=%{public}lld "
-                    "timestamp_delta_us=%{public}lld timestamp_dup=%{public}llu "
-                    "timestamp_regress=%{public}llu",
+                    "updates=%{public}llu signal_delta=%{public}llu coalesced=%{public}llu "
+                    "timestamp=%{public}lld timestamp_delta_us=%{public}lld "
+                    "timestamp_dup=%{public}llu timestamp_regress=%{public}llu",
                     static_cast<unsigned long long>(zeroCopyFrames_),
                     static_cast<unsigned long long>(zeroCopyFrameSignals_.load()),
                     static_cast<unsigned long long>(zeroCopyUpdates_),
                     static_cast<unsigned long long>(signalDelta),
                     static_cast<unsigned long long>(zeroCopyCoalescedSignals_),
-                    static_cast<long long>(imageTimestamp),
-                    static_cast<long long>(timestampDeltaUs),
+                    static_cast<long long>(imageTimestamp), static_cast<long long>(timestampDeltaUs),
                     static_cast<unsigned long long>(zeroCopyDuplicateTimestamps_),
                     static_cast<unsigned long long>(zeroCopyTimestampRegressions_));
     if (zeroCopyFrames_ == 1 || zeroCopyFrames_ % 120 == 0)
@@ -725,6 +504,10 @@ bool EglRenderer::Init(OHNativeWindow* window, int w, int h) {
     EGLint ctxAttrs[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
     context_ = eglCreateContext(display_, cfg, EGL_NO_CONTEXT, ctxAttrs);
 
+    // 异型窗口 (layered/shaped): 确保 native window buffer 带 alpha 通道,
+    // 否则 per-pixel alpha 在 buffer 层就被丢弃 (默认可能是 RGBX)
+    OH_NativeWindow_NativeWindowHandleOpt(window_, SET_FORMAT, NATIVEBUFFER_PIXEL_FMT_RGBA_8888);
+
     // OHOS: EGLNativeWindowType = OHNativeWindow* (cast to unsigned long)
     surface_ = eglCreateWindowSurface(display_, cfg,
                                        reinterpret_cast<EGLNativeWindowType>(window_), nullptr);
@@ -733,10 +516,12 @@ bool EglRenderer::Init(OHNativeWindow* window, int w, int h) {
         return false;
     }
     {
-        EGLint sw = 0, sh = 0;
+        EGLint sw = 0, sh = 0, alphaBits = 0;
         eglQuerySurface(display_, surface_, EGL_WIDTH, &sw);
         eglQuerySurface(display_, surface_, EGL_HEIGHT, &sh);
-        OH_LOG_INFO(LOG_APP, "[EGL] tl=%{public}u eglSurface %{public}dx%{public}d", toplevelId_, sw, sh);
+        eglQuerySurface(display_, surface_, EGL_ALPHA_SIZE, &alphaBits);
+        OH_LOG_INFO(LOG_APP, "[EGL] tl=%{public}u eglSurface %{public}dx%{public}d alphaBits=%{public}d",
+                    toplevelId_, sw, sh, alphaBits);
     }
 
     running_ = true;
@@ -758,8 +543,8 @@ void EglRenderer::RenderLoop() {
                 toplevelId_, swapIntervalDisabled ? "OK" : "FAIL");
 
     // 2. 着色器
-    GLuint vs = CompileShader(GL_VERTEX_SHADER, kVS);
-    GLuint fs = CompileShader(GL_FRAGMENT_SHADER, kFS);
+    GLuint vs = CompileShader(GL_VERTEX_SHADER, kFullscreenQuadVS);
+    GLuint fs = CompileShader(GL_FRAGMENT_SHADER, kFullscreenQuadFS);
     program_ = glCreateProgram();
     glAttachShader(program_, vs);
     glAttachShader(program_, fs);
@@ -773,6 +558,7 @@ void EglRenderer::RenderLoop() {
     glGenBuffers(1, &vbo_);
     glBindBuffer(GL_ARRAY_BUFFER, vbo_);
     glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+    glGenBuffers(1, &occluderVbo_);
 
     // 4. 纹理 (初始空)
     glGenTextures(1, &texture_);
@@ -898,13 +684,17 @@ void EglRenderer::RenderLoop() {
         uint32_t useToplevel = toplevelId_;
         WaylandServer* ws = WaylandServer::GetInstance();
         // Desktop mode: root toplevel may be recreated, always use current ID
-        if (ws->IsDesktopMode()) useToplevel = ws->GetDesktopRootToplevelId();
+        if (ws->Policy().RootCompositing()) useToplevel = ws->GetDesktopRootToplevelId();
         TryAttachZeroCopySurface(useToplevel);
         const bool zeroCopyGeometryFrame = zeroCopyGeometryDirty_;
         zeroCopyGeometryDirty_ = false;
         zeroCopyFrame = UpdateZeroCopyFrame(zeroCopyWidth, zeroCopyHeight);
         if (useToplevel != 0) {
             cpuFrame = ws->TakeToplevelFrame(useToplevel, px, fw, fh);
+            if (cpuFrame) {
+                // ARGB8888 帧 (layered/shaped 异型窗口) 透传 alpha; XRGB 强制不透明
+                frameArgb_ = (ws->GetToplevelShmFormat(useToplevel) == 0);
+            }
         } else {
             cpuFrame = ws->TakeFrame(px, fw, fh);
         }
@@ -951,11 +741,23 @@ void EglRenderer::RenderLoop() {
             firstFrameLogged = true;
         }
 
-        // 无新帧且已渲染过首帧 → 跳过 GPU 绘制, 静态桌面节省 GPU 功耗
+        // 无新帧且已渲染过首帧 → 跳过 GPU 绘制, 静态桌面节省 GPU 功耗。
+        // 例外: EGL surface 尺寸变了 (最小化还原/窗口 resize) 必须用当前纹理
+        // 重新 letterbox 上屏 — 否则最后一帧可能画在旧尺寸 buffer 上
+        // (ForceToplevelRedraw 的 dirty 与 buffer 异步切换存在竞争窗口),
+        // 静止窗口再无新帧触发重绘, 系统把旧 buffer 拉伸显示导致缩放错误
         if (!haveFrame && rendered) {
-            loopCount++;
-            if (!waitForFrameTick()) break;
-            continue;
+            EGLint curW = 0, curH = 0;
+            eglQuerySurface(display_, surface_, EGL_WIDTH, &curW);
+            eglQuerySurface(display_, surface_, EGL_HEIGHT, &curH);
+            if (curW == width_ && curH == height_) {
+                loopCount++;
+                if (!waitForFrameTick()) break;
+                continue;
+            }
+            OH_LOG_INFO(LOG_APP,
+                        "[MW-RNDR] tl=%{public}u surface %{public}dx%{public}d -> %{public}dx%{public}d with no new frame, re-letterbox",
+                        useToplevel, width_, height_, curW, curH);
         }
 
         // 获取 EGL surface 实际大小
@@ -967,40 +769,28 @@ void EglRenderer::RenderLoop() {
             height_ = surfH;
         }
 
-        // Letterbox 视口: 保持 Wine 帧宽高比, 居中渲染, 左右或上下黑边
-        if (frameW_ > 0 && frameH_ > 0 && width_ > 0 && height_ > 0) {
-            float frameAspect = (float)frameW_ / frameH_;
-            float surfAspect = (float)width_ / height_;
-            if (surfAspect > frameAspect) {
-                // Surface 比帧更宽 -> 左右黑边
-                vpH_ = height_;
-                vpW_ = (int)(height_ * frameAspect);
-                vpX_ = (width_ - vpW_) / 2;
-                vpY_ = 0;
-            } else {
-                // Surface 比帧更高 -> 上下黑边 (常见: 手机竖屏)
-                vpW_ = width_;
-                vpH_ = (int)(width_ / frameAspect);
-                vpX_ = 0;
-                vpY_ = (height_ - vpH_) / 2;
-            }
-            glViewport(vpX_, vpY_, vpW_, vpH_);
+        // Letterbox 视口: 保持 Wine 帧宽高比, 居中渲染, 左右或上下黑边。
+        // 几何统一由 ComputeFitRect 计算 (与 desktop 合成/输入命中同源;
+        // 历史实现此处独立手写, 截断取整与合成的 lround 不一致曾有 1px 偏差)
+        if (ComputeFitRect(width_, height_, frameW_, frameH_, letterbox_)) {
+            glViewport(letterbox_.offX, letterbox_.offY, letterbox_.dstW, letterbox_.dstH);
         } else {
+            letterbox_ = FitRect{};
             glViewport(0, 0, width_, height_);
         }
 
         // 诊断: 前10帧详细打印 surface -> frame -> viewport 完整映射
         if (loopCount < 10) {
-            int barTop = vpY_;
-            int barBot = height_ - vpY_ - vpH_;
-            int barLeft = vpX_;
-            int barRight = width_ - vpX_ - vpW_;
+            int barTop = letterbox_.offY;
+            int barBot = height_ - letterbox_.offY - letterbox_.dstH;
+            int barLeft = letterbox_.offX;
+            int barRight = width_ - letterbox_.offX - letterbox_.dstW;
             float sA = (float)width_ / height_;
             float fA = frameW_ > 0 && frameH_ > 0 ? (float)frameW_ / frameH_ : 0;
             OH_LOG_INFO(LOG_APP, "[MW-RNDR] diag#%{public}d tl=%{public}u surface=%{public}dx%{public}d(asp=%{public}.2f) frame=%{public}dx%{public}d(asp=%{public}.2f) vp=%{public}dx%{public}d+%{public}d,%{public}d bar=(L%{public}d R%{public}d T%{public}d B%{public}d)",
                         loopCount, useToplevel,
                         width_, height_, sA, frameW_, frameH_, fA,
-                        vpW_, vpH_, vpX_, vpY_,
+                        letterbox_.dstW, letterbox_.dstH, letterbox_.offX, letterbox_.offY,
                         barLeft, barRight, barTop, barBot);
         }
 
@@ -1011,7 +801,10 @@ void EglRenderer::RenderLoop() {
             OH_LOG_INFO(LOG_APP, "[MW-RESIZE] tl=%{public}u surface=%{public}dx%{public}d frame=%{public}dx%{public}d",
                         useToplevel, width_, height_, frameW_, frameH_);
         }
-        glClearColor(0, 0, 0, 1);
+        // ARGB 窗口清透明底 (letterbox 黑边/未覆盖区域也要能透过),
+        // 普通窗口清不透明黑底
+        if (frameArgb_) glClearColor(0, 0, 0, 0);
+        else glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
 
         glBindBuffer(GL_ARRAY_BUFFER, vbo_);
@@ -1022,24 +815,42 @@ void EglRenderer::RenderLoop() {
         glActiveTexture(GL_TEXTURE0);
 
         if (rendered) {
-            glViewport(vpX_, vpY_, vpW_, vpH_);
+            glViewport(letterbox_.offX, letterbox_.offY, letterbox_.dstW, letterbox_.dstH);
             glUseProgram(program_);
             glBindTexture(GL_TEXTURE_2D, texture_);
             glUniform1i(glGetUniformLocation(program_, "uTex"), 0);
+            glUniform1f(glGetUniformLocation(program_, "uForceOpaque"), frameArgb_ ? 0.0f : 1.0f);
             glDrawArrays(GL_TRIANGLES, 0, 6);
         }
 
         if (zeroCopyHasFrame_ && zeroCopyRegistered_ && frameW_ > 0 && frameH_ > 0 &&
             zeroCopyLayerW_ > 0 && zeroCopyLayerH_ > 0) {
-            const int layerViewportX = vpX_ +
-                static_cast<int>((static_cast<int64_t>(zeroCopyLayerX_) * vpW_) / frameW_);
-            const int layerViewportY = vpY_ +
-                static_cast<int>((static_cast<int64_t>(
-                    frameH_ - zeroCopyLayerY_ - zeroCopyLayerH_) * vpH_) / frameH_);
-            const int layerViewportW = std::max(1, static_cast<int>(
-                (static_cast<int64_t>(zeroCopyLayerW_) * vpW_) / frameW_));
-            const int layerViewportH = std::max(1, static_cast<int>(
-                (static_cast<int64_t>(zeroCopyLayerH_) * vpH_) / frameH_));
+            int layerViewportX, layerViewportY, layerViewportW, layerViewportH;
+            if (zeroCopyFullscreen_) {
+                // ZC 游戏全屏: 层内容保比例缩放进桌面帧的显示区, 而非按帧比例
+                // 映射 — 全屏后 buffer 被 Wine 扩到输出尺寸, 但层几何仍是游戏
+                // 内部分辨率, 直接映射会把画面缩到左上角一块。CPU 侧整帧已填黑
+                // (TakeToplevelFrame ZC 分支), 这里的 letterbox 与 SHM 全屏同效
+                FitRect zcFit;
+                if (ComputeFitRect(letterbox_.dstW, letterbox_.dstH,
+                                   zeroCopyLayerW_, zeroCopyLayerH_, zcFit)) {
+                    layerViewportX = letterbox_.offX + zcFit.offX;
+                    layerViewportY = letterbox_.offY + zcFit.offY;
+                    layerViewportW = zcFit.dstW;
+                    layerViewportH = zcFit.dstH;
+                } else {
+                    layerViewportX = letterbox_.offX;
+                    layerViewportY = letterbox_.offY;
+                    layerViewportW = letterbox_.dstW;
+                    layerViewportH = letterbox_.dstH;
+                }
+            } else {
+                // 帧内坐标 → surface 视口: 与 letterbox 同一映射 (GL 坐标系 Y 向上, 翻转)
+                layerViewportX = FitMapDisplayX(letterbox_, zeroCopyLayerX_);
+                layerViewportY = FitMapDisplayY(letterbox_, frameH_ - zeroCopyLayerY_ - zeroCopyLayerH_);
+                layerViewportW = std::max(1, FitSizeDisplayW(letterbox_, zeroCopyLayerW_));
+                layerViewportH = std::max(1, FitSizeDisplayH(letterbox_, zeroCopyLayerH_));
+            }
             glViewport(layerViewportX, layerViewportY, layerViewportW, layerViewportH);
             glUseProgram(zeroCopyProgram_);
             glBindTexture(GL_TEXTURE_EXTERNAL_OES, zeroCopyTexture_);
@@ -1047,6 +858,55 @@ void EglRenderer::RenderLoop() {
             glUniformMatrix4fv(zeroCopyTransformLocation_, 1, GL_FALSE,
                                zeroCopySamplingTransform_);
             glDrawArrays(GL_TRIANGLES, 0, 6);
+
+            // Desktop 模式 z-order 修复: GL overlay 不参与 CPU 合成的层序,
+            // 画完 overlay 后, 把压在 GL 窗口之上的区域 (z-order 更高的窗口/
+            // 任务栏/popup 菜单) 用桌面纹理对应子区域重绘回来。桌面纹理里这些
+            // 区域已是 CPU 合成好的最终像素, 重绘即恢复正确层序。
+            // 本 context 从不开启 GL_BLEND: 重绘就是不透明覆盖, 无需混合,
+            // 也不要加混合 —— 目标就是盖住 overlay, 不是与它融合。
+            // PC 模式不需要: GL 内容画在各自窗口内, 层序由系统合成器保证。
+            // ZC 全屏不需要: 层覆盖整幅桌面, 重绘只会盖掉游戏画面
+            if (!zeroCopyFullscreen_ && ws->Policy().RootCompositing() && rendered) {
+                // 32 上限: 遮挡源 = 上层窗口 + popup 层, 真实场景个位数;
+                // 超出的部分不重绘 (该区域 GL 内容会透出), 比动态扩容简单且够用
+                static constexpr int kMaxOccluders = 32;
+                WaylandServer::ZeroCopyOccluderRect occluders[kMaxOccluders];
+                const int occluderCount = ws->GetZeroCopyOccluders(
+                    zeroCopySurfaceKey_, useToplevel, occluders, kMaxOccluders);
+                if (occluderCount > 0) {
+                    glUseProgram(program_);
+                    glBindTexture(GL_TEXTURE_2D, texture_);
+                    glUniform1i(glGetUniformLocation(program_, "uTex"), 0);
+                    glUniform1f(glGetUniformLocation(program_, "uForceOpaque"),
+                                frameArgb_ ? 0.0f : 1.0f);
+                    glBindBuffer(GL_ARRAY_BUFFER, occluderVbo_);
+                    glEnableVertexAttribArray(0);
+                    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 16, (void*)0);
+                    glEnableVertexAttribArray(1);
+                    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 16, (void*)8);
+                    for (int i = 0; i < occluderCount; ++i) {
+                        const auto& r = occluders[i];
+                        // 桌面帧像素坐标 → surface 视口 (与 layer 同一 letterbox 映射)
+                        const int vx = FitMapDisplayX(letterbox_, r.x);
+                        const int vy = FitMapDisplayY(letterbox_, frameH_ - r.y - r.h);
+                        const int vw = std::max(1, FitSizeDisplayW(letterbox_, r.w));
+                        const int vh = std::max(1, FitSizeDisplayH(letterbox_, r.h));
+                        // 桌面纹理 UV 子区域 (纹理第 0 行 = 帧顶部, v 无需翻转)
+                        const float u0 = static_cast<float>(r.x) / frameW_;
+                        const float u1 = static_cast<float>(r.x + r.w) / frameW_;
+                        const float v0 = static_cast<float>(r.y) / frameH_;
+                        const float v1 = static_cast<float>(r.y + r.h) / frameH_;
+                        const float rquad[] = {
+                            -1,-1, u0,v1,   1,-1, u1,v1,   -1,1, u0,v0,
+                             1,-1, u1,v1,    1,1, u1,v0,   -1,1, u0,v0,
+                        };
+                        glBufferData(GL_ARRAY_BUFFER, sizeof(rquad), rquad, GL_DYNAMIC_DRAW);
+                        glViewport(vx, vy, vw, vh);
+                        glDrawArrays(GL_TRIANGLES, 0, 6);
+                    }
+                }
+            }
         }
 
         const uint64_t swapStartedUs = PerfNowUs();

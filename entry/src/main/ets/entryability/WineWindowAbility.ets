@@ -3,6 +3,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
 import testNapi from 'libentry.so';
 import { WineWindowManager } from '../service/WineWindowManager';
+import { PopupWindowManager } from '../service/PopupWindowManager';
 
 const DOMAIN = 0x0000;
 const TAG = 'WWA';
@@ -68,6 +69,15 @@ export default class WineWindowAbility extends UIAbility {
 
       // 注册 Window 引用
       WineWindowManager.getInstance().registerWindow(this.toplevelId, mainWindow);
+      // 注册 WindowStage 引用 (popup 子窗口创建入口)
+      WineWindowManager.getInstance().registerWindowStage(this.toplevelId, windowStage);
+
+      // 父窗口移动/缩放 → 重新定位其 popup 子窗口
+      mainWindow.on('windowRectChange', () => {
+        const mgr = WineWindowManager.getInstance();
+        PopupWindowManager.getInstance().repositionPopups(
+          this.toplevelId, mainWindow, mgr.getEffectiveScale());
+      });
 
       // 应用 pending 事件
       WineWindowManager.getInstance().flushPendingEvents(this.toplevelId);

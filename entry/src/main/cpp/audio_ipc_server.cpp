@@ -11,6 +11,8 @@
 #include <vector>
 
 #undef LOG_TAG
+#undef LOG_DOMAIN
+#define LOG_DOMAIN 0x0000
 #define LOG_TAG "WL_AUDIO"
 #include <hilog/log.h>
 

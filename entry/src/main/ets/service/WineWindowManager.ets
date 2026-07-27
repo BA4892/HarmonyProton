@@ -3,9 +3,28 @@ import { window, display } from '@kit.ArkUI';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import testNapi from 'libentry.so';
+import { PopupWindowManager } from './PopupWindowManager';
+import { ArgbWindowManager } from './ArgbWindowManager';
 
 const DOMAIN = 0x0000;
 const TAG = 'WineWM';
+
+// 单个 Wine toplevel 在 ArkTS 侧的聚合状态 (参照 PopupEntry/ArgbEntry 模式)。
+// 'created' 事件 (或首个提前到达的事件) 时经 ensureEntry 建档,
+// ctx/win/stage 由 WineWindowAbility 三步回填 (registerAbility/Window/WindowStage),
+// unregisterAbility 一次性整体删除。
+class WineWindowEntry {
+  ctx: common.UIAbilityContext | null = null;        // terminateSelf 用
+  win: window.Window | null = null;                  // resize/title 直接操作
+  stage: window.WindowStage | null = null;           // popup 子窗口宿主
+  starting: boolean = false;                         // startAbility 飞行中 (防重复)
+  events: Array<[string, string]> = [];              // win 就绪前积压的事件
+  lastResizeTargetH: number = 0;                     // 最近 resize 目标 VP 高度 (titleBarH 校准)
+  lastResizeWineDim: [number, number] | null = null; // 最近 resize 的 wine 原始尺寸
+  title: string = '';                                // 最近标题 (loadContent 后重置需重 apply)
+  everMaximized: boolean = false;                    // 曾进入 maximize (诊断 OHOS 状态机冲突)
+  moveGrabPending: boolean = false;                  // Wine move_grab 等待 startMoving()
+}
 
 export class WineWindowManager {
   private static instance: WineWindowManager | null = null;
@@ -30,31 +49,21 @@ export class WineWindowManager {
   private automationMode: boolean = false;
   private desktopRootId: number = 0;
   private desktopAbilityRunning: boolean = false;
+  // 主窗口 windowStage (ARGB 异型子窗口/popup 回退宿主)
+  private mainWindowStage: window.WindowStage | null = null;
 
-  // toplevelId -> UIAbilityContext (用于 terminateSelf)
-  private abilityContexts: Map<number, common.UIAbilityContext> = new Map();
-  // toplevelId -> window.Window (用于直接操作 resize/title)
-  private windows: Map<number, window.Window> = new Map();
-  // toplevelId -> 已销毁标记 (用于竞态检测)
+  // toplevelId -> 聚合状态 (WineWindowEntry)
+  private entries: Map<number, WineWindowEntry> = new Map();
+  // toplevelId -> 已销毁标记 (WineWindowAbility.onCreate 竞态拦截)。
+  // 墓碑生命期严格长于 entry, 设计上永不清理, 独立于 entries 保留
   private destroyed: Set<number> = new Set();
-  // 正在启动中的 toplevel (防止重复 startAbility)
-  private pendingStarts: Set<number> = new Set();
-  // 窗口就绪前到达的 pending 事件
-  private pendingEvents: Map<number, Array<[string, string]>> = new Map();
-  // toplevelId -> surface 物理尺寸 (用于标题栏高度校准)
-  private surfaceSizes: Map<number, [number, number]> = new Map();
-  // toplevelId -> 最近一次 resize 的目标 VP 高度 (用于校准 titleBarH)
-  private lastResizeTargetH: Map<number, number> = new Map();
-  // toplevelId -> 最近一次 resize 的 wine 原始尺寸 (用于校准后重新 resize)
-  private lastResizeWineDim: Map<number, [number, number]> = new Map();
-  // toplevelId -> 最大化前的尺寸 (recover 后手动恢复)
-  private lastPreMaximizeDim: Map<number, [number, number]> = new Map();
-  // toplevelId -> maximize 操作进行中 (诊断 OHOS 状态机冲突)
-  private maximizeInFlight: Set<number> = new Set();
-  // toplevelId -> 最近一次设置的标题 (loadContent 后会重置, 需要重新 apply)
-  private lastTitles: Map<number, string> = new Map();
-  // Wine move_grab 等待 startMoving() — 标记哪些 toplevel 在等待拖拽
-  private moveGrabPending: Set<number> = new Set();
+
+  // entry 建档: 'created' / 提前到达的排队事件 / move_start / register 回填
+  private ensureEntry(id: number): WineWindowEntry {
+    let e = this.entries.get(id);
+    if (!e) { e = new WineWindowEntry(); this.entries.set(id, e); }
+    return e;
+  }
 
   static getInstance(): WineWindowManager {
     if (!WineWindowManager.instance) {
@@ -69,17 +78,11 @@ export class WineWindowManager {
 
   // -- dump 当前状态 (诊断用) --
   dumpState(): void {
-    hilog.info(DOMAIN, TAG, '[MW-DUMP] state: abilityCtx=%{public}d windows=%{public}d pendingStarts=%{public}d pendingEvents=%{public}d destroyed=%{public}d',
-      this.abilityContexts.size, this.windows.size, this.pendingStarts.size,
-      this.pendingEvents.size, this.destroyed.size);
-    this.pendingStarts.forEach(id => {
-      hilog.info(DOMAIN, TAG, '[MW-DUMP]   pendingStart: #%{public}d', id);
-    });
-    this.pendingEvents.forEach((events, id) => {
-      hilog.info(DOMAIN, TAG, '[MW-DUMP]   pendingEvents #%{public}d: %{public}d items', id, events.length);
-    });
-    this.windows.forEach((_, id) => {
-      hilog.info(DOMAIN, TAG, '[MW-DUMP]   active window: #%{public}d', id);
+    hilog.info(DOMAIN, TAG, '[MW-DUMP] state: entries=%{public}d destroyed=%{public}d',
+      this.entries.size, this.destroyed.size);
+    this.entries.forEach((e, id) => {
+      hilog.info(DOMAIN, TAG, '[MW-DUMP]   entry #%{public}d: win=%{public}s starting=%{public}s events=%{public}d',
+        id, e.win ? 'yes' : 'no', e.starting ? 'yes' : 'no', e.events.length);
     });
   }
 
@@ -94,17 +97,20 @@ export class WineWindowManager {
 
   async init(windowStage: window.WindowStage, abilityContext: common.UIAbilityContext): Promise<void> {
     this.windowStage = windowStage;
+    this.mainWindowStage = windowStage;
     this.mainWindow = windowStage.getMainWindowSync();
     this.uiAbilityContext = abilityContext;
 
     hilog.info(DOMAIN, TAG, '[MW] init: mainWindow=%{public}s ctx=%{public}s',
       this.mainWindow ? 'ok' : 'NULL', this.uiAbilityContext ? 'ok' : 'NULL');
 
-    // Tablet 检测: 桌面合成模式
-    this.isDesktopMode = deviceInfo.deviceType === 'tablet' && !this.automationMode;
+    // Pad/phone use the desktop compositor unless automation deliberately
+    // requests the managed, Explorer-free smoke session.
+    this.isDesktopMode = (deviceInfo.deviceType === 'tablet' || deviceInfo.deviceType === 'phone') &&
+      !this.automationMode;
     if (this.isDesktopMode) {
       testNapi.setDesktopMode(true);
-      hilog.info(DOMAIN, TAG, '[MW] Tablet → DESKTOP MODE (single XComponent)');
+      hilog.info(DOMAIN, TAG, '[MW] Tablet/Phone → DESKTOP MODE (single XComponent)');
     } else {
       testNapi.setDesktopMode(false);
       hilog.info(DOMAIN, TAG, '[MW] deviceType=%{public}s → MANAGED MODE', deviceInfo.deviceType);
@@ -145,42 +151,39 @@ export class WineWindowManager {
   // -- WineWindowAbility 调用: 注册 / 注销 --
 
   registerAbility(toplevelId: number, ctx: common.UIAbilityContext): void {
-    this.abilityContexts.set(toplevelId, ctx);
-    hilog.info(DOMAIN, TAG, '[MW]  registerAbility #%{public}d (total=%{public}d)',
-      toplevelId, this.abilityContexts.size);
+    this.ensureEntry(toplevelId).ctx = ctx;
+    hilog.info(DOMAIN, TAG, '[MW]  registerAbility #%{public}d (entries=%{public}d)',
+      toplevelId, this.entries.size);
   }
 
   registerWindow(toplevelId: number, win: window.Window): void {
-    this.windows.set(toplevelId, win);
-    hilog.info(DOMAIN, TAG, '[MW]  registerWindow #%{public}d (total=%{public}d, pendingStarts=%{public}s)',
-      toplevelId, this.windows.size, this.pendingStarts.has(toplevelId) ? 'yes' : 'no');
+    const e = this.ensureEntry(toplevelId);
+    e.win = win;
+    hilog.info(DOMAIN, TAG, '[MW]  registerWindow #%{public}d (entries=%{public}d, starting=%{public}s)',
+      toplevelId, this.entries.size, e.starting ? 'yes' : 'no');
+  }
+
+  registerWindowStage(toplevelId: number, stage: window.WindowStage): void {
+    this.ensureEntry(toplevelId).stage = stage;
+    hilog.info(DOMAIN, TAG, '[MW]  registerWindowStage #%{public}d (entries=%{public}d)',
+      toplevelId, this.entries.size);
+  }
+
+  getWindowStage(toplevelId: number): window.WindowStage | null {
+    return this.entries.get(toplevelId)?.stage ?? null;
+  }
+
+  // effectiveScale = displayScale × scaleBoost (Wine 逻辑坐标 → 物理像素)
+  getEffectiveScale(): number {
+    return this.displayScale * this.scaleBoost;
   }
 
   unregisterAbility(toplevelId: number): void {
-    const hadCtx = this.abilityContexts.has(toplevelId);
-    const hadWin = this.windows.has(toplevelId);
-    const hadPend = this.pendingEvents.has(toplevelId);
-    const hadStart = this.pendingStarts.has(toplevelId);
-    const hadSurf = this.surfaceSizes.has(toplevelId);
-    const hadResizeTarget = this.lastResizeTargetH.has(toplevelId);
-    const hadWineDim = this.lastResizeWineDim.has(toplevelId);
-    const hadTitle = this.lastTitles.has(toplevelId);
-    const hadMaxFlight = this.maximizeInFlight.has(toplevelId);
-    this.abilityContexts.delete(toplevelId);
-    this.windows.delete(toplevelId);
-    this.pendingEvents.delete(toplevelId);
-    this.pendingStarts.delete(toplevelId);
-    this.surfaceSizes.delete(toplevelId);
-    this.lastResizeTargetH.delete(toplevelId);
-    this.lastResizeWineDim.delete(toplevelId);
-    this.lastPreMaximizeDim.delete(toplevelId);
-    this.lastTitles.delete(toplevelId);
-    this.maximizeInFlight.delete(toplevelId);
-    hilog.info(DOMAIN, TAG, '[MW]  unregisterAbility #%{public}d (hadCtx=%{public}s hadWin=%{public}s hadPend=%{public}s hadStart=%{public}s hadSurf=%{public}s hadResizeTarget=%{public}s hadWineDim=%{public}s hadTitle=%{public}s hadMaxFlight=%{public}s)',
-      toplevelId, hadCtx ? 'yes' : 'no', hadWin ? 'yes' : 'no',
-      hadPend ? 'yes' : 'no', hadStart ? 'yes' : 'no', hadSurf ? 'yes' : 'no',
-      hadResizeTarget ? 'yes' : 'no', hadWineDim ? 'yes' : 'no',
-      hadTitle ? 'yes' : 'no', hadMaxFlight ? 'yes' : 'no');
+    // 级联销毁该窗口的全部 popup 子窗口
+    PopupWindowManager.getInstance().destroyPopupsForToplevel(toplevelId);
+    const had = this.entries.delete(toplevelId);
+    hilog.info(DOMAIN, TAG, '[MW]  unregisterAbility #%{public}d entry=%{public}s',
+      toplevelId, had ? 'removed' : 'absent');
   }
 
   isDestroyed(toplevelId: number): boolean {
@@ -194,17 +197,18 @@ export class WineWindowManager {
   // Wine xdg_toplevel.move 触发 → 标记等待 startMoving()
   // WineWindow 的 onMouse 在下一帧 MOVE 时检查此标记并调用 startMoving()
   shouldStartMoving(toplevelId: number): boolean {
-    return this.moveGrabPending.has(toplevelId);
+    return this.entries.get(toplevelId)?.moveGrabPending ?? false;
   }
 
   getWindow(toplevelId: number): window.Window | undefined {
-    return this.windows.get(toplevelId);
+    return this.entries.get(toplevelId)?.win ?? undefined;
   }
 
   // -- loadContent 回调: 窗口装饰就绪后校准标题栏高度 + 重设标题 --
   onAfterLoadContent(toplevelId: number): void {
-    const win = this.windows.get(toplevelId);
-    if (!win) return;
+    const e = this.entries.get(toplevelId);
+    const win = e?.win;
+    if (!e || !win) return;
 
     // 1. 通过 API 获取标题栏高度 (必须在 loadContent 之后)
     //    getWindowDecorHeight 只返回标题栏文本区, 不含窗口边框。
@@ -219,7 +223,7 @@ export class WineWindowManager {
           this.measuredTitleBarH = newBarH;
           hilog.info(DOMAIN, TAG, '[MW] onAfterLoadContent #%{public}d: barH=%{public}d (API=%{public}d + offset=%{public}d)',
             toplevelId, newBarH, decorH, this.decorBorderOffset);
-          const wd = this.lastResizeWineDim.get(toplevelId);
+          const wd = e.lastResizeWineDim;
           if (wd) {
             this.applyEvent(toplevelId, 'resize', JSON.stringify({ w: wd[0], h: wd[1] }));
           }
@@ -239,7 +243,7 @@ export class WineWindowManager {
     }
 
     // 2. loadContent 会把窗口标题重置为默认值, 需重新应用 Wine 标题
-    const title = this.lastTitles.get(toplevelId);
+    const title = e.title;
     if (title) {
       hilog.info(DOMAIN, TAG, '[MW] onAfterLoadContent #%{public}d: reapply title "%{public}s"', toplevelId, title);
       win.setWindowTitle(title);
@@ -253,12 +257,18 @@ export class WineWindowManager {
 
   // -- WineWindowAbility 在 onWindowStageCreate 中调用: 应用积压的事件 --
   flushPendingEvents(toplevelId: number): void {
-    const pending = this.pendingEvents.get(toplevelId);
-    if (!pending || pending.length === 0) {
+    const e = this.entries.get(toplevelId);
+    // popup 积压事件 (windowStage 就绪后补建)
+    if (e?.stage && e?.win) {
+      PopupWindowManager.getInstance().flushPending(toplevelId, e.stage, e.win, this.getEffectiveScale());
+    }
+
+    if (!e || e.events.length === 0) {
       hilog.info(DOMAIN, TAG, '[MW] flushPendingEvents #%{public}d: none', toplevelId);
       return;
     }
-    this.pendingEvents.delete(toplevelId);
+    const pending = e.events;
+    e.events = [];  // 先清后迭代: 等价旧 "先 delete 再迭代", 防 applyEvent 重入时丢事件
 
     hilog.info(DOMAIN, TAG, '[MW]  flushPendingEvents #%{public}d: %{public}d items', toplevelId, pending.length);
     for (let i = 0; i < pending.length; i++) {
@@ -269,10 +279,28 @@ export class WineWindowManager {
     hilog.info(DOMAIN, TAG, '[MW] flushPendingEvents #%{public}d done', toplevelId);
   }
 
+  // -- 排队/直发样板收敛: win 就绪直发; 墓碑丢弃; 否则建档积压 --
+  private queueOrApply(id: number, event: string, data: string): void {
+    if (this.entries.get(id)?.win) {
+      hilog.info(DOMAIN, TAG, '[MW] -> applyEvent directly #%{public}d %{public}s', id, event);
+      this.applyEvent(id, event, data);
+      return;
+    }
+    if (this.destroyed.has(id)) {
+      // 墓碑拦截: unregister 之后迟到的事件不再为死 id 重建积压队列
+      hilog.warn(DOMAIN, TAG, '[MW] drop %{public}s for destroyed #%{public}d', event, id);
+      return;
+    }
+    const e = this.ensureEntry(id);
+    e.events.push([event, data]);
+    hilog.info(DOMAIN, TAG, '[MW] -> queue pending #%{public}d %{public}s (window not ready, queue=%{public}d)',
+      id, event, e.events.length);
+  }
+
   // -- toplevel 事件分发 --
   private onToplevelEvent(id: number, event: string, data: string): void {
     hilog.info(DOMAIN, TAG, '[MW] onToplevelEvent #%{public}d event=%{public}s hasWindow=%{public}s',
-      id, event, this.windows.has(id) ? 'yes' : 'no');
+      id, event, this.entries.get(id)?.win ? 'yes' : 'no');
 
     switch (event) {
       case 'created':
@@ -302,15 +330,14 @@ export class WineWindowManager {
           const sw = obj.w as number;
           const sh = obj.h as number;
           if (sw && sh && this.displayScale > 0) {
-            // 总是保存最新的 surface 物理尺寸
-            this.surfaceSizes.set(id, [sw, sh]);
             hilog.info(DOMAIN, TAG, '[MW] surface #%{public}d: physical=%{public}dx%{public}d scale=%{public}s',
               id, sw, sh, this.displayScale.toFixed(2));
 
             //  动态校准 decorBorderOffset:
             //    totalBarH = lastResizeTargetH - surfacePhysicalH/scale
             //    decorBorderOffset = totalBarH - apiTitleBarH
-            const lastH = this.lastResizeTargetH.get(id);
+            const entry = this.entries.get(id);
+            const lastH = entry?.lastResizeTargetH;
             let calibrated = false;
             if (lastH) {
               const contentVPH = Math.round(sh / this.displayScale);
@@ -335,8 +362,8 @@ export class WineWindowManager {
               }
             }
             // 如果校准后 titleBarH 变了, 用保存的 wine 尺寸重新 resize
-            if (calibrated && this.windows.has(id)) {
-              const wd = this.lastResizeWineDim.get(id);
+            if (calibrated && entry?.win) {
+              const wd = entry.lastResizeWineDim;
               if (wd) {
                 const newData = JSON.stringify({ w: wd[0], h: wd[1] });
                 hilog.info(DOMAIN, TAG, '[MW] surface #%{public}d: re-resize with calibrated bar=%{public}d', id, this.measuredTitleBarH);
@@ -347,40 +374,74 @@ export class WineWindowManager {
         } catch (_) { /* ignore parse error */ }
         break;
       case 'move_start':
-        this.moveGrabPending.add(id);
+        this.ensureEntry(id).moveGrabPending = true;
         hilog.info(DOMAIN, TAG, '[MW] move_grab_start #%{public}d → pending startMoving()', id);
         break;
-      case 'move_end':
-        this.moveGrabPending.delete(id);
+      case 'move_end': {
+        const me = this.entries.get(id);
+        if (me) me.moveGrabPending = false;
         hilog.info(DOMAIN, TAG, '[MW] move_grab_end #%{public}d', id);
         break;
+      }
       case 'title':
       case 'resize':
         if (this.isDesktopMode && id !== this.desktopRootId) return;
-        if (this.windows.has(id)) {
-          hilog.info(DOMAIN, TAG, '[MW] -> applyEvent directly #%{public}d %{public}s', id, event);
-          this.applyEvent(id, event, data);
-        } else {
-          hilog.info(DOMAIN, TAG, '[MW] -> queue pending #%{public}d %{public}s (window not ready)', id, event);
-          let q = this.pendingEvents.get(id);
-          if (!q) { q = []; this.pendingEvents.set(id, q); }
-          q.push([event, data]);
-          hilog.info(DOMAIN, TAG, '[MW]   pending queue size now: %{public}d', q.length);
+        if (ArgbWindowManager.getInstance().has(id)) {
+          // ARGB 异型窗口: resize 调整子窗口尺寸; title 不需要 (子窗口无标题栏)。
+          // 注意不能进积压队列 — ARGB 窗口永远不会注册 ability, 永不 flush
+          if (event === 'resize') {
+            ArgbWindowManager.getInstance().onResize(id, data, this.getEffectiveScale());
+          }
+          break;
         }
+        this.queueOrApply(id, event, data);
         break;
       case 'minimized':
       case 'restored':
       case 'maximized':
       case 'unmaximized':
       case 'limits':
+      case 'argb':
         if (this.isDesktopMode && id !== this.desktopRootId) return;
-        if (this.windows.has(id)) {
-          this.applyEvent(id, event, data);
-        } else {
-          let q = this.pendingEvents.get(id);
-          if (!q) { q = []; this.pendingEvents.set(id, q); }
-          q.push([event, data]);
+        // ARGB 异型窗口: 这些事件无意义且会泄漏进积压队列 (永不注册 ability)
+        if (ArgbWindowManager.getInstance().has(id)) break;
+        this.queueOrApply(id, event, data);
+        break;
+      case 'argb_created':
+      case 'argb_move':
+      case 'mask_dirty':
+        // ARGB 异型窗口 (子窗口 + setWindowMask 路线, desktop 模式不涉及)
+        if (this.isDesktopMode) return;
+        if (!this.mainWindowStage) return;
+        {
+          const argb = ArgbWindowManager.getInstance();
+          const s = this.getEffectiveScale();
+          if (event === 'argb_created') {
+            argb.onCreated(id, data, this.mainWindowStage!, s);
+          } else if (event === 'argb_move') {
+            argb.onMove(id, data, s);
+          } else {
+            argb.onMaskDirty(id, s);
+          }
         }
+        break;
+      case 'popup_show':
+      case 'popup_move':
+      case 'popup_resize':
+      case 'popup_hide':
+        // PC 模式 popup 子窗口 (desktop 模式 C++ 不会发这些事件)
+        // 父窗口可能是普通 ability 窗口, 也可能是 ARGB 异型子窗口 (回退)
+        if (this.isDesktopMode) return;
+        PopupWindowManager.getInstance().onPopupEvent(
+          id, event, data,
+          this.getWindowStage(id) ?? this.mainWindowStage,
+          this.getWindow(id) ?? ArgbWindowManager.getInstance().getWindow(id),
+          this.getEffectiveScale());
+        break;
+      case 'fullscreen':
+      case 'unfullscreen':
+        // 全屏由 C++ 合成器直接处理 (桌面模式缩放绘制 + 输入映射),
+        // ArkTS 无需动作; 显式列出避免落进 unknown event 告警
         break;
       default:
         hilog.warn(DOMAIN, TAG, '[MW] unknown event #%{public}d %{public}s', id, event);
@@ -390,8 +451,9 @@ export class WineWindowManager {
 
   // -- apply 单个事件到 window.Window --
   private applyEvent(toplevelId: number, event: string, data: string): void {
-    const win = this.windows.get(toplevelId);
-    if (!win) {
+    const e = this.entries.get(toplevelId);
+    const win = e?.win;
+    if (!e || !win) {
       hilog.warn(DOMAIN, TAG, '[MW] applyEvent #%{public}d: window NOT FOUND (unregistered?)', toplevelId);
       return;
     }
@@ -402,7 +464,7 @@ export class WineWindowManager {
           const obj: Record<string, string | number> = JSON.parse(data) as Record<string, string | number>;
           if (obj.title) {
             const titleStr = obj.title as string;
-            this.lastTitles.set(toplevelId, titleStr);
+            e.title = titleStr;
             hilog.info(DOMAIN, TAG, '[MW] setWindowTitle #%{public}d -> "%{public}s"', toplevelId, titleStr);
             win.setWindowTitle(titleStr);
           }
@@ -421,8 +483,8 @@ export class WineWindowManager {
             const winW = Math.round(w * s);
             const winH = Math.round(h * s + barH);
             //  保存目标尺寸, 供 surface 事件校准 titleBarH + 重新 resize
-            this.lastResizeTargetH.set(toplevelId, winH);
-            this.lastResizeWineDim.set(toplevelId, [w, h]);
+            e.lastResizeTargetH = winH;
+            e.lastResizeWineDim = [w, h];
             hilog.info(DOMAIN, TAG, '[MW-RESIZE] tl=%{public}d wine=%{public}dx%{public}d window=%{public}dx%{public}d scale=%{public}s',
               toplevelId, w, h, winW, winH, s.toFixed(1));
             win.resize(winW, winH);
@@ -444,7 +506,7 @@ export class WineWindowManager {
           if (minH > 0) limits.minHeight = Math.round(minH * s);
           if (maxW > 0) limits.maxWidth = Math.round(maxW * s);
           if (maxH > 0) limits.maxHeight = Math.round(maxH * s);
-          const maxInFlight = this.maximizeInFlight.has(toplevelId);
+          const maxInFlight = e.everMaximized;
           hilog.info(DOMAIN, TAG, '[MW-LIMITS] tl=%{public}d wine=[%{public}d,%{public}d-%{public}d,%{public}d] → ohos=[%{public}d,%{public}d-%{public}d,%{public}d] maxInFlight=%{public}s',
             toplevelId, minW, minH, maxW, maxH,
             limits.minWidth ?? 0, limits.minHeight ?? 0,
@@ -474,16 +536,17 @@ export class WineWindowManager {
         break;
       case 'maximized':
         {
-          const alreadyInFlight = this.maximizeInFlight.has(toplevelId);
-          const preDim = this.lastResizeWineDim.get(toplevelId);
+          const alreadyInFlight = e.everMaximized;
+          const preDim = e.lastResizeWineDim;
           hilog.info(DOMAIN, TAG, '[MW] maximize #%{public}d alreadyInFlight=%{public}s preMax=%{public}s',
             toplevelId, alreadyInFlight ? 'yes' : 'no', JSON.stringify(preDim));
-          this.maximizeInFlight.add(toplevelId);
-          if (preDim) {
-            this.lastPreMaximizeDim.set(toplevelId, [preDim[0], preDim[1]]);
-          }
+          e.everMaximized = true;
           hilog.info(DOMAIN, TAG, '[MW] → win.maximize() START #%{public}d', toplevelId);
-          win.maximize().then(() => {
+          // EXIT_IMMERSIVE: maximize() 不带参数时默认 ENTER_IMMERSIVE (进入全屏
+          // 沉浸式), 窗口会铺满整个屏幕、盖住系统 dock/任务栏 (hover 底部才浮现),
+          // 不符合桌面语义 (最大化应只占工作区)。EXIT_IMMERSIVE 让 OHOS 最大化到
+          // 避让任务栏后的工作区, 随后 onSurfaceChanged 把实际尺寸回传 Wine。
+          win.maximize(window.MaximizePresentation.EXIT_IMMERSIVE).then(() => {
             hilog.info(DOMAIN, TAG, '[MW] win.maximize() OK #%{public}d', toplevelId);
           }).catch((e: Error) => {
             hilog.warn(DOMAIN, TAG, '[MW] maximize #%{public}d failed: %{public}s', toplevelId, JSON.stringify(e));
@@ -496,18 +559,36 @@ export class WineWindowManager {
           hilog.warn(DOMAIN, TAG, '[MW] unmaximize #%{public}d failed: %{public}s', toplevelId, JSON.stringify(e));
         });
         break;
+      case 'argb':
+        /*
+         * layered/shaped (异型) 窗口标记, 仅记录状态 (后续子窗口方案使用)。
+         * 已验证 2in1 主窗口无法做到透视:
+         * - XComponent surface 无 alpha 通道 (EGL_ALPHA_SIZE=0, SET_FORMAT 无效)
+         * - 窗口背景色 alpha 被系统钳制 ('#80FF0000' 显示为不透明红)
+         * - setWindowMask 仅限子窗/全局悬浮窗 (主窗口 1300004)
+         * 故不做窗口背景色设置 (无效操作)。
+         */
+        try {
+          const obj: Record<string, number> = JSON.parse(data) as Record<string, number>;
+          const isArgb = obj.argb === 1;
+          hilog.info(DOMAIN, TAG, '[MW] argb state #%{public}d = %{public}s (record only)',
+            toplevelId, isArgb ? 'ARGB' : 'XRGB');
+        } catch (e) {
+          hilog.warn(DOMAIN, TAG, '[MW] applyEvent argb parse error: %{public}s', JSON.stringify(e));
+        }
+        break;
     }
   }
 
   // -- startAbility 启动 multiton 实例 --
   private startWineWindowAbility(id: number, data: string): void {
-    if (this.pendingStarts.has(id)) {
-      hilog.warn(DOMAIN, TAG, '[MW] startWineWindowAbility #%{public}d: already in flight, skip', id);
+    const e = this.ensureEntry(id);
+    if (e.starting || e.ctx) {
+      hilog.warn(DOMAIN, TAG, '[MW] startWineWindowAbility #%{public}d: already in flight/alive, skip', id);
       return;
     }
-    this.pendingStarts.add(id);
-    hilog.info(DOMAIN, TAG, '[MW] startWineWindowAbility #%{public}d: pendingStarts now %{public}d',
-      id, this.pendingStarts.size);
+    e.starting = true;
+    hilog.info(DOMAIN, TAG, '[MW] startWineWindowAbility #%{public}d: starting', id);
 
     // 解析初始参数
     let title = '';
@@ -521,7 +602,7 @@ export class WineWindowManager {
 
     if (!this.uiAbilityContext) {
       hilog.error(DOMAIN, TAG, '[MW] FATAL: no uiAbilityContext, cannot start ability');
-      this.pendingStarts.delete(id);
+      e.starting = false;
       return;
     }
 
@@ -536,11 +617,14 @@ export class WineWindowManager {
 
     this.uiAbilityContext.startAbility(want).then(() => {
       hilog.info(DOMAIN, TAG, '[MW] OK startAbility #%{public}d resolved (AMS accepted)', id);
-      this.pendingStarts.delete(id);
+      // entry 保留 (等 WWA 三步回填), 仅清飞行标记 —
+      // 消除旧实现 "pendingStarts 已删但 abilityContexts 未 set" 的判定间隙
+      e.starting = false;
     }).catch((err: Error) => {
       hilog.error(DOMAIN, TAG, '[MW] ERR startAbility #%{public}d REJECTED: %{public}s',
         id, JSON.stringify(err));
-      this.pendingStarts.delete(id);
+      // 启动失败: 整体清档 (含已积压事件, 旧实现会遗留 pendingEvents 永不 flush)
+      this.entries.delete(id);
       // 通知 Wine 窗口创建失败
       hilog.info(DOMAIN, TAG, '[MW] -> sendToplevelClose #%{public}d (fail recovery)', id);
       testNapi.sendToplevelClose(id);
@@ -564,14 +648,24 @@ export class WineWindowManager {
       return;
     }
 
-    // PC: 原逻辑
-    if (!this.abilityContexts.has(id) && !this.pendingStarts.has(id)) {
+    // PC: ARGB 异型子窗口销毁 (级联销毁其 popup)
+    if (ArgbWindowManager.getInstance().has(id)) {
+      hilog.info(DOMAIN, TAG, '[MW] onToplevelDestroyed #%{public}d: destroy ARGB subwindow', id);
+      ArgbWindowManager.getInstance().destroy(id);
+      testNapi.destroyToplevel(id);
+      this.unregisterAbility(id);
+      return;
+    }
+
+    // PC: 原逻辑 (entry 从 created 存活到 unregister, 覆盖旧
+    // "startAbility 已 resolve 但 WWA.onCreate 未回填" 的判定间隙)
+    if (!this.entries.has(id)) {
       hilog.info(DOMAIN, TAG, '[MW] onToplevelDestroyed #%{public}d: already cleaned up by ability, skip', id);
       return;
     }
     hilog.info(DOMAIN, TAG, '[MW] -> destroyToplevel #%{public}d', id);
     testNapi.destroyToplevel(id);
-    const ctx = this.abilityContexts.get(id);
+    const ctx = this.entries.get(id)?.ctx;
     if (ctx) {
       hilog.info(DOMAIN, TAG, '[MW] -> terminateSelf #%{public}d', id);
       ctx.terminateSelf().catch((err: Error) => {

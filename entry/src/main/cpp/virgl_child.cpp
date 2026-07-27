@@ -1,4 +1,5 @@
 #include <AbilityKit/native_child_process.h>
+#include "phone_adapter/phone_virgl_dispatch.h"
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES3/gl3.h>
@@ -16,6 +17,9 @@
 #include <dlfcn.h>
 #include <mutex>
 #include <unistd.h>
+#include <sys/socket.h>
+#include <cerrno>
+#include <vector>
 
 #include <cstdlib>
 #include <cstring>
@@ -417,6 +421,15 @@ extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainPr
 {
     ClearGuestGraphicsEnv();
     setenv("EGL_PLATFORM", "surfaceless", 1);
+    // 手机适配层：启动 socket dispatch 线程，替代 Binder 驱动回调
+    {
+        const char* fdEnv = getenv("WINEHUA_PHONE_CFG_FD");
+        if (fdEnv && fdEnv[0]) {
+            int fd = atoi(fdEnv);
+            OH_LOG_INFO(LOG_APP, "[PhoneVirgl] phone mode, starting dispatch on fd=%{public}d", fd);
+            PhoneVirgl_DispatchStart(fd, OnVirglIpcRequest);  // → phone_adapter/phone_virgl_dispatch.cpp
+        }
+    }
     std::unique_lock<std::mutex> lock(g_ipcChildMutex);
     const bool completed = g_ipcChildCondition.wait_for(
         lock, std::chrono::seconds(5), [] { return g_ipcChildMode != IpcChildMode::None; });
@@ -635,4 +648,40 @@ extern "C" __attribute__((visibility("default"))) void Main(NativeChildProcess_A
     if (setPresentCallback) setPresentCallback(nullptr, nullptr);
     dlclose(handle);
     free(buffer);
+}
+
+// Phone mode runs this library in the application process so NativeWindow can
+// remain on the existing SurfaceQueue instead of crossing the fork relay.
+extern "C" __attribute__((visibility("default"))) int WinehuaVirgl_AttachSurfaceTarget(
+    uint64_t surfaceKey, uint64_t framePeriodNs, OHNativeWindow* window)
+{
+    // In-process 模式下 window 由调用方 (renderer) 持有引用，
+    // g_presenters.Attach 只借用指针，无需额外 NativeObjectReference。
+    if (!window) return -1;
+    return winehua::AttachVirglSurfaceTarget(surfaceKey, framePeriodNs, window);
+}
+
+extern "C" __attribute__((visibility("default"))) int WinehuaVirgl_DetachSurfaceTarget(
+    uint64_t surfaceKey)
+{
+    return winehua::DetachVirglSurfaceTarget(surfaceKey);
+}
+
+extern "C" __attribute__((visibility("default"))) int WinehuaVirgl_SetSurfaceFramePeriod(
+    uint64_t surfaceKey, uint64_t framePeriodNs)
+{
+    return winehua::SetVirglSurfaceFramePeriod(surfaceKey, framePeriodNs);
+}
+
+extern "C" __attribute__((visibility("default"))) int WinehuaVirgl_QuerySurfaces(
+    winehua::virgl_ipc::SurfaceQueryReply* reply)
+{
+    if (!reply) return -1;
+    *reply = winehua::QueryVirglSurfaces();
+    return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) void WinehuaVirgl_ResetSurfaces()
+{
+    winehua::ResetVirglSurfaces();
 }

@@ -1,4 +1,5 @@
 #include <napi/native_api.h>
+#include "fs_utils.h"
 #include "wayland_server.h"
 #include "plugin_manager.h"
 #include "input_manager.h"
@@ -13,6 +14,7 @@
 #include "wine_exe.h"
 #include "wine_mmap_test.h"
 #include "host_vulkan_probe.h"
+#include "phone_adapter/phone_adapter.h"
 
 #include <unistd.h>
 #include <signal.h>
@@ -33,6 +35,8 @@
 #include <dlfcn.h>
 
 #undef LOG_TAG
+#undef LOG_DOMAIN
+#define LOG_DOMAIN 0x0000
 #define LOG_TAG "WL_NAPI"
 #include <hilog/log.h>
 
@@ -568,7 +572,7 @@ static napi_value DestroyRenderer(napi_env env, napi_callback_info info) {
     return nullptr;
 }
 
-// -- NAPI: setDisplayScale -- (传入设备 densityPixels, 供渲染层计算 viewport)
+// -- NAPI: setOutputSize --
 static napi_value SetOutputSize(napi_env env, napi_callback_info info) {
     size_t argc = 2;
     napi_value args[2];
@@ -581,14 +585,11 @@ static napi_value SetOutputSize(napi_env env, napi_callback_info info) {
     return nullptr;
 }
 
+// 已无效: C++ 坐标换算不使用 display scale (letterbox 由 renderer viewport 推导,
+// globalDisplayScale_ 只写不读已删除)。保留导出仅为兼容 ArkTS 侧调用, 收到直接忽略。
 static napi_value SetDisplayScale(napi_env env, napi_callback_info info) {
-    size_t argc = 1;
-    napi_value args[1];
-    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-    double scale;
-    napi_get_value_double(env, args[0], &scale);
-    EglRenderer::SetGlobalDisplayScale((float)scale);
-    OH_LOG_INFO(LOG_APP, "[MW-NAPI] setDisplayScale = %{public}.2f", scale);
+    (void)env;
+    (void)info;
     return nullptr;
 }
 
@@ -605,11 +606,57 @@ static napi_value SetDesktopMode(napi_env env, napi_callback_info info) {
     return nullptr;
 }
 
+static napi_value SetPhoneMode(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc >= 1) {
+        bool on;
+        napi_get_value_bool(env, args[0], &on);
+        PhoneAdapter_SetPhoneMode(on);
+        OH_LOG_INFO(LOG_APP, "[MW-NAPI] setPhoneMode = %{public}s", on ? "true" : "false");
+    }
+    return nullptr;
+}
+
 static napi_value GetDesktopRootId(napi_env env, napi_callback_info) {
     uint32_t id = WaylandServer::GetInstance()->GetDesktopRootToplevelId();
     napi_value r;
     napi_create_uint32(env, id, &r);
     return r;
+}
+
+// -- NAPI: takeWindowMask -- (ARGB 异型窗口剪影掩码, ArkTS 轮询拉取)
+static napi_value TakeWindowMask(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    uint32_t id = 0;
+    if (argc >= 1) {
+        napi_get_value_uint32(env, args[0], &id);
+    }
+    int w = 0, h = 0;
+    std::vector<uint8_t> bits;
+    if (!WaylandServer::GetInstance()->TakeWindowMask(id, w, h, bits)) {
+        return nullptr;
+    }
+    napi_value result, wv, hv, buf;
+    napi_create_object(env, &result);
+    napi_create_int32(env, w, &wv);
+    napi_create_int32(env, h, &hv);
+    void* data = nullptr;
+    napi_create_arraybuffer(env, bits.size(), &data, &buf);
+    if (data && !bits.empty()) {
+        memcpy(data, bits.data(), bits.size());
+    }
+    napi_value wKey, hKey, bufKey;
+    napi_create_string_utf8(env, "w", 1, &wKey);
+    napi_create_string_utf8(env, "h", 1, &hKey);
+    napi_create_string_utf8(env, "buffer", 6, &bufKey);
+    napi_set_property(env, result, wKey, wv);
+    napi_set_property(env, result, hKey, hv);
+    napi_set_property(env, result, bufKey, buf);
+    return result;
 }
 
 // -- Input forwarding NAPI (unified InputManager path) --
@@ -689,7 +736,9 @@ static napi_value RaiseToplevel(napi_env env, napi_callback_info info) {
     if (argc < 1) return nullptr;
     uint32_t tl;
     napi_get_value_uint32(env, args[0], &tl);
-    WaylandServer::GetInstance()->RaiseToplevel(tl);
+    // 用户显式操作 (任务栏/窗口点击) 路径: 已 fullscreen 的目标会重新取
+    // 全屏优先级号, 支撑两个全屏窗口间的主动切换
+    WaylandServer::GetInstance()->RaiseToplevel(tl, true);
     return nullptr;
 }
 
@@ -825,12 +874,14 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"setOutputSize",   nullptr, SetOutputSize,   nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setDisplayScale",  nullptr, SetDisplayScale,  nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setDesktopMode",   nullptr, SetDesktopMode,   nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setPhoneMode",     nullptr, SetPhoneMode,     nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getDesktopRootId", nullptr, GetDesktopRootId, nullptr, nullptr, nullptr, napi_default, nullptr},
         // ArkTS input forwarding (unified InputManager path)
         {"sendPointerEvent", nullptr, SendPointerEvent, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendKeyEvent",     nullptr, SendKeyEvent,     nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendScrollEvent",   nullptr, SendScrollEvent,   nullptr, nullptr, nullptr, napi_default, nullptr},
         {"notifyToplevelResize",nullptr,NotifyToplevelResize,nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"takeWindowMask", nullptr, TakeWindowMask, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"findToplevelAt",   nullptr, FindToplevelAt,   nullptr, nullptr, nullptr, napi_default, nullptr},
         {"raiseToplevel",    nullptr, RaiseToplevel,    nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setToplevelVisible", nullptr, SetToplevelVisible, nullptr, nullptr, nullptr, napi_default, nullptr},

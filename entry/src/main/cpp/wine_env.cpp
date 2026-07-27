@@ -9,10 +9,12 @@
 #include <algorithm>
 #include <cstring>
 #include <string>
-#include <unordered_set>
 #include <vector>
+#include <unordered_set>
 
 #undef LOG_TAG
+#undef LOG_DOMAIN
+#define LOG_DOMAIN 0x0000
 #define LOG_TAG "WL_NAPI"
 #include <hilog/log.h>
 
@@ -52,6 +54,12 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
         }
     }
 
+    std::string dllPath = binDir + "/x86_64-windows:" + binDir + "/i386-windows:" + binDir;
+#ifndef __aarch64__
+    // x86_64: bundled libs 加入 WINEDLLPATH, load_unixlib_by_name() 从此搜索 .so
+    dllPath += ":/data/storage/el1/bundle/libs/x86_64";
+#endif
+
     std::vector<std::string> env = {
         "XDG_RUNTIME_DIR=" + sockDir,
         "WAYLAND_DISPLAY=" + sockName,
@@ -62,7 +70,7 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
         "WINEDLLDIR0=" + binDir + "/x86_64-windows",
         "WINEDLLDIR1=" + binDir + "/i386-windows",
         "WINEDLLDIR2=" + binDir,
-        "WINEDLLPATH=" + binDir + "/x86_64-windows:" + binDir + "/i386-windows:" + binDir,
+        "WINEDLLPATH=" + dllPath,
         "WINEDEBUG=-all",
         "LANG=zh_CN.UTF-8",
         "XKB_CONFIG_ROOT=" + xkbDir,
@@ -213,17 +221,38 @@ size_t AppendMissingEntryParamsEnvOverrides(std::string& entryParams,
             envLine.find('|') != std::string::npos ||
             envLine.find('\n') != std::string::npos)
             continue;
-
-        std::string key = EnvKey(envLine);
+        // 过滤 per-process fd 变量: 子进程会从 fdList 拿到自己的值
+        if (e.rfind("WINESERVERSOCKET=", 0) == 0 ||
+            e.rfind("WINE_OHOS_AUDIO_ENABLE=", 0) == 0 ||
+            e.rfind("WINE_OHOS_AUDIO_BOOTSTRAP_FD=", 0) == 0 ||
+            e.rfind("WINE_OHOS_AUDIO_PROTOCOL_VERSION=", 0) == 0)
+            continue;
+        const std::string key = EnvKey(envLine);
         if (key.empty() ||
             (existingKeys.count(key) && !IsBrokerSessionAuthoritativeKey(key)))
             continue;
         entryParams += "|__env=";
         entryParams += envLine;
-        existingKeys.insert(std::move(key));
+        existingKeys.insert(key);
         ++appended;
     }
     return appended;
+}
+
+std::string SerializeEnvToEntryParams(const std::vector<std::string>& env) {
+    std::string result;
+    for (const std::string& e : env) {
+        if (e.find('|') != std::string::npos || e.find('\n') != std::string::npos)
+            continue;
+        if (e.rfind("WINESERVERSOCKET=", 0) == 0 ||
+            e.rfind("WINE_OHOS_AUDIO_ENABLE=", 0) == 0 ||
+            e.rfind("WINE_OHOS_AUDIO_BOOTSTRAP_FD=", 0) == 0 ||
+            e.rfind("WINE_OHOS_AUDIO_PROTOCOL_VERSION=", 0) == 0)
+            continue;
+        result += "|__env=";
+        result += e;
+    }
+    return result;
 }
 
 void LogGraphicsBackendStateForLaunch(const char* tag) {
