@@ -468,3 +468,7 @@ readback/upload, and zero per-frame `vkDeviceWaitIdle`. Descriptor identity,
 rebind/lifetime, mip/array/explicit-LOD/barrier, BC1 emulation and sampled
 compute/depth matrices passed. The 60-minute gate and final three-run/clean
 matrix remain deferred per the current development-stage decision.
+
+The checked-in one-command runner was also executed with `-SkipBuild -Suite
+dxvk -Prefix reuse` on the same device and returned `Automation PASS`; the
+archive is `D:\MyProject\winehua-logs\automation\phase2-20260728-040847`.
