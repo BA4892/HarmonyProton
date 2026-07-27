@@ -38,7 +38,8 @@ static uint64_t PerfNowUs()
 static bool TraceFrameOrder()
 {
     const char* trace = std::getenv("VKR_WINEHUA_SHADOW_TRACE");
-    return trace && trace[0] == '1' && !trace[1];
+    return trace && ((!strcmp(trace, "1")) ||
+                     !strcmp(trace, "present-image-trace"));
 }
 
 struct RendererPerfWindow {
