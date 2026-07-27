@@ -2368,3 +2368,89 @@ presenter image, so a scene attachment must never be compared directly with the
 Host-presented image. The trace must remain diagnostic-only and low volume. No
 queue wait, frame drop, present reorder or synchronization change is authorized
 until this identity chain shows a concrete mismatch.
+
+## 29. 2026-07-27 present-image identity chain closes present selection
+
+The diagnostic HAP was built, validated, overwrite-installed, and run through
+the real Heaven D3D11 scene on the physical device:
+
+    archive:
+      D:\MyProject\winehua-logs\manual\heaven-present-image-trace-20260727-075615
+    HAP SHA-256:
+      b72296485f227837db38c1d8c8a8df94ac87b00d28a0e12e5b0ea6813c707354
+    wine-data SHA-256:
+      07368128464c959393bce727e422a6ad0c1cc89b887f76fe72d3656a150ecfe8
+    source:
+      main c15f6aa, DXVK 2de8230, Wine 20559c87efb,
+      Mesa 7f8bace, virglrenderer 0319fb18
+    runtime:
+      Wine Unix PID 14230, Host context 5, surface 16
+    profile:
+      shadow-precise-dirty-ring-present-image-trace
+
+The device-managed x64/x86 DXVK DLL hashes exactly match the packaged staging
+runtime. The prefix `system32` and `syswow64` Wine DLL hashes are different by
+design: the active product contract selects the managed DXVK overlay through
+`WINEDLLPATH` and `WINEDLLOVERRIDES`, and the runtime log proves Heaven loaded
+`DXVK v1.10.3-22-g2de8230`.
+
+`automation/Analyze-HeavenPresentImageTrace.py` automatically splits reused
+swapchain handles at `image-map` resets, selects the matching persistent-log
+sessions, deduplicates startup retries, and joins the complete identity chain.
+Its archived report is `present-image-analysis.json` and returns:
+
+    verdict:                    EXACT-THROUGH-NCP-PUBLISH
+    DXVK present records:       4166
+    joined through Host:        2544, serial 1..2544
+    joined through NCP order:   600
+    identity mismatches:        0
+    serial regressions:         0 at every layer
+    Host retry attempts:        6, identity conflicts 0
+    sampled NCP retries:        5, identity conflicts 0
+    target/timestamp failures:  0
+
+The active mappings are exact:
+
+    DXVK/Wine image index 0, raw 0x629f0c1000
+      -> Guest imageId 388 -> Host VkImage 0x5a6901e798
+
+    DXVK/Wine image index 1, raw 0x629f0d5000
+      -> Guest imageId 390 -> Host VkImage 0x5a6901e9b0
+
+The first serial was retried while the target SurfaceQueue was unattached.
+All attempts retained the same source identity and only the successful publish
+entered the NCP order trace. Host swapchain target indices are driver-controlled
+`vkAcquireNextImageKHR` results; changing legal target acquisition order is not
+a frame-order failure and is deliberately not used as a modulo-cycle gate.
+
+This closes the following causes for this run:
+
+* DXVK acquire/present index mismatch.
+* Wine private-swapchain image mismatch.
+* Guest raw image to Venus object mismatch.
+* Guest image object to Host VkImage mismatch.
+* NCP selecting a different source VkImage.
+* Re-publishing an older serial or timestamp.
+
+It does **not** prove that the selected presenter image contains the newest
+completed render content. Correct identity can still present stale pixels if
+DXVK's internal backbuffer-to-presenter copy used an old source generation,
+was recorded against the wrong source content, or became visible before its
+expected producer work.
+
+The next P0 is therefore a diagnostic-only content-generation trace at the
+last DXVK internal copy into the acquired presenter image:
+
+    DXVK frame/recording generation
+      -> internal backbuffer VkImage + subresource
+      -> copy/blit/resolve destination presenter VkImage + index
+      -> command-buffer recording generation and queue-submit occurrence
+      -> existing Guest/Host present serial
+
+The first version must add no wait, frame drop, queue reorder, fence change,
+shadow-copy change, or present behavior change. Prefer a bounded identity and
+generation record over GPU readback. A small, sparse diagnostic checksum may
+be considered only if identity/generation remains exact and its synchronization
+contract cannot affect normal presentation. The continuous visual verdict for
+this exact HAP remains pending; the analyzer PASS must not be promoted to a
+rollback-free Heaven milestone.
