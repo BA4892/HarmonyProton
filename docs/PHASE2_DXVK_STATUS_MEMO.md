@@ -2454,3 +2454,83 @@ be considered only if identity/generation remains exact and its synchronization
 contract cannot affect normal presentation. The continuous visual verdict for
 this exact HAP remains pending; the analyzer PASS must not be promoted to a
 rollback-free Heaven milestone.
+
+## 30. 2026-07-27 Heaven rollback root cause and passing ring-drain fix
+
+The rollback was real frame-content reordering, not a low-FPS visual illusion.
+The user confirmed the fixed Heaven D3D11 scene no longer moves backward.
+
+The root cause was the cross-transport ordering contract immediately before
+private Vulkan present:
+
+    DXVK final presenter copy QueueSubmit
+      -> asynchronous Venus primary ring
+
+    Wine private present
+      -> synchronous private vtest socket
+
+`vn_ring_roundtrip()` was incorrectly treated as a renderer flush. Its actual
+contract is to submit a virtqueue sequence marker and enqueue a matching wait
+command in the Venus ring; it returns without waiting for the ring worker to
+consume that command. The private present worker could therefore acquire the
+Host queue mutex and copy the old source image before the ring worker executed
+the final DXVK `vkQueueSubmit`. All Guest frame numbers, present serials,
+NativeImage timestamps and selected image handles remained monotonic, which is
+why the earlier identity traces were correct while the visible content still
+rolled back.
+
+Mesa commit `9a988b6` makes the private-present boundary do:
+
+    vn_ring_roundtrip(primary_ring)
+      -> vn_ring_wait_all(primary_ring)
+      -> private vtest present
+
+`vn_ring_wait_all()` waits only until the Host renderer has decoded the
+published ring commands and the Host Vulkan driver's `vkQueueSubmit` call has
+returned. It does not wait for GPU completion and does not call
+`vkQueueWaitIdle` or `vkDeviceWaitIdle`. Host queue order then guarantees that
+the NCP copy observes the final presenter copy before later Guest work.
+
+Passing artifact and source state:
+
+    archive:
+      D:\MyProject\winehua-logs\manual\heaven-ring-drain-pass-20260727-1045
+    HAP SHA-256:
+      890664cb3859effe20f765e4ac4a5f362621203f318a7043d6261c687b2d700d
+    wine-data SHA-256:
+      cf89d570d22ebc25a533ab86ead89905ccfd04c98626689e8bba9bfcb6f778a5
+    device libvulkan_virtio.so SHA-256:
+      92a64c36d635267dd6176c28b8446a8a93d55f7227fdfa8c046eb247e0b11b30
+    source:
+      main dc077f8 plus Mesa 9a988b6, DXVK df55b90,
+      virglrenderer 0319fb18, Wine 20559c87
+
+The trace run recorded 782 ordered presents. Ring-drain wait cost was:
+
+    min 123 us, p50 1184 us, p95 3964 us, p99 7338 us,
+    max 33041 us, average 1659.8 us, one bounded retry
+
+The same HAP passed x64 DXVK Legacy comprehensive D3D11 smoke and rendered the
+x64 D3D11 cube for 532 frames with `angleRegressions=0`. The suite-level FAIL
+was only the separately tracked x86 smoke timeout at 180 seconds. The normal
+Heaven profile remained around 10 FPS in the first post-fix sample, so
+correctness is closed but performance is not.
+
+The following ordering invariant is now mandatory and must survive every
+performance change:
+
+    producer final-copy QueueSubmit reaches the Host Vulkan queue
+      before private present submits its source-to-SurfaceQueue copy
+
+Do not improve FPS by deleting the ring drain, weakening it back to
+`vn_ring_roundtrip()` alone, dropping present serials, or reusing old source
+images. The next performance work must profile and optimize, in order:
+
+1. ring drain CPU wait and ring notification latency;
+2. precise-dirty shadow scan/copy and private GPU-upload submission;
+3. Host driver `vkQueueSubmit` time and submits per frame;
+4. NCP acquire/copy/present and release-fence wait.
+
+A lower-overhead replacement is allowed only if it provides an equivalent
+explicit completion token, such as a Host-visible ring sequence or timeline
+value that private present waits before acquiring/submitting on the queue.
