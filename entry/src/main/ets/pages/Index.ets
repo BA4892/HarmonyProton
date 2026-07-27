@@ -679,7 +679,7 @@ struct Index {
   private startDeveloperSmoke = (): void => {
     this.smokeRequest = {
       mode: 'smoke', runId: `developer-${Date.now()}`, suite: 'core',
-      prefixMode: 'reuse', longSeconds: 3600
+      prefixMode: 'reuse', longSeconds: 3600, batchMappedFlush: false
     };
     this.automationMode = true;
     this.gameTestMode = false;
