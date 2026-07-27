@@ -66,6 +66,11 @@ napi_value RunWineExe(napi_env env, napi_callback_info info) {
 
     std::vector<std::string> wineEnv = BuildWineEnv(sockDir, sockName, libPath, binDir, audioBootstrapFd, homeDir);
 
+    // desktop 模式: 将进程接入 explorer 创建的 shell desktop,
+    // 使其窗口出现在任务栏, 且能与其他 shell 进程互相访问
+    if (WaylandServer::GetInstance()->IsDesktopMode())
+        wineEnv.push_back("WINEHUA_DESKTOP=shell");
+
     {
 #ifdef __aarch64__
         std::string entryParams = std::string(binDir) + "|" + exePath;
