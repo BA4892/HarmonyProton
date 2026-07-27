@@ -483,27 +483,8 @@ extern "C" void Main(NativeChildProcess_Args args)
         }
     }
 
-    // Step B: entryParams 中的兼容性覆盖先应用；完整 env blob 最后应用，
-    // 这样调用方传入的诊断/DXVK 变量不会被 Broker 的 session 默认值覆盖。
+    // Step B: entryParams 中的环境覆盖应用。
     apply_entry_param_env_overrides(envOverrides);
-
-    // Step C: 应用转发来的 guest 环境变量 (覆盖 baseline 和 entryParams)
-    if (envBuf && envBufLen > 0) {
-        char *p = envBuf, *end = envBuf + envBufLen;
-        int applied = 0;
-        while (p < end) {
-            char* eq = strchr(p, '=');
-            if (eq) {
-                *eq = '\0';
-                setenv(p, eq + 1, 1);  // overwrite=1, guest env 优先
-                *eq = '=';
-            }
-            p += strlen(p) + 1;
-            applied++;
-        }
-        OH_LOG_INFO(LOG_APP, "[WineChild] applied %{public}d env vars from forwarded environ", applied);
-        free(envBuf);
-    }
 
     if (!hostElfMode) log_d3d_environment_summary();
 

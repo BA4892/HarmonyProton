@@ -653,12 +653,12 @@ extern "C" __attribute__((visibility("default"))) void Main(NativeChildProcess_A
 // Phone mode runs this library in the application process so NativeWindow can
 // remain on the existing SurfaceQueue instead of crossing the fork relay.
 extern "C" __attribute__((visibility("default"))) int WinehuaVirgl_AttachSurfaceTarget(
-    uint64_t surfaceKey, uint64_t framePeriodNs, OHNativeWindow* window)
+    uint64_t surfaceKey, uint64_t framePeriodNs, uint32_t flags, OHNativeWindow* window)
 {
     // In-process 模式下 window 由调用方 (renderer) 持有引用，
     // g_presenters.Attach 只借用指针，无需额外 NativeObjectReference。
     if (!window) return -1;
-    return winehua::AttachVirglSurfaceTarget(surfaceKey, framePeriodNs, window);
+    return winehua::AttachVirglSurfaceTarget(surfaceKey, framePeriodNs, flags, window);
 }
 
 extern "C" __attribute__((visibility("default"))) int WinehuaVirgl_DetachSurfaceTarget(

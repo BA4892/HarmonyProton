@@ -81,7 +81,7 @@ constexpr const char* ZERO_COPY_READY_DIR = "/data/storage/el2/base/cache";
 constexpr const char* ZERO_COPY_READY_PREFIX = "winehua_zc_surface_";
 
 using VirglChildMainFn = void (*)(NativeChildProcess_Args);
-using VirglInProcessAttachFn = int (*)(uint64_t, uint64_t, OHNativeWindow*);
+using VirglInProcessAttachFn = int (*)(uint64_t, uint64_t, uint32_t, OHNativeWindow*);
 using VirglInProcessDetachFn = int (*)(uint64_t);
 using VirglInProcessSetFramePeriodFn = int (*)(uint64_t, uint64_t);
 using VirglInProcessQueryFn = int (*)(virgl_ipc::SurfaceQueryReply*);
@@ -342,7 +342,7 @@ bool GraphicsBroker::SendVirglTargetLocked(uint64_t surfaceKey,
             return false;
         }
         auto attachFn = reinterpret_cast<VirglInProcessAttachFn>(virglInProcessAttach_);
-        const int result = attachFn ? attachFn(surfaceKey, framePeriodNs, producerWindow) : -1;
+        const int result = attachFn ? attachFn(surfaceKey, framePeriodNs, flags, producerWindow) : -1;
         OH_LOG_INFO(LOG_APP,
                     "[VIRGL-ZC][MAIN] direct attach surface_key=%{public}llu "
                     "period_ns=%{public}llu result=%{public}d",

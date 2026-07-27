@@ -352,7 +352,10 @@ static void PrepareDesktopSessionGraphicsEnv(const LaunchParams& params)
     gb.AppendWineEnv(env);
     AppendD3dBackendEnv(env, params.d3dBackend, params.winehuaBin);
     AppendStableDesktopDxvkEnv(env, params);
-    SetBrokerSessionEnv(std::move(env));
+    /* The broker now receives the finalized environment through the
+     * serialized __env entryParams channel. Keep this helper side-effect
+     * free so the old broker-global environment path cannot diverge from
+     * Explorer and smoke launches. */
     LogGraphicsBackendStateForLaunch("DesktopSession");
 }
 
@@ -501,7 +504,9 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
         }
         /* wineboot 已退出: registry 仍在 wineserver flush 途中 (实测落盘延迟
          * 稳定 ~13s), 宽限窗口等文件就绪 — 文件到位即通过, 不会满等 */
-        if (!WaitFor("wine prefix", IsWinePrefixInitialized, 60000, 200)) {
+        if (!WaitFor("wine prefix",
+                     [&p]() { return IsWinePrefixInitialized(p->prefixDir); },
+                     60000, 200)) {
             OH_LOG_ERROR(LOG_APP, "[Launch-Async] wineboot exited but prefix incomplete, abort");
             if (gStateTsfn)
                 napi_call_threadsafe_function(gStateTsfn, strdup("wineboot-failed"), napi_tsfn_blocking);

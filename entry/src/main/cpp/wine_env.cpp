@@ -222,10 +222,10 @@ size_t AppendMissingEntryParamsEnvOverrides(std::string& entryParams,
             envLine.find('\n') != std::string::npos)
             continue;
         // 过滤 per-process fd 变量: 子进程会从 fdList 拿到自己的值
-        if (e.rfind("WINESERVERSOCKET=", 0) == 0 ||
-            e.rfind("WINE_OHOS_AUDIO_ENABLE=", 0) == 0 ||
-            e.rfind("WINE_OHOS_AUDIO_BOOTSTRAP_FD=", 0) == 0 ||
-            e.rfind("WINE_OHOS_AUDIO_PROTOCOL_VERSION=", 0) == 0)
+        if (envLine.rfind("WINESERVERSOCKET=", 0) == 0 ||
+            envLine.rfind("WINE_OHOS_AUDIO_ENABLE=", 0) == 0 ||
+            envLine.rfind("WINE_OHOS_AUDIO_BOOTSTRAP_FD=", 0) == 0 ||
+            envLine.rfind("WINE_OHOS_AUDIO_PROTOCOL_VERSION=", 0) == 0)
             continue;
         const std::string key = EnvKey(envLine);
         if (key.empty() ||
