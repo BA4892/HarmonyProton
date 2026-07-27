@@ -120,4 +120,4 @@ hdc -t <device_ip> hilog | grep -E 'WL_NAPI|WL_EGL|WL_Server|WL_Input|GraphicsBr
 
 ## 交流
 
-<img src="docs/images/wechat_qrcode.jpg" width="320">
+<img src="docs/images/wechat_qrcode.png" width="320">

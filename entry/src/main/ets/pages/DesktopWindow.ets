@@ -235,10 +235,10 @@ struct DesktopPage {
                                     && dist < DesktopPage.DOUBLE_TAP_DIST && this.pendingTl === this.lastTapTl);
 
                 if (isDoubleTap) {
-                  // 双击: 两个连续点击使用同一位置
+                  // 双击: 第一次点击已由上一个单击路径发出, 这里只补发
+                  // 第二次点击 (Press+Release) 构成完整的双击序列,
+                  // 避免总共 3 次点击导致 explorer 同时触发"打开"和"重命名"
                   this.lastTapTime = 0;
-                  testNapi.sendPointerEvent(this.pendingTl, MouseAction.Press, this.lastTapPx, this.lastTapPy, btnLeft);
-                  testNapi.sendPointerEvent(this.pendingTl, MouseAction.Release, this.lastTapPx, this.lastTapPy, btnLeft);
                   testNapi.sendPointerEvent(this.pendingTl, MouseAction.Press, this.lastTapPx, this.lastTapPy, btnLeft);
                   testNapi.sendPointerEvent(this.pendingTl, MouseAction.Release, this.lastTapPx, this.lastTapPy, btnLeft);
                   hilog.info(DOMAIN, 'CLICK-PIPE', '[ArkTS] DOUBLE-TAP tl=%{public}d px=(%{public}d,%{public}d)',
