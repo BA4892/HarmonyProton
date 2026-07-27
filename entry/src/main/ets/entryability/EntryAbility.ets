@@ -119,7 +119,7 @@ export default class EntryAbility extends UIAbility {
     const clickClientYPermille = Math.max(-1,
       Math.min(1000, Math.floor(requestedClickClientYPermille)));
     const requestedPerfProfile = value('winehua.perf_profile',
-      mode === '' || d3dBackend === 'dxvk_legacy' ? 'shadow-precise-strong-ring' : 'baseline');
+      mode === '' || d3dBackend === 'dxvk_legacy' ? 'shadow-precise-dirty-ring-inline-upload' : 'baseline');
     const perfProfile = ['direct-fence-wait', 'no-remote-sync', 'no-dynamic-flush', 'fence-feedback',
       'shadow-none', 'shadow-trace', 'shadow-to-host-explicit', 'shadow-precise',
       'shadow-precise-single-ring', 'shadow-precise-sync-submit', 'shadow-precise-strong-ring',

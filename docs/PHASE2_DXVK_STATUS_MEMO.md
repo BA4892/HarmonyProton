@@ -2589,3 +2589,96 @@ and memory free lifecycle under `ctx->object_mutex`. Its A/B is accepted only
 if the Host logs prove the selector is active, Heaven remains continuously
 rollback-free, Cube reports `angleRegressions=0`, and x64 DXVK smoke passes.
 Until all gates pass, the product profile remains unchanged.
+
+## 32. 2026-07-27 rollback-free inline upload promotion
+
+The user continuously observed the inline-upload Heaven run and confirmed that
+it had no backward camera/animation frames. This validation used the same
+mandatory private-present ordering as the correctness baseline:
+
+    DXVK final presenter-copy QueueSubmit
+      -> Venus primary ring
+      -> vn_ring_roundtrip(primary_ring)
+      -> vn_ring_wait_all(primary_ring)
+      -> private vtest present
+
+The ordering fix remains independent from the upload optimization and must not
+be removed, shortened to roundtrip-only, or replaced by a timing delay.
+
+The inline candidate was archived at:
+
+    D:\MyProject\winehua-logs\manual\
+      heaven-inline-ring-drain-ab-20260727
+
+Artifact and source state:
+
+    HAP SHA-256:
+      6ee13a68439242537e700ec22df1a4c142fd2504d52f9bca5138e238a1918b28
+    main parent:   1888cb1; product-default change is this memo commit
+    Mesa:          19fe8b6
+    virglrenderer: fb4c20ee
+    DXVK:          df55b90
+
+The current Heaven process produced more than 6480 presents. There were no
+Host timestamp-regression records, and the user confirmed the moving scene did
+not visually roll back. A matched present-count comparison over presents
+2280..3120 measured:
+
+                              baseline       inline upload      delta
+    FPS                         7.890             9.245          +17.2%
+    Host total submit path     29.987 ms         27.264 ms        -2.723 ms/frame
+    separate upload submit      3.865 ms          0.000 ms        -3.865 ms/frame
+    merged driver submit        1.324 ms          4.466 ms        +3.142 ms/frame
+    shadow prepare             24.726 ms         22.735 ms        -1.991 ms/frame
+    upload bytes             1125.8 KiB       1118.3 KiB         comparable
+    upload updates            1347.4           1278.5            scene-dependent
+
+The performance gain is not produced by dropping uploads. The renderer records
+the same precise dirty updates and barrier, then sends the upload command
+buffer, Guest submit infos, and a retire signal as one ordered `vkQueueSubmit`.
+The Guest fence still covers the whole call. A dedicated timeline value retires
+each of the three upload slots, and slot reuse has a bounded three-second Host
+wait. No dirty gap is widened and no unknown shadow bytes are uploaded.
+
+Correctness automation is archived at:
+
+    D:\MyProject\winehua-logs\automation\phase2-20260727-120028
+
+Results with `shadow-precise-dirty-ring-inline-upload`:
+
+    x64 comprehensive DXVK D3D11 smoke: PASS (12.184 s)
+      descriptor rebind/unbound/lifetime: PASS
+      mip/array/explicit LOD/update barrier: PASS
+      compute/UAV/sampled image: PASS
+      BC matrix and BC emulation: PASS
+      D24S8 array/view/cube/cube-array/linear-border: PASS
+      Heaven resource and mini-pipeline matrices: PASS
+      actual runtime: DXVK 1.10.3 x64 DLLs, no fallback
+
+    x64 D3D11 cube: PASS
+      frames=515
+      angleRegressions=0
+      init/present HRESULT=0
+
+    x86 comprehensive smoke: FAIL only because of the existing 180-second
+      timeout. The same timeout was already present on the ring-drain baseline
+      and is not evidence of an inline-upload regression. It remains a separate
+      release-gate issue.
+
+The first bound-buffer dirty-iteration A/B stayed neutral or slightly slower,
+so it is not promoted. The inline profile is now the DXVK Legacy product and
+automation default, while all previous profiles remain selectable for A/B and
+rollback diagnosis.
+
+The rebuilt HAP was overwrite-installed successfully. A normal App launch with
+no explicit `winehua.perf_profile` logged `WineHua shadow GPU upload
+inline-submit enabled`, proving Explorer-launched/manual executables inherit
+the product default rather than depending on smoke-only environment setup.
+
+The next performance P0 is command-recording cost, not present copy cost. Heaven
+still records roughly 1200-1400 `vkCmdUpdateBuffer` operations and uploads about
+1.1 MiB per frame. The next experiment must remain a separate profile and use a
+Host-visible staging buffer plus `vkCmdCopyBuffer` regions (or another measured
+method that reduces command count) without merging across unknown gaps. It must
+preserve exact dirty ranges, queue order, slot retirement, the ring drain, and
+the same Heaven/Cube/D3D11 correctness gates before any default change.
