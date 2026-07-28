@@ -3267,3 +3267,83 @@ The next realistic target is to raise Heaven's low intervals above 20 FPS and
 stabilize its median around 25-30 FPS. Any optimization must be a separately
 selectable A/B, retain exact resource-generation ownership and release-fence
 semantics, and pass the same DXVK automation plus continuous Heaven review.
+
+## 40. 2026-07-28 Tomb Raider RGBA8 SNORM render-target emulation
+
+Tomb Raider repeatedly requests `DXGI_FORMAT_R8G8B8A8_SNORM` Texture2D
+resources with `SHADER_RESOURCE | RENDER_TARGET`. Maleoon 910 through the
+current Venus capability path exposes the format for sampling but cannot create
+it as a color attachment. Returning the real creation failure let the game
+continue, but removed intermediate render targets used by its lighting and
+post-processing chain.
+
+The controlled OFF run used the qualified
+`shadow-precise-strong-ring` profile with format tracing enabled and emulation
+explicitly disabled. Its final D3D11 log contained:
+
+    Cannot create texture: 1446
+    Format 31:              1446
+    Extent 800x600x1:        723
+    Extent 400x300x1:        723
+    device lost/crash:         0
+
+Archive:
+
+    D:\MyProject\winehua-logs\tomb-raider-20260728\snorm-ab-20260728\off
+
+The opt-in implementation preserves the D3D-visible RGBA8 SNORM resource while
+using `VK_FORMAT_R16G16B16A16_SFLOAT` for the physical image only when the
+native image is unsupported. Eligibility is restricted to default,
+device-local Texture2D render targets without UAV, shared/external-image, or
+CPU access flags. RTV and SRV views resolve to the physical format, while
+initial data and `UpdateSubresource` convert signed normalized 8-bit texels to
+float16. Emulated-to-emulated copies remain GPU copies. Mixed native/emulated
+copies are rejected until a real GPU pack/unpack path exists.
+
+The physical-device ON run used:
+
+    DXVK_WINEHUA_EMULATE_RGBA8_SNORM_RT=1
+    DXVK_WINEHUA_TRACE_FORMATS=1
+    DXVK_LOG_LEVEL=info
+
+It reached the real opening game scene. The final log recorded:
+
+    emulation activation:    1
+    Cannot create texture:   0
+    Format 31 failures:      0
+    mixed copy rejection:    0
+    upload conversion error: 0
+    device lost/crash:       0
+
+Archive:
+
+    D:\MyProject\winehua-logs\tomb-raider-20260728\snorm-ab-20260728\on
+
+Continuous frames retained skin, clothing, fire light, shadows, rain, and
+environment colour without black output or miscellaneous-colour corruption.
+The user confirmed that the colour was now very good and that frame rate had
+improved materially. This is consistent with restoring the missing
+intermediate targets and eliminating repeated failed resource creation.
+
+Committed source identity:
+
+    DXVK branch: feature/render-element-completeness
+    DXVK commit: 0d6f0462400fb5ae74d9fe82b974d1d9211dcc29
+    main gitlink commit: b2113e3
+    x86 d3d11.dll SHA-256:
+      1bb95424b77dfa616b7494bd46b7da810ac1c9340d069204a8694567a63d47e9
+    x64 d3d11.dll SHA-256:
+      5cf7465b1c55c8b3c8210982bf0cca6503c647377a640ab6eacd33cf1c8283b1
+
+This run used verified managed-runtime DLL replacement rather than a newly
+assembled HAP. Therefore it qualifies the implementation and Tomb Raider
+behavior, but not a release artifact. Before product-default promotion, add an
+x86/x64 SNORM RT smoke for clear/draw/sample, initialization,
+`UpdateSubresource`, emulated-to-emulated copy and explicit unsupported mixed
+copy/readback cases; then rebuild the HAP and rerun DXVK plus Heaven regression.
+
+Keep explicit `0` as the diagnostic disable switch. The code already accepts
+`auto`, but ordinary launches must not globally enable it until the smoke and
+HAP gates above pass. Once qualified, `auto` should remain capability-driven:
+native support wins, the RGBA16F substitution is used only when native creation
+fails, and unsupported resource shapes continue returning the truthful error.
