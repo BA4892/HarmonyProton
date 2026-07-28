@@ -200,12 +200,6 @@ jobs:
           # Developer WSL proxies are intentionally invalid on hosted runners.
           # Empty means build_ohos_guest_vulkan.sh must fetch directly.
           WINEHUA_GIT_PROXY: ''
-          http_proxy: ''
-          https_proxy: ''
-          all_proxy: ''
-          HTTP_PROXY: ''
-          HTTPS_PROXY: ''
-          ALL_PROXY: ''
         run: |
           set -euxo pipefail
           make NATIVE_ARCH=arm64-v8a hap
