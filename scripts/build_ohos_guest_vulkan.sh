@@ -310,14 +310,6 @@ if [ -f "$HEAVEN_INPUT/heaven_final_vs.spv" ] &&
     [ -f "$HEAVEN_INPUT/heaven_exact_probe.frag.spv" ] &&
         cp -L "$HEAVEN_INPUT/heaven_exact_probe.frag.spv" "$HEAVEN_OUTPUT/heaven_exact_probe.frag.spv"
 fi
-# The real Heaven capture uses DXVK's sparse descriptor contract. Keep the
-# benchmark-owned names diagnostic-only, but always source them from the
-# current exact frame capture so an older hand-reduced vertex shader cannot be
-# mistaken for the matching VS/FS pair.
-[ -f "$ROOT/replay_spv/VS_809ef7d3d23ff811f90c51be8d0cfddf6994cdb0.spv" ] &&
-    cp -L "$ROOT/replay_spv/VS_809ef7d3d23ff811f90c51be8d0cfddf6994cdb0.spv"         "$HEAVEN_OUTPUT/heaven_sparse_vs.spv"
-[ -f "$ROOT/replay_spv/FS_56289d3e1ccd04a77c3d954c5ea8fe76a545a831.spv" ] &&
-    cp -L "$ROOT/replay_spv/FS_56289d3e1ccd04a77c3d954c5ea8fe76a545a831.spv"         "$HEAVEN_OUTPUT/heaven_sparse_fs.spv"
 # Optional exact-draw payload. The source directory is generated under build/
 # from a local benchmark capture and is deliberately not version-controlled.
 # Keeping this in the managed Guest runtime lets SmokeRunner replay the same

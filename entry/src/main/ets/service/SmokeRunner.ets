@@ -858,15 +858,6 @@ export class SmokeRunner {
         `${GUEST_VULKAN_ROOT}/share/winehua/replay_external/heaven_final_vs.spv`;
       const replayVertex = spec.id.indexOf('final-fragment-simple-vertex') >= 0 ?
         `${GUEST_VULKAN_ROOT}/share/winehua/venus_heaven_material.vert.spv` : heavenVertex;
-      const useSparseHeaven = spec.id === 'venus-heaven-material-graphics-x64' ||
-        spec.id === 'venus-heaven-material-exact-x64' ||
-        spec.id === 'venus-heaven-material-exact-fragment-x64' ||
-        spec.id === 'venus-heaven-material-bool-true-x64' ||
-        spec.id === 'venus-heaven-material-bool-false-x64';
-      const sparseHeavenFragment =
-        `${GUEST_VULKAN_ROOT}/share/winehua/replay_external/heaven_sparse_fs.spv`;
-      const sparseHeavenVertex =
-        `${GUEST_VULKAN_ROOT}/share/winehua/replay_external/heaven_sparse_vs.spv`;
       const capturedHeavenDraw0 =
         spec.id.indexOf('venus-heaven-material-captured-draw0-') === 0;
       const capturedHeavenDraw0NoDepth =
@@ -1061,16 +1052,12 @@ export class SmokeRunner {
         'VS_809ef7d3d23ff811f90c51be8d0cfddf6994cdb0.remapped-3d526c03b048bdf1.spv';
       const selectedHeavenFragment = capturedHeavenMaterialDepth ?
         `${capturedHeavenMaterialDepthRoot}/depth.frag.spv` :
-        capturedHeaven ? capturedHeavenFragment :
-        (useSparseHeaven ? sparseHeavenFragment : heavenFragment);
+        capturedHeaven ? capturedHeavenFragment : heavenFragment;
       const selectedHeavenVertex = capturedHeavenMaterialDepth ?
         `${capturedHeavenMaterialDepthRoot}/${capturedHeavenMaterialDepthPass3 ?
           'pass3' : 'pass0'}/${capturedHeavenMaterialDepthNoFloatControls ?
             'vs-no-float-controls.spv' : 'vs.spv'}` :
-        capturedHeaven ? capturedHeavenVertex : useSparseHeaven &&
-        spec.id !== 'venus-heaven-material-exact-fragment-x64' &&
-        spec.id.indexOf('bool-') < 0 ?
-        sparseHeavenVertex : replayVertex;
+        capturedHeaven ? capturedHeavenVertex : replayVertex;
       const guestProcess = testNapi.runGuestProgram({
         executablePath: executablePath,
         argv: ['--automation', '--run-id', this.request.runId, '--test-id', spec.id,
