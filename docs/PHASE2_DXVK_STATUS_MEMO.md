@@ -52,12 +52,21 @@ The remaining terminal failure is inside the game's own `steam_api64.dll`:
     steam_api64.dll + 0x282321: EXCEPTION_ACCESS_VIOLATION
     detach + 0x1a7000: EXCEPTION_ILLEGAL_INSTRUCTION
 
-The DLL has unusual protected/self-modifying `WUS0` and `WUS1` sections.
-`BOX64_AVX=1` and `BOX64_AVX=2` reach the same addresses and fail identically,
-so this is not an AVX feature-selection issue and occurs before DXVK rendering.
-Do not add a Steam API bypass or fake result to the runtime. First reproduce
-with a clean vendor installation; if that installation still fails, continue
-as a Box64 protected-code/self-modifying-code compatibility investigation.
+The DLL has protected/self-modifying `WUS0` and `WUS1` sections. The same game
+files run on Windows, so this is a WineHua compatibility failure rather than an
+invalid-installation conclusion. `BOX64_AVX=1` and `BOX64_AVX=2` reach the same
+addresses and fail identically, excluding AVX feature selection.
+
+A controlled Box64 matrix identified the minimum condition. The WineHua
+performance environment had forced `BOX64_DYNAREC_SAFEFLAGS=0`, overriding
+Box64's compatibility default. `BIGBLOCK=0` and `CALLRET=0` alone still fail at
+the same `steam_api64.dll + 0x282321` address. `SAFEFLAGS=1` alone preserves the
+required x86 flag semantics, passes DLL initialization, creates DXVK, renders
+the CryEngine splash, and reaches the Crysis 3 Remastered title screen.
+`SAFEFLAGS=2` also works but is unnecessary. The product default is therefore
+restored to `SAFEFLAGS=1`; explicit per-process overrides remain available for
+performance diagnosis. No Steam API bypass or fake result is used.
+
 Evidence is archived at:
 
     D:\MyProject\winehua-logs\crysis3-20260728

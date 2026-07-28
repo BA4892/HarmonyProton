@@ -16,7 +16,9 @@ static inline void SetBox64PerfEnv() {
     setenv("BOX64_LOG", "0", 1);
     setenv("BOX64_NOBANNER", "1", 1);
     setenv("BOX64_SHOWSEGV", "1", 1);
-    setenv("BOX64_DYNAREC_SAFEFLAGS", "0", 1);
+    // Keep Box64's compatibility default. Forcing 0 breaks code that observes
+    // x86 flags across translated blocks, including protected startup code.
+    setenv("BOX64_DYNAREC_SAFEFLAGS", "1", 1);
     setenv("BOX64_DYNAREC_BIGBLOCK", "3", 1);
     setenv("BOX64_DYNAREC_CALLRET", "2", 1);
     setenv("BOX64_DYNAREC_FORWARD", "1024", 1);
@@ -41,7 +43,7 @@ inline void AppendBox64PerfStrings(std::vector<std::string>& env) {
     env.push_back("BOX64_LOG=0");
     env.push_back("BOX64_NOBANNER=1");
     env.push_back("BOX64_SHOWSEGV=1");
-    env.push_back("BOX64_DYNAREC_SAFEFLAGS=0");
+    env.push_back("BOX64_DYNAREC_SAFEFLAGS=1");
     env.push_back("BOX64_DYNAREC_BIGBLOCK=3");
     env.push_back("BOX64_DYNAREC_CALLRET=2");
     env.push_back("BOX64_DYNAREC_FORWARD=1024");
