@@ -1,11 +1,66 @@
 # WineHua Phase 2 DXVK Status Memo
 
-> Last updated: 2026-07-27
+> Last updated: 2026-07-28
 >
 > Purpose: this is the durable handoff for resuming the DXVK investigation.
 > Read this file before changing DXVK, Venus present, SmokeRunner, or game launch
 > code. Update it whenever a conclusion, gate result, commit, HAP, or primary
 > blocker changes.
+
+## 2026-07-28 SNORM default, DLL search fix, and Crysis 3 boundary
+
+`DXVK_WINEHUA_EMULATE_RGBA8_SNORM_RT=auto` is now part of the default
+`dxvk_legacy` environment. DXVK keeps the native `RGBA8_SNORM` render-target
+path when the Host device supports it; on devices such as Maleoon where the
+format can be sampled but not used as a color attachment, DXVK may select its
+qualified `RGBA16F` backing image. A process can still set the variable to `0`
+for an exact native-path A/B. The user confirmed that this default fixes Tomb
+Raider's dark rendering and also improves its frame rate. Wine child startup
+logs now record the selected mode.
+
+The current installed and regression-tested artifact is:
+
+    HAP SHA-256:
+      69c271f1afb4eb3c0520d0db1a8bf00531ed4b3fa7f3d33b820aa4b69631b22e
+    wine-data SHA-256:
+      17e261ff8a3753c48424c6f1619378c47e81a5b082f1bea9c7862aadc7a1b3f5
+    device ntdll.so SHA-256:
+      f0f0ca1bdb902df6964dd92e7888e84f762d85bce52a4c5da124ad51967155ba
+    automation archive:
+      D:\MyProject\winehua-logs\automation\phase2-20260728-191205
+
+The full `dxvk + reuse prefix` gate passed for x64 and x86. It covered D3D11
+feature level 11.0, texture and descriptor matrices, subresources, 3D textures,
+compute/UAV, depth/stencil, BC formats, fixed-frame presentation, and the Cube
+sequence. The Cube result was 521 frames, `angleRegressions=0`, and
+`fallbackDetected=false`.
+
+Crysis 3 Remastered must be launched from the real path:
+
+    Z:\games\Remastered\Crysis3Remastered\Bin64\Crysis3Remastered.exe
+
+Its first failure, `0xC0000135`, was a WineHua OHOS loader bug. OHOS replaced
+the normal process `DllPath` with case-sensitive Unix `WINEDLLPATH` entries, so
+uppercase imports such as `WINMM.dll`, `WININET.dll`, and `DINPUT8.dll` did not
+resolve even though the files existed. Wine now appends
+`C:\windows\system32;C:\windows` after the managed DXVK paths. This preserves
+DXVK priority while restoring normal Windows system-DLL resolution. After the
+fix, DXVK `dxgi.dll`, `vulkan-1.dll`, and `winevulkan.dll` all load.
+
+The remaining terminal failure is inside the game's own `steam_api64.dll`:
+
+    steam_api64.dll + 0x282321: EXCEPTION_ACCESS_VIOLATION
+    detach + 0x1a7000: EXCEPTION_ILLEGAL_INSTRUCTION
+
+The DLL has unusual protected/self-modifying `WUS0` and `WUS1` sections.
+`BOX64_AVX=1` and `BOX64_AVX=2` reach the same addresses and fail identically,
+so this is not an AVX feature-selection issue and occurs before DXVK rendering.
+Do not add a Steam API bypass or fake result to the runtime. First reproduce
+with a clean vendor installation; if that installation still fails, continue
+as a Box64 protected-code/self-modifying-code compatibility investigation.
+Evidence is archived at:
+
+    D:\MyProject\winehua-logs\crysis3-20260728
 
 ## 0. Visual correctness ledger and non-regression rule
 
