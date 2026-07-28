@@ -194,7 +194,7 @@ jobs:
       - name: Build HAP
         env:
           NATIVE_ARCH: arm64-v8a
-          BUILD_GUEST_GFX: '0'
+          BUILD_GUEST_GFX: '1'
           BUILD_GUEST_VULKAN: '1'
           BUILD_WINE_MONO: '0'
         run: |
@@ -271,6 +271,22 @@ jobs:
                       name, hex(machine), hex(expected_machine)
                   )
                   print(f"[dxvk] {name}: machine={machine:#06x} size={len(image)}")
+
+              # DXVK DLLs alone are not runnable on ARM64 HarmonyOS.  Require
+              # the complete Win32 Vulkan -> winevulkan -> loader -> Venus ICD
+              # chain in the same payload.
+              vulkan_runtime = (
+                  "bin/x86_64-windows/vulkan-1.dll",
+                  "bin/i386-windows/vulkan-1.dll",
+                  "bin/x86_64-unix/winevulkan.so",
+                  "bin/guest_vulkan/lib/libvulkan.so.1",
+                  "bin/guest_vulkan/lib/libvulkan_virtio.so",
+                  "bin/guest_vulkan/share/vulkan/icd.d/venus_icd.x86_64.json",
+              )
+              for name in vulkan_runtime:
+                  image = wine_data.read(name)
+                  assert image, name
+                  print(f"[vulkan] {name}: size={len(image)}")
 
           print(f"[dxvk] commit={expected_commit}")
           print(f"[dxvk] wine-data.zip sha256={payload_sha}")
