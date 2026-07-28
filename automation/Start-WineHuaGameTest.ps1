@@ -113,7 +113,15 @@ if ($ClickClientXPermille -ge 0 -and -not $ClickTitlePrefix) {
 foreach ($pair in $environmentPairs) {
     $key = [string]$pair.Key
     $value = [string]$pair.Value
-    if ($key -notmatch '^(WINEDEBUG|DXVK_|VN_|VKR_|WINEHUA_DXVK_|WINEHUA_VKR_)[A-Za-z0-9_]*$') {
+    $allowedBox64Keys = @(
+        'BOX64_DYNAREC_SAFEFLAGS',
+        'BOX64_DYNAREC_BIGBLOCK',
+        'BOX64_DYNAREC_CALLRET',
+        'BOX64_DYNAREC_FORWARD',
+        'BOX64_DYNAREC_STRONGMEM'
+    )
+    if ($key -notmatch '^(WINEDEBUG|DXVK_|VN_|VKR_|WINEHUA_DXVK_|WINEHUA_VKR_)[A-Za-z0-9_]*$' -and
+        $allowedBox64Keys -notcontains $key) {
         throw "Unsupported D3D environment key: $key"
     }
     if ($value.Length -gt 1024) {

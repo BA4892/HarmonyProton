@@ -73,7 +73,16 @@ export default class EntryAbility extends UIAbility {
     const d3dEnvKeys: string[] = [];
     const d3dEnvValues: string[] = [];
     const appendD3dEnvironment = (key: string, envValue: string): void => {
-      if (!/^(WINEDEBUG|DXVK_|VN_|VKR_|WINEHUA_DXVK_)[A-Za-z0-9_]*$/.test(key) ||
+      const allowedBox64Keys = [
+        'BOX64_DYNAREC_SAFEFLAGS',
+        'BOX64_DYNAREC_BIGBLOCK',
+        'BOX64_DYNAREC_CALLRET',
+        'BOX64_DYNAREC_FORWARD',
+        'BOX64_DYNAREC_STRONGMEM'
+      ];
+      const allowedKey = /^(WINEDEBUG|DXVK_|VN_|VKR_|WINEHUA_DXVK_|WINEHUA_VKR_)[A-Za-z0-9_]*$/.test(key) ||
+        allowedBox64Keys.indexOf(key) >= 0;
+      if (!allowedKey ||
         envValue.length > 1024 || d3dEnvKeys.length >= 32) {
         hilog.warn(DOMAIN, 'GameTest',
           'ignoring invalid D3D environment key=%{public}s', key);
