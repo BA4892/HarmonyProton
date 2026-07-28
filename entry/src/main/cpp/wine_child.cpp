@@ -352,6 +352,7 @@ static void log_d3d_environment_summary()
     const char* vnPerfLog = getenv("VN_WINEHUA_PERF_LOG");
     const char* mesaLogLevel = getenv("MESA_LOG_LEVEL");
     const char* batchMappedFlush = getenv("DXVK_WINEHUA_BATCH_MAPPED_FLUSH");
+    const char* rgba8SnormRt = getenv("DXVK_WINEHUA_EMULATE_RGBA8_SNORM_RT");
 
     std::string root = dxvkRoot && dxvkRoot[0] ? dxvkRoot : "";
     const std::string x64D3d11 = root + "/x64/d3d11.dll";
@@ -369,7 +370,7 @@ static void log_d3d_environment_summary()
                 "logPath=%{public}s dumpPath=%{public}s "
                 "traceSampled=%{public}s traceFlow=%{public}s "
                 "vnPerfSummary=%{public}s vnPerfLog=%{public}s mesaLogLevel=%{public}s "
-                "batchMappedFlush=%{public}s",
+                "batchMappedFlush=%{public}s rgba8SnormRt=%{public}s",
                 backend ? backend : "", dxvkVersion ? dxvkVersion : "",
                 dllOverrides ? dllOverrides : "", dllPath ? dllPath : "",
                 dxvkRoot ? dxvkRoot : "", present(x64D3d11), present(x64Dxgi),
@@ -380,7 +381,8 @@ static void log_d3d_environment_summary()
                 vnPerfSummary ? vnPerfSummary : "",
                 vnPerfLog ? vnPerfLog : "",
                 mesaLogLevel ? mesaLogLevel : "",
-                batchMappedFlush ? batchMappedFlush : "");
+                batchMappedFlush ? batchMappedFlush : "",
+                rgba8SnormRt ? rgba8SnormRt : "");
 }
 
 static void prepare_host_elf_environment(const char *homeDir)

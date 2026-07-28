@@ -555,6 +555,19 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
         OH_LOG_INFO(LOG_APP, "[Launch-Async] explorer desktop pid=%{public}d ret=%{public}d",
                     exPid, (int)exRet);
         ws->PromotePendingDesktopRoot();
+        /* StartNativeChildProcess returning only means that appspawn accepted
+         * the Explorer request. On a warm prefix the child can still need
+         * several seconds to connect to wineserver and commit its desktop
+         * surface. Do not publish wine-ready until that stable launch boundary
+         * exists, otherwise an automatic game can race Wine's own bootstrap
+         * and die before DXGI initialization. */
+        if (exRet == NCP_NO_ERROR &&
+            !WaitFor("explorer desktop root", [ws]() {
+                return ws->GetDesktopRootToplevelId() != 0;
+            }, 15000, 100)) {
+            OH_LOG_WARN(LOG_APP, "[Launch-Async] explorer desktop root not ready; "
+                        "continuing after bounded readiness wait");
+        }
     }
     else
     {

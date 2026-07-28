@@ -118,7 +118,8 @@ foreach ($pair in $environmentPairs) {
         'BOX64_DYNAREC_BIGBLOCK',
         'BOX64_DYNAREC_CALLRET',
         'BOX64_DYNAREC_FORWARD',
-        'BOX64_DYNAREC_STRONGMEM'
+        'BOX64_DYNAREC_STRONGMEM',
+        'BOX64_AVX'
     )
     if ($key -notmatch '^(WINEDEBUG|DXVK_|VN_|VKR_|WINEHUA_DXVK_|WINEHUA_VKR_)[A-Za-z0-9_]*$' -and
         $allowedBox64Keys -notcontains $key) {

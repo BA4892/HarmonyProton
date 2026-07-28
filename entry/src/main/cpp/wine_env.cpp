@@ -169,6 +169,11 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
         "WINEDLLOVERRIDES=d3d11=n;dxgi=n",
         "DXVK_WINEHUA_COMMAND_QUERY_RESET=1",
         "DXVK_WINEHUA_FLUSH_DYNAMIC_MAPPED=1",
+        /* Prefer the native RGBA8 SNORM render-target path. On devices such
+         * as Maleoon where sampling is supported but color attachment usage
+         * is not, DXVK may substitute its qualified RGBA16F backing image.
+         * Per-process diagnostics can still override this with 0. */
+        "DXVK_WINEHUA_EMULATE_RGBA8_SNORM_RT=auto",
         /* This path is qualified by the command-list ownership and continuous
          * Heaven gates. Keep per-range statistics opt-in so production avoids
          * diagnostic bookkeeping and log I/O. */
