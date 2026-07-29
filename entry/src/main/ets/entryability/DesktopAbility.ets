@@ -16,6 +16,7 @@ export default class DesktopAbility extends UIAbility {
       const params = want.parameters ?? {};
       this.toplevelId = Number(params.toplevelId) || 0;
       hilog.info(DOMAIN, TAG, '[DWA]  onCreate: tl=%{public}d', this.toplevelId);
+      WineWindowManager.getInstance().registerDesktopAbility(this.context);
     } catch (e) {
       hilog.error(DOMAIN, TAG, '[DWA] ERR onCreate: %{public}s', JSON.stringify(e));
     }
@@ -68,7 +69,7 @@ export default class DesktopAbility extends UIAbility {
     hilog.info(DOMAIN, TAG, '[DWA] onDestroy tl=%{public}d', this.toplevelId);
     try {
       testNapi.destroyToplevel(this.toplevelId);
-      WineWindowManager.getInstance().unregisterAbility(this.toplevelId);
+      WineWindowManager.getInstance().unregisterDesktopAbility();
     } catch (e) {
       hilog.error(DOMAIN, TAG, '[DWA] ERR onDestroy: %{public}s', JSON.stringify(e));
     }
