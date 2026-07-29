@@ -411,8 +411,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
     // -- wineserver via NCP --
     // wineserver 走 WineserverMain 入口, 不解析 __env__, 不需要环境变量
     {
-        std::string wsEntryParams = p->homeDir + "|" + p->winehuaBin +
-            "|wineserver|-f|-p|--no-auto-close|__env=WINEPREFIX=" + p->prefixDir;
+        std::string wsEntryParams = p->homeDir + "|" + p->winehuaBin + "|wineserver|-f|-p";
         OH_LOG_INFO(LOG_APP, "[Launch-Async] wineserver args=%{public}s", wsEntryParams.c_str());
         NativeChildProcess_Args wsArgs = {};
         wsArgs.entryParams = const_cast<char*>(wsEntryParams.c_str());
@@ -543,7 +542,10 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
         OH_LOG_INFO(LOG_APP, "[Launch-Async] explorer desktop size: outputW=%{public}d outputH=%{public}d → %{public}dx%{public}d",
                     ws->outputW_, ws->outputH_, dw, dh);
         char desktopArg[128];
-        snprintf(desktopArg, sizeof(desktopArg), "/desktop=shell,%dx%d", dw, dh);
+        /* 附带 winehua_keep.exe: 加入 shell desktop 并持久运行,
+         * 避免最后一个用户应用退出后 wineserver 自动关闭桌面.
+         * 仅 Pad 桌面模式需要, Phone 模式走单窗口, 无需此逻辑. */
+        snprintf(desktopArg, sizeof(desktopArg), "/desktop=shell,%dx%d|winehua_keep.exe", dw, dh);
 #ifdef __aarch64__
         std::string exEntry = p->homeDir + "|" + p->winehuaBin + serializedEnv + "|__winehua_desktop__|explorer|" + desktopArg;
 #else

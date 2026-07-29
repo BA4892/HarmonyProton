@@ -49,6 +49,7 @@ export class WineWindowManager {
   private automationMode: boolean = false;
   private desktopRootId: number = 0;
   private desktopAbilityRunning: boolean = false;
+  private desktopAbilityCtx: common.UIAbilityContext | null = null;
   // 主窗口 windowStage (ARGB 异型子窗口/popup 回退宿主)
   private mainWindowStage: window.WindowStage | null = null;
 
@@ -636,10 +637,17 @@ export class WineWindowManager {
     hilog.info(DOMAIN, TAG, '[MW] onToplevelDestroyed #%{public}d', id);
     this.destroyed.add(id);
 
-    // Desktop 模式: root 销毁 → 等新 root 出现 (不销毁渲染器, 不关 Ability)
+    // Desktop 模式: root 销毁 → 关闭 DesktopAbility, 回到主页面
     if (this.isDesktopMode && id === this.desktopRootId) {
-      hilog.info(DOMAIN, TAG, '[MW] desktop root #%{public}d destroyed, keep old ID for input', id);
-      // 保留旧 rootId 用于输入, 不调 destroyToplevel, 等 C++ 侧自动切换
+      hilog.info(DOMAIN, TAG, '[MW] desktop root #%{public}d destroyed, closing DesktopAbility', id);
+      this.desktopRootId = 0;
+      if (this.desktopAbilityCtx) {
+        this.desktopAbilityCtx.terminateSelf().catch((err: Error) => {
+          hilog.warn(DOMAIN, TAG, '[MW] ERR terminateSelf DesktopAbility: %{public}s', JSON.stringify(err));
+        });
+        this.desktopAbilityCtx = null;
+      }
+      this.desktopAbilityRunning = false;
       return;
     }
     // Desktop 模式: 非 root toplevel 销毁, C++ 自动停止合成
@@ -700,4 +708,16 @@ export class WineWindowManager {
   }
 
   getDesktopRootId(): number { return this.desktopRootId; }
+
+  // DesktopAbility 注册/注销其 UIAbilityContext, 用于 root 销毁时 terminateSelf
+  registerDesktopAbility(ctx: common.UIAbilityContext): void {
+    hilog.info(DOMAIN, TAG, '[MW] registerDesktopAbility');
+    this.desktopAbilityCtx = ctx;
+  }
+
+  unregisterDesktopAbility(): void {
+    hilog.info(DOMAIN, TAG, '[MW] unregisterDesktopAbility');
+    this.desktopAbilityCtx = null;
+    this.desktopAbilityRunning = false;
+  }
 }
