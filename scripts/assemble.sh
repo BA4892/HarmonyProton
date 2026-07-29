@@ -246,6 +246,13 @@ assemble_pad() {
     i686-w64-mingw32-gcc -O2 -s -mwindows -o \
         "$smoke_dir/x86/winehua_d3d_switch_cube.exe" "$cube_source" \
         -ld3d9 -ld3d11 -ldxgi -ld3dcompiler -luuid -lshell32 -luser32 -lgdi32 -lm
+    local d3d8_source="$WINEHUA/smoke/winehua_d3d8_smoke.c"
+    x86_64-w64-mingw32-gcc -O2 -s -mwindows -o \
+        "$smoke_dir/x64/winehua_d3d8_smoke.exe" "$d3d8_source" \
+        -luser32 -lgdi32
+    i686-w64-mingw32-gcc -O2 -s -mwindows -o \
+        "$smoke_dir/x86/winehua_d3d8_smoke.exe" "$d3d8_source" \
+        -luser32 -lgdi32
     local win32_driver_source="$WINEHUA/smoke/winehua_win32_driver.c"
     x86_64-w64-mingw32-gcc -O2 -s -municode -mwindows -o \
         "$smoke_dir/x64/winehua_win32_driver.exe" "$win32_driver_source" \
@@ -286,19 +293,21 @@ assemble_pad() {
         cp "$smoke64" "$smoke_dir/x64/$smoke_program.exe"
         cp "$smoke32" "$smoke_dir/x86/$smoke_program.exe"
     done
-    local audio64_sha graphics64_sha vulkan64_sha d3d1164_sha cube64_sha driver64_sha
-    local audio32_sha graphics32_sha vulkan32_sha d3d1132_sha cube32_sha driver32_sha
+    local audio64_sha graphics64_sha vulkan64_sha d3d1164_sha d3d864_sha cube64_sha driver64_sha
+    local audio32_sha graphics32_sha vulkan32_sha d3d1132_sha d3d832_sha cube32_sha driver32_sha
     local storage_write_sha storage_read_sha image_fetch_sha combined_sample_sha separated_sample_sha
     audio64_sha="$(sha256sum "$smoke_dir/x64/winehua_audio_smoke.exe" | awk '{print $1}')"
     graphics64_sha="$(sha256sum "$smoke_dir/x64/winehua_graphics_smoke.exe" | awk '{print $1}')"
     vulkan64_sha="$(sha256sum "$smoke_dir/x64/winehua_vulkan_smoke.exe" | awk '{print $1}')"
     d3d1164_sha="$(sha256sum "$smoke_dir/x64/winehua_d3d11_smoke.exe" | awk '{print $1}')"
+    d3d864_sha="$(sha256sum "$smoke_dir/x64/winehua_d3d8_smoke.exe" | awk '{print $1}')"
     cube64_sha="$(sha256sum "$smoke_dir/x64/winehua_d3d_switch_cube.exe" | awk '{print $1}')"
     driver64_sha="$(sha256sum "$smoke_dir/x64/winehua_win32_driver.exe" | awk '{print $1}')"
     audio32_sha="$(sha256sum "$smoke_dir/x86/winehua_audio_smoke.exe" | awk '{print $1}')"
     graphics32_sha="$(sha256sum "$smoke_dir/x86/winehua_graphics_smoke.exe" | awk '{print $1}')"
     vulkan32_sha="$(sha256sum "$smoke_dir/x86/winehua_vulkan_smoke.exe" | awk '{print $1}')"
     d3d1132_sha="$(sha256sum "$smoke_dir/x86/winehua_d3d11_smoke.exe" | awk '{print $1}')"
+    d3d832_sha="$(sha256sum "$smoke_dir/x86/winehua_d3d8_smoke.exe" | awk '{print $1}')"
     cube32_sha="$(sha256sum "$smoke_dir/x86/winehua_d3d_switch_cube.exe" | awk '{print $1}')"
     driver32_sha="$(sha256sum "$smoke_dir/x86/winehua_win32_driver.exe" | awk '{print $1}')"
     storage_write_sha="$(sha256sum "$smoke_dir/assets/venus_storage_write.spv" | awk '{print $1}')"
@@ -335,20 +344,22 @@ EOF
     cat > "$smoke_dir/manifest.json" <<EOF
 {
   "schemaVersion": 1,
-  "suiteVersion": "phase2-vulkan-dxvk-legacy-v4-runtime",
-  "enabledSuites": ["core", "audio", "opengl", "wine-vulkan", "dxvk"],
+  "suiteVersion": "phase2-vulkan-dxvk-legacy-v6-d3d8-d3d9",
+  "enabledSuites": ["core", "audio", "opengl", "wine-vulkan", "d3d8", "d3d9", "dxvk"],
   "managedRoot": "C:\\\\smoke",
   "files": {
     "x64/winehua_audio_smoke.exe": "$audio64_sha",
     "x64/winehua_graphics_smoke.exe": "$graphics64_sha",
     "x64/winehua_vulkan_smoke.exe": "$vulkan64_sha",
     "x64/winehua_d3d11_smoke.exe": "$d3d1164_sha",
+    "x64/winehua_d3d8_smoke.exe": "$d3d864_sha",
     "x64/winehua_d3d_switch_cube.exe": "$cube64_sha",
     "x64/winehua_win32_driver.exe": "$driver64_sha",
     "x86/winehua_audio_smoke.exe": "$audio32_sha",
     "x86/winehua_graphics_smoke.exe": "$graphics32_sha",
     "x86/winehua_vulkan_smoke.exe": "$vulkan32_sha",
     "x86/winehua_d3d11_smoke.exe": "$d3d1132_sha",
+    "x86/winehua_d3d8_smoke.exe": "$d3d832_sha",
     "x86/winehua_d3d_switch_cube.exe": "$cube32_sha",
     "x86/winehua_win32_driver.exe": "$driver32_sha",
     "assets/venus_storage_write.spv": "$storage_write_sha",

@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('core', 'audio', 'opengl', 'host-vulkan', 'host-heaven', 'host-heaven-material-depth', 'host-heaven-inputs', 'venus', 'venus-sampled', 'venus-sampled-idle', 'venus-depth-cube', 'venus-depth-cube-array-2d-golden', 'venus-depth-cube-graphics', 'venus-heaven-material', 'venus-heaven-material-depth', 'venus-heaven-captured', 'venus-heaven-inputs', 'venus-heaven-captured-ab', 'venus-heaven-discard-ab', 'venus-heaven-material-layout', 'venus-heaven-draw0', 'venus-heaven-draw170', 'venus-heaven-f647', 'capabilities', 'wine-vulkan', 'wine-vulkan-present', 'dxvk', 'dxvk-long', 'dxvk-replay', 'dxvk-layout-general', 'dxvk-combined', 'dxvk-dynamic', 'all', 'long')]
+    [ValidateSet('core', 'audio', 'opengl', 'd3d8', 'd3d9', 'host-vulkan', 'host-heaven', 'host-heaven-material-depth', 'host-heaven-inputs', 'venus', 'venus-sampled', 'venus-sampled-idle', 'venus-depth-cube', 'venus-depth-cube-array-2d-golden', 'venus-depth-cube-graphics', 'venus-heaven-material', 'venus-heaven-material-depth', 'venus-heaven-captured', 'venus-heaven-inputs', 'venus-heaven-captured-ab', 'venus-heaven-discard-ab', 'venus-heaven-material-layout', 'venus-heaven-draw0', 'venus-heaven-draw170', 'venus-heaven-f647', 'capabilities', 'wine-vulkan', 'wine-vulkan-present', 'dxvk', 'dxvk-long', 'dxvk-replay', 'dxvk-layout-general', 'dxvk-combined', 'dxvk-dynamic', 'all', 'long')]
     [string]$Suite = 'core',
     [ValidateSet('reuse', 'clean')]
     [string]$Prefix = 'reuse',
@@ -382,6 +382,8 @@ function Get-ArtifactMetadata {
         'smoke/x86/winehua_audio_smoke.exe', 'smoke/x64/winehua_graphics_smoke.exe',
         'smoke/x86/winehua_graphics_smoke.exe', 'smoke/x64/winehua_vulkan_smoke.exe',
         'smoke/x86/winehua_vulkan_smoke.exe',
+        'smoke/x64/winehua_d3d8_smoke.exe', 'smoke/x86/winehua_d3d8_smoke.exe',
+        'smoke/x64/winehua_d3d_switch_cube.exe', 'smoke/x86/winehua_d3d_switch_cube.exe',
         'smoke/x64/winehua_d3d11_smoke.exe', 'smoke/x86/winehua_d3d11_smoke.exe',
         'dxvk/manifest.json',
         'dxvk/legacy/x64/d3d11.dll', 'dxvk/legacy/x64/dxgi.dll',
@@ -571,11 +573,15 @@ function Invoke-OneRun {
                 }
             }
         }
-        if ($RunSuite -in @('dxvk', 'dxvk-long', 'dxvk-dynamic', 'all')) {
-            $dxvkTests = if ($RunSuite -eq 'dxvk-dynamic') {
+        if ($RunSuite -in @('d3d9', 'dxvk', 'dxvk-long', 'dxvk-dynamic', 'all')) {
+            $dxvkTests = if ($RunSuite -eq 'd3d9') {
+                @('d3d9-cube-x86', 'd3d9-cube-x64')
+            } elseif ($RunSuite -eq 'dxvk-dynamic') {
                 @('dxvk-dynamic-cb-x86', 'dxvk-dynamic-cb-x64')
             } elseif ($RunSuite -eq 'dxvk-long') {
                 @('dxvk-long-x64')
+            } elseif ($RunSuite -eq 'all') {
+                @('d3d9-cube-x86', 'd3d9-cube-x64', 'dxvk-legacy-x64', 'dxvk-legacy-x86')
             } else {
                 @('dxvk-legacy-x64', 'dxvk-legacy-x86')
             }
@@ -621,11 +627,15 @@ function Invoke-OneRun {
             if (-not $captured.ContainsKey($testId)) { $captured[$testId] = $false }
         }
     }
-    if ($RunSuite -in @('dxvk', 'dxvk-long', 'dxvk-dynamic', 'all')) {
-        $dxvkTests = if ($RunSuite -eq 'dxvk-dynamic') {
+    if ($RunSuite -in @('d3d9', 'dxvk', 'dxvk-long', 'dxvk-dynamic', 'all')) {
+        $dxvkTests = if ($RunSuite -eq 'd3d9') {
+            @('d3d9-cube-x86', 'd3d9-cube-x64')
+        } elseif ($RunSuite -eq 'dxvk-dynamic') {
             @('dxvk-dynamic-cb-x86', 'dxvk-dynamic-cb-x64')
         } elseif ($RunSuite -eq 'dxvk-long') {
             @('dxvk-long-x64')
+        } elseif ($RunSuite -eq 'all') {
+            @('d3d9-cube-x86', 'd3d9-cube-x64', 'dxvk-legacy-x64', 'dxvk-legacy-x86')
         } else {
             @('dxvk-legacy-x64', 'dxvk-legacy-x86')
         }

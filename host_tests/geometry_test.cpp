@@ -124,6 +124,20 @@ int main()
         CHECK(w == 1400 && h == 920, "half-valid preFs uses buffer");
     }
 
+    // 10. A 1280x800 virtual frame fits a 1280x720 panel without distortion.
+    {
+        FitRect t;
+        CHECK(ComputeFitRect(1280, 720, 1280, 800, t), "1280x800 virtual mode fits 720p");
+        CHECK(near(t.scale, 0.9, 1e-12), "1280x800 to 720p scale=0.9");
+        CHECK(t.dstW == 1152 && t.dstH == 720, "1280x800 keeps 16:10 aspect");
+        CHECK(t.offX == 64 && t.offY == 0, "1280x800 is centered with side bars");
+        CHECK(FitMapDisplayX(t, 640) == 640 && FitMapDisplayY(t, 400) == 360,
+              "1280x800 center maps to panel center");
+        CHECK(near(FitUnmapDisplayX(t, 640), 640.0, 1e-12) &&
+              near(FitUnmapDisplayY(t, 360), 400.0, 1e-12),
+              "720p input maps back to virtual coordinates");
+    }
+
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

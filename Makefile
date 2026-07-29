@@ -312,6 +312,7 @@ define assemble_rule
 assemble-$(1): $$(STAMPS)/$(1)/assemble
 
 $$(STAMPS)/$(1)/assemble: $(SCRIPTS)/assemble.sh $(SCRIPTS)/env.sh $(DXVK_ARTIFACTS) \
+	$(ROOT)/smoke/winehua_d3d8_smoke.c \
 	$(ROOT)/smoke/winehua_d3d_switch_cube.c \
 	$(ROOT)/smoke/winehua_win32_driver.c \
 	$$(STAMPS)/deps $$(STAMPS)/wine-$(1) $$(STAMPS)/$(1)/native \

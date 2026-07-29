@@ -220,10 +220,12 @@ export function syncManagedSmoke(prefixMode: string): boolean {
   const required = [
     'x64/winehua_audio_smoke.exe', 'x64/winehua_graphics_smoke.exe',
     'x64/winehua_vulkan_smoke.exe', 'x64/winehua_d3d11_smoke.exe',
-    'x64/winehua_d3d_switch_cube.exe', 'x64/winehua_win32_driver.exe',
+    'x64/winehua_d3d8_smoke.exe', 'x64/winehua_d3d_switch_cube.exe',
+    'x64/winehua_win32_driver.exe',
     'x86/winehua_audio_smoke.exe', 'x86/winehua_graphics_smoke.exe',
     'x86/winehua_vulkan_smoke.exe', 'x86/winehua_d3d11_smoke.exe',
-    'x86/winehua_d3d_switch_cube.exe', 'x86/winehua_win32_driver.exe',
+    'x86/winehua_d3d8_smoke.exe', 'x86/winehua_d3d_switch_cube.exe',
+    'x86/winehua_win32_driver.exe',
     'assets/venus_storage_write.spv', 'assets/venus_storage_read.spv',
     'assets/venus_image_fetch.spv', 'assets/venus_combined_sample.spv',
     'assets/venus_separated_sample.spv',
@@ -315,6 +317,8 @@ export class SmokeRunner {
       this.request.suite === 'all' || this.request.suite === 'long';
     const includeOpenGl = this.request.suite === 'core' || this.request.suite === 'opengl' ||
       this.request.suite === 'all' || this.request.suite === 'long';
+    const includeD3d8 = this.request.suite === 'd3d8' || this.request.suite === 'all';
+    const includeD3d9 = this.request.suite === 'd3d9' || this.request.suite === 'all';
     const includeVenus = this.request.suite === 'venus' || this.request.suite === 'all';
     const includeVenusSampled = this.request.suite === 'venus-sampled' || this.request.suite === 'all';
     /* queue-idle is a separate diagnostic.  Current Venus/vtest builds can
@@ -364,6 +368,20 @@ export class SmokeRunner {
         seconds: seconds, timeoutMs: timeout });
       tests.push({ id: 'opengl-x86', architecture: 'x86', executable: 'winehua_graphics_smoke.exe',
         seconds: seconds, timeoutMs: timeout });
+    }
+    if (includeD3d8) {
+      /* Most D3D8 titles are 32-bit. Run WoW64 first, then verify the native
+       * x64 frontend uses the same virtual mode and WineD3D contracts. */
+      tests.push({ id: 'd3d8-capability-x86', architecture: 'x86',
+        executable: 'winehua_d3d8_smoke.exe', seconds: 5, timeoutMs: 180000 });
+      tests.push({ id: 'd3d8-capability-x64', architecture: 'x64',
+        executable: 'winehua_d3d8_smoke.exe', seconds: 5, timeoutMs: 180000 });
+    }
+    if (includeD3d9) {
+      tests.push({ id: 'd3d9-cube-x86', architecture: 'x86',
+        executable: 'winehua_d3d_switch_cube.exe', seconds: 8, timeoutMs: 180000 });
+      tests.push({ id: 'd3d9-cube-x64', architecture: 'x64',
+        executable: 'winehua_d3d_switch_cube.exe', seconds: 8, timeoutMs: 180000 });
     }
     if (includeVenus) {
       tests.push({ id: 'venus-offscreen-x64', architecture: 'guest-x64',
@@ -1167,8 +1185,11 @@ export class SmokeRunner {
     const windowsResult = `C:\\smoke\\results\\${this.request.runId}\\${spec.id}.json`;
     const isWineVulkan = spec.executable === 'winehua_vulkan_smoke.exe';
     const isWineVulkanPresent = isWineVulkan && spec.id.indexOf('present') >= 0;
-    const isDxvk = spec.executable === 'winehua_d3d11_smoke.exe' ||
-      spec.executable === 'winehua_d3d_switch_cube.exe';
+    const isD3d8 = spec.executable === 'winehua_d3d8_smoke.exe';
+    const isD3d9 = spec.executable === 'winehua_d3d_switch_cube.exe' &&
+      spec.id.indexOf('d3d9-') === 0;
+    const isDxvk = !isD3d9 && (spec.executable === 'winehua_d3d11_smoke.exe' ||
+      spec.executable === 'winehua_d3d_switch_cube.exe');
     let process: ProcessInfo;
     if (isWineVulkan || isDxvk) {
       const guestVulkanLibrary = `${GUEST_VULKAN_ROOT}/lib`;
@@ -1325,10 +1346,12 @@ export class SmokeRunner {
       process = testNapi.runWineProgram({
         windowsExePath: `C:\\smoke\\${spec.architecture}\\${spec.executable}`,
         argv: ['--automation', '--run-id', this.request.runId, '--test-id', spec.id,
-          '--result', windowsResult, '--seconds', `${spec.seconds}`, '--present'],
+          '--result', windowsResult, '--seconds', `${spec.seconds}`, '--present',
+          ...(isD3d9 ? ['--d3d9'] : [])],
         environment: {
           'WINEHUA_SMOKE_RUN_ID': this.request.runId,
           'WINEHUA_SMOKE_TEST_ID': spec.id,
+          'WINEDEBUG': isD3d8 ? '+loaddll,+d3d8' : (isD3d9 ? '+loaddll,+d3d9' : '-all'),
           /* Guest and Host map different shadow files. Functional probes use
            * explicit flush/invalidate for their tiny readback allocations. */
           'VN_WINEHUA_REMOTE_MEMORY_SYNC': '1'

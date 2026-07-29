@@ -321,14 +321,17 @@ static void loaded_module_path(const char *module_name, char *path, size_t path_
     }
 }
 
-static void write_automation_result(void)
+static void write_automation_result(const char *status_override, const char *message_override)
 {
     char temporary[MAX_PATH + 8];
     char d3d11_path[MAX_PATH];
     char dxgi_path[MAX_PATH];
     FILE *fp;
-    const char *status = g_app.renderer_ready && SUCCEEDED(g_app.present_result) &&
-        g_app.total_frame_count > 0 ? "PASS" : "FAIL";
+    const char *status = status_override ? status_override :
+        (g_app.renderer_ready && SUCCEEDED(g_app.present_result) &&
+        g_app.total_frame_count > 0 ? "PASS" : "FAIL");
+    const char *message = message_override ? message_override :
+        (g_app.renderer_ready ? "cube rendered and presented" : g_app.status);
 
     if (!g_app.result_path[0]) return;
     snprintf(temporary, sizeof(temporary), "%s.tmp", g_app.result_path);
@@ -358,8 +361,8 @@ static void write_automation_result(void)
             "  \"dxgiDll\": \"%s\"\n"
             "}\n",
             g_app.run_id, g_app.test_id, status,
-            g_app.renderer_ready ? "present" : "dxvk",
-            g_app.renderer_ready ? "cube rendered and presented" : g_app.status,
+            g_app.renderer_ready ? "present" : "initialization",
+            message,
             renderer_name(g_app.renderer), active_d3d_backend(),
 #ifdef _WIN64
             "x64",
@@ -958,6 +961,8 @@ static void render_frame(void)
     }
     ++g_app.frame_count;
     if (g_app.renderer_ready) ++g_app.total_frame_count;
+    if (g_app.automation && g_app.total_frame_count == 60)
+        write_automation_result("started", "fixed-frame");
     update_title(now, 0);
 }
 
@@ -988,6 +993,14 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
             update_title(app_time_seconds(), 1);
         }
         return 0;
+    case WM_CLOSE:
+        /* The Harmony automation surface can send a close while the window is
+         * still being configured. Keep the bounded smoke alive long enough
+         * to publish and capture its fixed frame. */
+        if (g_app.automation && (!g_app.duration_ms ||
+            GetTickCount64() - g_app.run_start_ms < g_app.duration_ms))
+            return 0;
+        break;
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
@@ -1070,7 +1083,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE prev_instance, LPSTR cmd_line, 
         Sleep(1);
     }
 
-    write_automation_result();
+    write_automation_result(NULL, NULL);
     release_renderer();
     return g_app.renderer_ready && SUCCEEDED(g_app.present_result) &&
         g_app.total_frame_count > 0 ? 0 : 1;
