@@ -1264,6 +1264,9 @@ export class SmokeRunner {
           this.perfProfile === 'shadow-precise-dirty-ring-no-upload-fast' ||
           this.perfProfile === 'shadow-precise-dirty-ring-inline-upload' ||
           this.perfProfile === 'shadow-precise-dirty-ring-inline-upload-coverage-sort' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-coverage-sort-sampled' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-coverage-poll' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-inline-upload-alias-cover' ||
           this.perfProfile === 'shadow-precise-dirty-ring-inline-upload-serialized' ||
           this.perfProfile === 'shadow-precise-dirty-ring-inline-upload-descriptor-serialized' ||
           this.perfProfile === 'shadow-precise-dirty-ring-frame-assoc-trace' ||
@@ -1293,6 +1296,9 @@ export class SmokeRunner {
           this.perfProfile === 'shadow-precise-dirty-ring-no-upload-fast' ||
           this.perfProfile === 'shadow-precise-dirty-ring-inline-upload' ||
           this.perfProfile === 'shadow-precise-dirty-ring-inline-upload-coverage-sort' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-coverage-sort-sampled' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-coverage-poll' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-inline-upload-alias-cover' ||
           this.perfProfile === 'shadow-precise-dirty-ring-inline-upload-serialized' ||
           this.perfProfile === 'shadow-precise-dirty-ring-inline-upload-descriptor-serialized' ||
           this.perfProfile === 'shadow-precise-dirty-ring-frame-assoc-trace' ||

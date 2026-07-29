@@ -83,6 +83,23 @@ bool TracePresentStages()
     return trace && trace[0] == '1' && !trace[1];
 }
 
+/* This switch is deliberately diagnostic-only.  It adds two timestamp
+ * queries to the existing presenter command buffer, but leaves the command
+ * ordering, fences, image ownership and present mode unchanged. */
+bool GpuFrameProfileEnabled()
+{
+    const char* profile = std::getenv("WINEHUA_VENUS_GPU_FRAME_PROFILE");
+    return profile && profile[0] == '1' && !profile[1];
+}
+
+/* This is deliberately a presenter-only timestamp, not a scene GPU timer.
+ * Sample it sparsely so the timeline profile retains the production path on
+ * all ordinary frames. */
+bool GpuFrameProfileSample(uint32_t serial)
+{
+    return GpuFrameProfileEnabled() && serial && !(serial % 120);
+}
+
 bool TraceFrameOrder()
 {
     if (TracePresentStages()) return true;
@@ -147,6 +164,7 @@ struct VenusSurfaceQueueTarget::Impl {
         VkCommandBuffer command = VK_NULL_HANDLE;
         VkSemaphore acquired = VK_NULL_HANDLE;
         VkFence complete = VK_NULL_HANDLE;
+        VkQueryPool gpuTiming = VK_NULL_HANDLE;
     };
 
     int Attach(uint64_t surfaceKey, uint64_t framePeriodNs, OHNativeWindow* window)
@@ -174,6 +192,10 @@ struct VenusSurfaceQueueTarget::Impl {
         totalQueuePresentUs_ = 0;
         totalReleaseWaitUs_ = 0;
         totalReleasePolls_ = 0;
+        totalGpuPresentWorkUs_ = 0;
+        maxGpuPresentWorkUs_ = 0;
+        gpuTimingSamples_ = 0;
+        gpuTimingFailures_ = 0;
         OH_LOG_INFO(LOG_APP,
                     "[VENUS-PRESENT][NCP] target attached key=%{public}llu "
                     "window=%{public}p display_period_us=%{public}llu",
@@ -251,6 +273,8 @@ struct VenusSurfaceQueueTarget::Impl {
             return initError ? initError : -EIO;
         }
         Frame& frame = frames_[frameIndex_++ % frames_.size()];
+        const bool gpuTiming = gpuTimingEnabled_ && frame.gpuTiming &&
+            GpuFrameProfileSample(serial);
         uint64_t stageStartNs = NowNs();
         const bool asyncRelease = AsyncReleaseEnabled();
         VkResult result = vkWaitForFences(
@@ -295,6 +319,14 @@ struct VenusSurfaceQueueTarget::Impl {
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         result = vkBeginCommandBuffer(frame.command, &begin);
         if (result != VK_SUCCESS) return FailLocked("begin command", result, serial);
+
+        if (gpuTiming) {
+            /* The query pool belongs to this completed frame slot.  It was
+             * waited above, so resetting it cannot race GPU execution. */
+            vkCmdResetQueryPool(frame.command, frame.gpuTiming, 0, 2);
+            vkCmdWriteTimestamp(frame.command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                frame.gpuTiming, 0);
+        }
 
         VkImageMemoryBarrier sourceToTransfer{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
         sourceToTransfer.srcAccessMask = SourceAccess(sourceLayout);
@@ -389,6 +421,13 @@ struct VenusSurfaceQueueTarget::Impl {
                              0, nullptr, 0, nullptr,
                              static_cast<uint32_t>(after.size()), after.data());
 
+        if (gpuTiming) {
+            /* Includes presenter barriers plus the final blit/copy.  It does
+             * not include the DXVK draw work submitted before this command. */
+            vkCmdWriteTimestamp(frame.command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                frame.gpuTiming, 1);
+        }
+
         result = vkEndCommandBuffer(frame.command);
         if (result != VK_SUCCESS) return FailLocked("end command", result, serial);
 
@@ -473,6 +512,31 @@ struct VenusSurfaceQueueTarget::Impl {
         targetInitialized_[imageIndex] = true;
         TracePresentStage("source-release-ready", serial, image);
 
+        uint64_t gpuPresentCopyUs = 0;
+        if (gpuTiming) {
+            uint64_t ticks[2] = {};
+            const VkResult timingResult = vkGetQueryPoolResults(
+                device_, frame.gpuTiming, 0, 2, sizeof(ticks), ticks,
+                sizeof(ticks[0]), VK_QUERY_RESULT_64_BIT);
+            if (timingResult == VK_SUCCESS && ticks[1] >= ticks[0]) {
+                gpuPresentCopyUs = static_cast<uint64_t>(
+                    (static_cast<double>(ticks[1] - ticks[0]) * timestampPeriodNs_) /
+                    1000.0);
+                totalGpuPresentWorkUs_ += gpuPresentCopyUs;
+                maxGpuPresentWorkUs_ = std::max(maxGpuPresentWorkUs_, gpuPresentCopyUs);
+                ++gpuTimingSamples_;
+            } else {
+                ++gpuTimingFailures_;
+                if (gpuTimingFailures_ == 1 || !(gpuTimingFailures_ % 120)) {
+                    OH_LOG_WARN(LOG_APP,
+                                "[VENUS-GPU-TIME][NCP] query failed result=%{public}d "
+                                "serial=%{public}u failures=%{public}llu",
+                                static_cast<int32_t>(timingResult), serial,
+                                static_cast<unsigned long long>(gpuTimingFailures_));
+                }
+            }
+        }
+
         if (result == VK_ERROR_OUT_OF_DATE_KHR) {
             swapchainDirty_ = true;
             return -EAGAIN;
@@ -495,6 +559,22 @@ struct VenusSurfaceQueueTarget::Impl {
         totalQueuePresentUs_ += queuePresentUs;
         totalReleaseWaitUs_ += releaseWaitUs;
         totalReleasePolls_ += releasePolls;
+        if (GpuFrameProfileSample(serial)) {
+            OH_LOG_INFO(LOG_APP,
+                        "[VENUS-FRAME-TIMELINE][NCP] serial=%{public}u "
+                        "release_wait_us=%{public}llu present_cpu_us=%{public}llu "
+                        "wait_fence_us=%{public}llu acquire_us=%{public}llu "
+                        "submit_us=%{public}llu queue_present_us=%{public}llu "
+                        "gpu_present_copy_us=%{public}llu",
+                        serial,
+                        static_cast<unsigned long long>(releaseWaitUs),
+                        static_cast<unsigned long long>(presentUs),
+                        static_cast<unsigned long long>(waitFenceUs),
+                        static_cast<unsigned long long>(acquireUs),
+                        static_cast<unsigned long long>(submitUs),
+                        static_cast<unsigned long long>(queuePresentUs),
+                        static_cast<unsigned long long>(gpuPresentCopyUs));
+        }
         if (nextPresentDeadlineNs)
             *nextPresentDeadlineNs = lastPresentNs_ + framePeriodNs_;
         if (TraceFrameOrder() && framesPresented_ <= 600) {
@@ -525,6 +605,8 @@ struct VenusSurfaceQueueTarget::Impl {
                         "wait_fence_avg=%{public}llu acquire_avg=%{public}llu "
                         "submit_avg=%{public}llu queue_present_avg=%{public}llu "
                         "release_wait_avg=%{public}llu release_polls_avg=%{public}llu "
+                        "gpu_present_copy_avg=%{public}llu max=%{public}llu samples=%{public}llu "
+                        "release_minus_present_gpu_avg=%{public}llu "
                         "release_mode=%{public}s "
                         "failures=%{public}llu "
                         "throttled=%{public}llu",
@@ -541,6 +623,18 @@ struct VenusSurfaceQueueTarget::Impl {
                         static_cast<unsigned long long>(totalQueuePresentUs_ / framesPresented_),
                         static_cast<unsigned long long>(totalReleaseWaitUs_ / framesPresented_),
                         static_cast<unsigned long long>(totalReleasePolls_ / framesPresented_),
+                        static_cast<unsigned long long>(gpuTimingSamples_
+                            ? totalGpuPresentWorkUs_ / gpuTimingSamples_ : 0),
+                        static_cast<unsigned long long>(maxGpuPresentWorkUs_),
+                        static_cast<unsigned long long>(gpuTimingSamples_),
+                        static_cast<unsigned long long>(
+                            (totalReleaseWaitUs_ / framesPresented_) >
+                                    (gpuTimingSamples_
+                                        ? totalGpuPresentWorkUs_ / gpuTimingSamples_ : 0)
+                                ? (totalReleaseWaitUs_ / framesPresented_) -
+                                      (gpuTimingSamples_
+                                          ? totalGpuPresentWorkUs_ / gpuTimingSamples_ : 0)
+                                : 0),
                         ReleaseModeName(),
                         static_cast<unsigned long long>(failures_),
                         static_cast<unsigned long long>(throttled_));
@@ -789,6 +883,44 @@ private:
         }
         VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+        gpuTimingRequested_ = GpuFrameProfileEnabled();
+        gpuTimingEnabled_ = false;
+        timestampPeriodNs_ = 0.0f;
+        if (gpuTimingRequested_) {
+            VkPhysicalDeviceProperties properties{};
+            vkGetPhysicalDeviceProperties(physicalDevice_, &properties);
+            uint32_t queueFamilyCount = 0;
+            vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice_, &queueFamilyCount,
+                                                     nullptr);
+            std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+            if (queueFamilyCount) {
+                vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice_, &queueFamilyCount,
+                                                         queueFamilies.data());
+            }
+            const bool queryResetSupported =
+                VK_API_VERSION_MAJOR(properties.apiVersion) > 1 ||
+                (VK_API_VERSION_MAJOR(properties.apiVersion) == 1 &&
+                 VK_API_VERSION_MINOR(properties.apiVersion) >= 2);
+            if (queryResetSupported &&
+                properties.limits.timestampComputeAndGraphics &&
+                queueFamily_ < queueFamilyCount &&
+                queueFamilies[queueFamily_].timestampValidBits &&
+                properties.limits.timestampPeriod > 0.0f) {
+                timestampPeriodNs_ = properties.limits.timestampPeriod;
+                gpuTimingEnabled_ = true;
+            } else {
+                OH_LOG_WARN(LOG_APP,
+                            "[VENUS-GPU-TIME][NCP] timestamp queries unsupported "
+                            "api=%{public}u compute_graphics=%{public}u "
+                            "queue_bits=%{public}u period_ps=%{public}llu",
+                            properties.apiVersion,
+                            properties.limits.timestampComputeAndGraphics,
+                            queueFamily_ < queueFamilyCount
+                                ? queueFamilies[queueFamily_].timestampValidBits : 0,
+                            static_cast<unsigned long long>(
+                                properties.limits.timestampPeriod * 1000.0f));
+            }
+        }
         for (size_t i = 0; i < frames_.size(); ++i) {
             frames_[i].command = commands[i];
             if (vkCreateSemaphore(device_, &semaphoreInfo, nullptr,
@@ -798,6 +930,19 @@ private:
                 error = -ENOMEM;
                 return false;
             }
+            if (gpuTimingEnabled_) {
+                VkQueryPoolCreateInfo queryInfo{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+                queryInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+                queryInfo.queryCount = 2;
+                if (vkCreateQueryPool(device_, &queryInfo, nullptr,
+                                      &frames_[i].gpuTiming) != VK_SUCCESS) {
+                    OH_LOG_WARN(LOG_APP,
+                                "[VENUS-GPU-TIME][NCP] timestamp query pool unavailable; "
+                                "continuing without GPU timing");
+                    gpuTimingEnabled_ = false;
+                    break;
+                }
+            }
         }
 
         OH_LOG_INFO(LOG_APP,
@@ -806,7 +951,8 @@ private:
                     "source_format=%{public}u target_format=%{public}u images=%{public}u "
                     "blit_supported=%{public}d transfer=%{public}s "
                     "queue_family=%{public}u present_mode=%{public}s "
-                    "requested_mode=%{public}s release_mode=%{public}s",
+                    "requested_mode=%{public}s release_mode=%{public}s "
+                    "gpu_timing=%{public}s timestamp_period_ps=%{public}llu",
                     static_cast<unsigned long long>(surfaceKey_),
                     width, height, extent_.width, extent_.height,
                     static_cast<uint32_t>(sourceFormat_),
@@ -814,7 +960,8 @@ private:
                     canBlit_, useBlit_ ? "blit" : "copy", queueFamily_,
                     PresentModeName(presentMode_),
                     PresentModeName(requestedPresentMode),
-                    ReleaseModeName());
+                    ReleaseModeName(), gpuTimingEnabled_ ? "enabled" : "off",
+                    static_cast<unsigned long long>(timestampPeriodNs_ * 1000.0f));
         return true;
     }
 
@@ -823,6 +970,7 @@ private:
         if (waitQueue && device_ && queue_) vkQueueWaitIdle(queue_);
         if (device_) {
             for (auto& frame : frames_) {
+                if (frame.gpuTiming) vkDestroyQueryPool(device_, frame.gpuTiming, nullptr);
                 if (frame.complete) vkDestroyFence(device_, frame.complete, nullptr);
                 if (frame.acquired) vkDestroySemaphore(device_, frame.acquired, nullptr);
             }
@@ -854,6 +1002,9 @@ private:
         frameIndex_ = 0;
         canBlit_ = false;
         useBlit_ = false;
+        gpuTimingRequested_ = false;
+        gpuTimingEnabled_ = false;
+        timestampPeriodNs_ = 0.0f;
     }
 
     std::mutex mutex_;
@@ -898,6 +1049,13 @@ private:
     uint64_t totalQueuePresentUs_ = 0;
     uint64_t totalReleaseWaitUs_ = 0;
     uint64_t totalReleasePolls_ = 0;
+    uint64_t totalGpuPresentWorkUs_ = 0;
+    uint64_t maxGpuPresentWorkUs_ = 0;
+    uint64_t gpuTimingSamples_ = 0;
+    uint64_t gpuTimingFailures_ = 0;
+    bool gpuTimingRequested_ = false;
+    bool gpuTimingEnabled_ = false;
+    float timestampPeriodNs_ = 0.0f;
 };
 
 VenusSurfaceQueueTarget::VenusSurfaceQueueTarget()

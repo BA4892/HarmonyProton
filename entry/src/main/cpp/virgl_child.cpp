@@ -94,7 +94,8 @@ void ForwardPerfSummary(const std::string& path, std::atomic<bool>& stop)
         bool forwarded = false;
         while (fgets(line, sizeof(line), file))
         {
-            if (!strstr(line, "WineHuaPerf")) continue;
+            if (!strstr(line, "WineHuaPerf") &&
+                !strstr(line, "WineHuaFrameTimeline")) continue;
             line[strcspn(line, "\r\n")] = '\0';
             OH_LOG_INFO(LOG_APP, "[VIRGL-PERF] %{public}s", line);
             forwarded = true;
@@ -249,7 +250,10 @@ bool IsAllowedHostEnv(const std::string& key)
            key == "VKR_WINEHUA_SHADOW_FROM_HOST" ||
            key == "VKR_WINEHUA_SHADOW_TRACE" ||
            key == "WINEHUA_VKR_PRESENT_STAGE_TRACE" ||
+           key == "WINEHUA_VENUS_GPU_FRAME_PROFILE" ||
            key == "VKR_WINEHUA_PERF_SUMMARY" ||
+           key == "VKR_WINEHUA_PERF_SAMPLE_INTERVAL" ||
+           key == "VKR_WINEHUA_FRAME_TIMELINE_INTERVAL" ||
            key == "VKR_WINEHUA_GPU_UPLOAD" ||
            key == "VKR_WINEHUA_GPU_UPLOAD_INLINE" ||
            key == "VKR_WINEHUA_COVERAGE_SORT" ||
@@ -262,6 +266,7 @@ bool IsAllowedHostEnv(const std::string& key)
            key == "VKR_WINEHUA_SHADOW_MSYNC" ||
            key == "VKR_WINEHUA_SHADOW_SUBMIT_UNMAP_LARGE" ||
            key == "VKR_WINEHUA_SHADOW_MERGE_RANGES" ||
+           key == "VKR_WINEHUA_SHADOW_COVER_UPLOAD" ||
            key == "WINEHUA_VENUS_PRESENT_MODE" ||
            key == "WINEHUA_VKR_FREEZE_BOOL_SPEC" ||
            key == "EGL_PLATFORM";
@@ -445,6 +450,10 @@ extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainPr
         const bool frameAssocTrace =
             config.shadowTrace == "inline-gpu-upload-frame-assoc-trace";
         const bool presentImageTrace = config.shadowTrace == "present-image-trace";
+        const bool gpuFrameProfile = config.shadowTrace == "gpu-frame-profile";
+        const bool frameTimeline = config.shadowTrace == "frame-timeline";
+        const bool sampledPerf =
+            config.shadowTrace == "inline-gpu-upload-coverage-sort-sampled";
         const bool captureTrace = config.shadowTrace == "1" || frameAssocTrace;
         const bool noGpuUploadFast =
             config.shadowTrace == "no-gpu-upload-fast";
@@ -452,8 +461,11 @@ extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainPr
             noGpuUploadFast;
         const bool serializedGpuUpload =
             config.shadowTrace == "inline-gpu-upload-serialized";
+        const bool aliasCover =
+            config.shadowTrace == "inline-gpu-upload-alias-cover";
         const bool coverageSort =
-            config.shadowTrace == "inline-gpu-upload-coverage-sort";
+            config.shadowTrace == "inline-gpu-upload-coverage-sort" || aliasCover ||
+            gpuFrameProfile || frameTimeline || sampledPerf;
         const char* descriptorEnv = getenv("VKR_WINEHUA_DESCRIPTOR_UPDATE_SERIALIZE");
         const bool descriptorSerialized =
             (descriptorEnv && descriptorEnv[0] == 49 && !descriptorEnv[1]) ||
@@ -461,9 +473,13 @@ extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainPr
         const bool inlineGpuUpload =
             config.shadowTrace == "inline-gpu-upload" || serializedGpuUpload ||
             coverageSort || descriptorSerialized || frameAssocTrace;
+        /* The regular precise-dirty path is a product configuration.  Its
+         * QueueSubmit counters take several clocks and atomics for every
+         * submission, but do not change upload selection or synchronization.
+         * Keep that instrumentation only for profiles explicitly intended to
+         * investigate it. */
         const bool perfSummary = config.shadowTrace == "perf" ||
-            config.shadowTrace == "no-gpu-upload" || inlineGpuUpload ||
-            descriptorSerialized;
+            config.shadowTrace == "no-gpu-upload" || descriptorSerialized;
         const bool boundBufferList = config.shadowTrace == "perf";
         const bool cpuShadowUpload = config.shadowTrace == "cpu-upload";
         const bool legacyHostSync = config.shadowTrace == "legacy-host-sync";
@@ -498,7 +514,13 @@ extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainPr
                (captureTrace ? "1" : "0") +
             "|__env=VKR_WINEHUA_PERF_SUMMARY=" +
                (perfSummary ? "1" : "0") +
-            "|__env=VKR_WINEHUA_GPU_UPLOAD=" +
+           "|__env=VKR_WINEHUA_PERF_SAMPLE_INTERVAL=" +
+               (sampledPerf ? "120" : "0") +
+           "|__env=VKR_WINEHUA_FRAME_TIMELINE_INTERVAL=" +
+               (frameTimeline ? "120" : "0") +
+           "|__env=WINEHUA_VENUS_GPU_FRAME_PROFILE=" +
+               ((gpuFrameProfile || frameTimeline) ? "1" : "0") +
+           "|__env=VKR_WINEHUA_GPU_UPLOAD=" +
                (noGpuUpload || cpuShadowUpload || legacyHostSync ? "0" : (captureTrace ? "1" : "auto")) +
             "|__env=VKR_WINEHUA_GPU_UPLOAD_INLINE=" +
                (inlineGpuUpload ? "1" : "0") +
@@ -517,8 +539,12 @@ extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainPr
             "|__env=VKR_WINEHUA_BATCH_FLUSH=" +
                (legacyHostSync || noGpuUploadFast ? "0" : "1") +
             "|__env=VKR_WINEHUA_SHADOW_MERGE_RANGES=" + mergeRanges +
+            "|__env=VKR_WINEHUA_SHADOW_COVER_UPLOAD=" +
+               (aliasCover ? "1" : "0") +
             "|__env=WINEHUA_VKR_PRESENT_STAGE_TRACE=" +
                (captureTrace ? "1" : "0") +
+            "|__env=WINEHUA_VENUS_GPU_FRAME_PROFILE=" +
+               ((gpuFrameProfile || frameTimeline) ? "1" : "0") +
             "|__env=WINEHUA_VENUS_PRESENT_MODE=" + config.presentMode +
             "|__env=EGL_PLATFORM=surfaceless";
         if (config.syncMode == "egl-thread")

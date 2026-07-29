@@ -420,11 +420,16 @@ struct Index {
       this.perfProfileText === 'shadow-precise-dirty-ring-no-upload-fast' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload-coverage-sort' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-coverage-sort-sampled' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-coverage-poll' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload-alias-cover' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload-serialized' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload-descriptor-serialized' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-frame-assoc-trace' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-present-image-trace' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-perf' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-gpu-frame-profile' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-frame-timeline' ||
       this.perfProfileText === 'shadow-precise-strong-ring-trace' ||
       this.perfProfileText === 'shadow-precise-strong-ring-perf' ||
       this.perfProfileText === 'shadow-precise-strong-ring-async-present' ||
@@ -451,11 +456,16 @@ struct Index {
       this.perfProfileText === 'shadow-precise-dirty-ring-no-upload-fast' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload-coverage-sort' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-coverage-sort-sampled' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-coverage-poll' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload-alias-cover' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload-serialized' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload-descriptor-serialized' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-frame-assoc-trace' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-present-image-trace' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-perf' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-gpu-frame-profile' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-frame-timeline' ||
         this.perfProfileText === 'shadow-precise-strong-ring-trace' ||
         this.perfProfileText === 'shadow-precise-strong-ring-perf' ||
         this.perfProfileText === 'shadow-precise-strong-ring-async-present' ||

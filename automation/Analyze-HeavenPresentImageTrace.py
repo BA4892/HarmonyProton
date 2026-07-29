@@ -17,11 +17,14 @@ from typing import Any, Callable
 
 KV_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=([^\s]+)")
 DXVK_RE = re.compile(r"WineHuaPresentImage: layer=dxvk event=(image-map|acquire|present)")
+DXVK_COPY_RE = re.compile(r"WineHuaPresentCopy: layer=dxvk event=submit")
+DXVK_SUBMIT_RE = re.compile(r"WineHuaDxvkSubmit:")
 WINE_RE = re.compile(r"WineHuaPresentImage: layer=wine event=(image-map|acquire|present)")
 GUEST_RE = re.compile(r"WineHuaPresentImage: layer=guest event=present")
 HOST_RE = re.compile(r"WineHuaPresentImage: layer=host event=present")
 NCP_RE = re.compile(r"vk_present count=")
 ORDER_RE = re.compile(r"\[VENUS-ORDER\]\[NCP\]")
+MAIN_RE = re.compile(r"\[VENUS-ORDER\]\[MAIN\]")
 
 
 def parse_args() -> argparse.Namespace:
@@ -212,6 +215,112 @@ def parse_order(values: dict[str, str], line: int) -> dict[str, Any]:
     }
 
 
+def parse_main(values: dict[str, str], line: int) -> dict[str, Any]:
+    return {
+        "line": line,
+        "frame": number(values, "frame"),
+        "signals": number(values, "signals"),
+        "updates": number(values, "updates"),
+        "signalDelta": number(values, "signal_delta"),
+        "coalesced": number(values, "coalesced"),
+        "timestamp": number(values, "timestamp"),
+        "timestampDuplicateCount": number(values, "timestamp_dup"),
+        "timestampRegressionCount": number(values, "timestamp_regress"),
+    }
+
+
+def parse_main_sessions(path: Path) -> list[list[dict[str, Any]]]:
+    sessions: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    previous_frame: int | None = None
+    with path.open("r", encoding=log_encoding(path), errors="ignore") as stream:
+        for line_number, line in enumerate(stream, 1):
+            if not MAIN_RE.search(line):
+                continue
+            record = parse_main(key_values(line), line_number)
+            frame = int(record["frame"])
+            if frame < 0:
+                continue
+            if previous_frame is not None and frame <= previous_frame and current:
+                sessions.append(current)
+                current = []
+            current.append(record)
+            previous_frame = frame
+    if current:
+        sessions.append(current)
+    return sessions
+
+
+def parse_dxvk_generation(
+    path: Path, line_range: list[int]
+) -> tuple[list[dict[str, Any]], dict[int, list[dict[str, Any]]]]:
+    copies: list[dict[str, Any]] = []
+    render_submits: dict[int, list[dict[str, Any]]] = {}
+    start, end = line_range
+    current_acquire: dict[str, Any] | None = None
+
+    with path.open("r", encoding=log_encoding(path), errors="ignore") as stream:
+        for line_number, line in enumerate(stream, 1):
+            if line_number < start:
+                continue
+            if end and line_number > end:
+                break
+            values = key_values(line)
+            if DXVK_RE.search(line) and "event=acquire" in line:
+                current_acquire = {
+                    "sequence": number(values, "sequence"),
+                    "index": number(values, "index"),
+                    "image": handle(values, "image"),
+                    "line": line_number,
+                    "copies": [],
+                }
+            elif DXVK_COPY_RE.search(line):
+                record = {
+                    "line": line_number,
+                    "frame": number(values, "frame"),
+                    "recording": number(values, "recording"),
+                    "execCmd": handle(values, "execCmd"),
+                    "sourceImage": handle(values, "sourceImage"),
+                    "destinationImage": handle(values, "destinationImage"),
+                    "destinationIndex": number(values, "destinationIndex"),
+                    "sourceSamples": number(values, "sourceSamples"),
+                    "sequence": (
+                        int(current_acquire["sequence"])
+                        if current_acquire is not None
+                        else -1
+                    ),
+                }
+                copies.append(record)
+                if current_acquire is not None:
+                    current_acquire["copies"].append(record)
+            elif DXVK_RE.search(line) and "event=present" in line:
+                sequence = number(values, "sequence")
+                if current_acquire is not None:
+                    for record in current_acquire["copies"]:
+                        record["presentLine"] = line_number
+                        record["presentSequence"] = sequence
+                        record["presentIndex"] = number(values, "index")
+                        record["presentImage"] = handle(values, "image")
+                        record["acquireIndex"] = current_acquire["index"]
+                        record["acquireImage"] = current_acquire["image"]
+                    current_acquire = None
+            elif DXVK_SUBMIT_RE.search(line):
+                frames = values.get("frames", "").strip("[]")
+                for encoded_frame in frames.split(","):
+                    try:
+                        frame = int(encoded_frame, 0)
+                    except ValueError:
+                        continue
+                    render_submits.setdefault(frame, []).append(
+                        {
+                            "line": line_number,
+                            "recording": number(values, "recording"),
+                            "execCmd": handle(values, "execCmd"),
+                        }
+                    )
+    return copies, render_submits
+
+
 def unique_by_serial(
     records: list[dict[str, Any]],
 ) -> tuple[dict[int, dict[str, Any]], int, list[dict[str, Any]]]:
@@ -298,6 +407,9 @@ def mismatch(kind: str, serial: int, **values: Any) -> dict[str, Any]:
 def analyze(args: argparse.Namespace) -> dict[str, Any]:
     dxvk_sessions = parse_image_sessions(args.dxvk, DXVK_RE, "sequence")
     dxvk_index, dxvk = select_image_session(dxvk_sessions)
+    copies, render_submits = parse_dxvk_generation(
+        args.dxvk, dxvk["lineRange"]
+    )
 
     wine_sessions = parse_image_sessions(args.wine, WINE_RE, "serial")
     wine_index, wine = max(
@@ -357,6 +469,26 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         )
     )
 
+    main_sessions = parse_main_sessions(args.hilog)
+    main_index = -1
+    main_events: list[dict[str, Any]] = []
+    if main_sessions:
+        order_by_timestamp = {
+            int(record["timestamp"]): record for record in order.values()
+        }
+        main_index, main_events = max(
+            enumerate(main_sessions),
+            key=lambda item: (
+                sum(
+                    1
+                    for record in item[1]
+                    if int(record["timestamp"]) in order_by_timestamp
+                ),
+                len(item[1]),
+                item[0],
+            ),
+        )
+
     ncp_records = read_matching(args.host, NCP_RE, parse_ncp)
     ncp_groups: dict[tuple[int, int], list[dict[str, Any]]] = {}
     for record in ncp_records:
@@ -392,6 +524,166 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
                     acquire=acquire,
                     present=present,
                 )
+            )
+
+    copy_problems: list[dict[str, Any]] = []
+    previous_frame: int | None = None
+    previous_recording: int | None = None
+    for record in copies:
+        sequence = int(record["sequence"])
+        frame = int(record["frame"])
+        recording = int(record["recording"])
+        if int(record.get("presentSequence", -1)) != sequence:
+            copy_problems.append(
+                mismatch("copy-present-sequence", sequence, copy=record)
+            )
+        if (
+            int(record.get("acquireIndex", -1)),
+            record.get("acquireImage", ""),
+        ) != (int(record["destinationIndex"]), record["destinationImage"]):
+            copy_problems.append(
+                mismatch("copy-acquire-target", sequence, copy=record)
+            )
+        if (
+            int(record.get("presentIndex", -1)),
+            record.get("presentImage", ""),
+        ) != (int(record["destinationIndex"]), record["destinationImage"]):
+            copy_problems.append(
+                mismatch("copy-present-target", sequence, copy=record)
+            )
+        if previous_frame is not None and frame <= previous_frame:
+            copy_problems.append(
+                mismatch(
+                    "copy-frame-regression",
+                    sequence,
+                    previous=previous_frame,
+                    current=frame,
+                )
+            )
+        if previous_recording is not None and recording <= previous_recording:
+            copy_problems.append(
+                mismatch(
+                    "copy-recording-regression",
+                    sequence,
+                    previous=previous_recording,
+                    current=recording,
+                )
+            )
+        previous_frame = frame
+        previous_recording = recording
+
+    render_copy_problems: list[dict[str, Any]] = []
+    render_copy_joined = 0
+    render_frames_in_range = sorted(
+        frame
+        for frame in render_submits
+        if copies and frame >= int(copies[0]["frame"])
+    )
+    first_render_frame = (
+        render_frames_in_range[0] if render_frames_in_range else None
+    )
+    for copy in copies:
+        frame = int(copy["frame"])
+        if first_render_frame is None or frame < first_render_frame:
+            continue
+        candidates = render_submits.get(frame, [])
+        if not candidates:
+            render_copy_problems.append(
+                mismatch("render-submit-missing", int(copy["sequence"]), frame=frame)
+            )
+            continue
+        render = candidates[-1]
+        render_copy_joined += 1
+        if int(render["line"]) >= int(copy["line"]):
+            render_copy_problems.append(
+                mismatch(
+                    "render-submit-after-copy",
+                    int(copy["sequence"]),
+                    frame=frame,
+                    render=render,
+                    copy=copy,
+                )
+            )
+        if int(render["recording"]) >= int(copy["recording"]):
+            render_copy_problems.append(
+                mismatch(
+                    "render-recording-after-copy",
+                    int(copy["sequence"]),
+                    frame=frame,
+                    render=render,
+                    copy=copy,
+                )
+            )
+
+    order_by_timestamp = {
+        int(record["timestamp"]): record for record in order.values()
+    }
+    main_joined: list[dict[str, Any]] = []
+    main_problems: list[dict[str, Any]] = []
+    first_main_join = next(
+        (
+            index
+            for index, record in enumerate(main_events)
+            if int(record["timestamp"]) in order_by_timestamp
+        ),
+        len(main_events),
+    )
+    previous_main_serial: int | None = None
+    for index, record in enumerate(main_events):
+        timestamp = int(record["timestamp"])
+        producer = order_by_timestamp.get(timestamp)
+        if producer is None:
+            if index >= first_main_join:
+                main_problems.append(
+                    {
+                        "kind": "main-timestamp-not-published",
+                        "frame": int(record["frame"]),
+                        "timestamp": timestamp,
+                    }
+                )
+            continue
+        joined = {
+            "mainFrame": int(record["frame"]),
+            "ncpFrame": int(producer["frame"]),
+            "serial": int(producer["serial"]),
+            "lag": int(record["frame"]) - int(producer["frame"]),
+            "timestamp": timestamp,
+        }
+        main_joined.append(joined)
+        if (
+            previous_main_serial is not None
+            and joined["serial"] <= previous_main_serial
+        ):
+            main_problems.append(
+                {
+                    "kind": "main-serial-regression",
+                    "frame": joined["mainFrame"],
+                    "previous": previous_main_serial,
+                    "current": joined["serial"],
+                }
+            )
+        previous_main_serial = joined["serial"]
+        if int(record["signalDelta"]) != 1:
+            main_problems.append(
+                {
+                    "kind": "main-signal-delta",
+                    "frame": int(record["frame"]),
+                    "value": int(record["signalDelta"]),
+                }
+            )
+        if (
+            int(record["coalesced"]) != 0
+            or int(record["timestampDuplicateCount"]) != 0
+            or int(record["timestampRegressionCount"]) != 0
+        ):
+            main_problems.append(
+                {
+                    "kind": "main-consumer-counter",
+                    "frame": int(record["frame"]),
+                    "coalesced": int(record["coalesced"]),
+                    "duplicates": int(record["timestampDuplicateCount"]),
+                    "regressions": int(record["timestampRegressionCount"]),
+                }
             )
 
     joined_serials = sorted(
