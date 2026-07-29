@@ -67,34 +67,36 @@ std::vector<uint8_t> DesktopCompositor::UpsertSubsurfaceLayer(
     return {};
 }
 
-void DesktopCompositor::ReorderSubsurfaceLayerAbove(wl_resource* child, wl_resource* sibling)
+bool DesktopCompositor::ReorderSubsurfaceLayerAbove(wl_resource* child, wl_resource* sibling)
 {
     int myIdx = -1, siblingIdx = -1;
     for (size_t i = 0; i < subsurfaceLayers_.size(); i++) {
         if (subsurfaceLayers_[i].surface == child) myIdx = static_cast<int>(i);
         if (subsurfaceLayers_[i].surface == sibling) siblingIdx = static_cast<int>(i);
     }
-    if (myIdx < 0 || siblingIdx < 0 || myIdx == siblingIdx + 1) return;
+    if (myIdx < 0 || siblingIdx < 0 || myIdx == siblingIdx + 1) return false;
     int target = siblingIdx;
     if (myIdx < target) target--;
     auto layer = std::move(subsurfaceLayers_[myIdx]);
     subsurfaceLayers_.erase(subsurfaceLayers_.begin() + myIdx);
     subsurfaceLayers_.insert(subsurfaceLayers_.begin() + target + 1, std::move(layer));
+    return true;
 }
 
-void DesktopCompositor::ReorderSubsurfaceLayerBelow(wl_resource* child, wl_resource* sibling)
+bool DesktopCompositor::ReorderSubsurfaceLayerBelow(wl_resource* child, wl_resource* sibling)
 {
     int myIdx = -1, siblingIdx = -1;
     for (size_t i = 0; i < subsurfaceLayers_.size(); i++) {
         if (subsurfaceLayers_[i].surface == child) myIdx = static_cast<int>(i);
         if (subsurfaceLayers_[i].surface == sibling) siblingIdx = static_cast<int>(i);
     }
-    if (myIdx < 0 || siblingIdx < 0 || myIdx == siblingIdx - 1) return;
+    if (myIdx < 0 || siblingIdx < 0 || myIdx == siblingIdx - 1) return false;
     int target = siblingIdx;
     if (myIdx > target) target++;
     auto layer = std::move(subsurfaceLayers_[myIdx]);
     subsurfaceLayers_.erase(subsurfaceLayers_.begin() + myIdx);
     subsurfaceLayers_.insert(subsurfaceLayers_.begin() + target, std::move(layer));
+    return true;
 }
 
 void DesktopCompositor::RemoveZeroCopyKeyLocked(uint64_t surfaceKey)

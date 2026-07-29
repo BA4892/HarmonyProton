@@ -102,8 +102,9 @@ public:
                                                std::vector<uint8_t>&& newPixels);
 
     // 在 sibling 之上/下移动 child layer。child 和 sibling 必须已存在。
-    void ReorderSubsurfaceLayerAbove(wl_resource* child, wl_resource* sibling);
-    void ReorderSubsurfaceLayerBelow(wl_resource* child, wl_resource* sibling);
+    // 返回是否实际改变了合成顺序，调用方据此避免无效的 root 重绘。
+    bool ReorderSubsurfaceLayerAbove(wl_resource* child, wl_resource* sibling);
+    bool ReorderSubsurfaceLayerBelow(wl_resource* child, wl_resource* sibling);
 
     // 移除 zero-copy key (调用方须已持有 mutex)
     void RemoveZeroCopyKeyLocked(uint64_t surfaceKey);
