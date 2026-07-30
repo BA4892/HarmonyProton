@@ -8,6 +8,7 @@
 #include <native_window/external_window.h>
 
 #include "virgl_ipc_protocol.h"
+#include "virgl_host_config.h"
 #include "virgl_surface_presenter.h"
 
 #include <atomic>
@@ -52,21 +53,17 @@ using WinehuaVtestVulkanPresentCallback = int (*)(
     void* userData);
 using WinehuaVtestSetVulkanPresentCallback = void (*)(
     WinehuaVtestVulkanPresentCallback callback, void* userData);
+using WinehuaVtestVulkanDeviceReleaseCallback = int (*)(
+    uint32_t contextId, uintptr_t device, uint32_t phase,
+    int32_t waitResult, void* userData);
+using WinehuaVtestSetVulkanDeviceReleaseCallback = void (*)(
+    WinehuaVtestVulkanDeviceReleaseCallback callback, void* userData);
 enum class IpcChildMode {
     None,
     VtestServer,
 };
 
-struct VtestIpcConfig {
-    std::string helperPath;
-    std::string socketPath;
-    std::string libraryPath;
-    std::string syncMode;
-    std::string logPath;
-    std::string shadowMode;
-    std::string shadowTrace;
-    std::string presentMode;
-};
+using VtestIpcConfig = winehua::VirglHostConfig;
 
 std::mutex g_ipcChildMutex;
 std::condition_variable g_ipcChildCondition;
@@ -107,6 +104,12 @@ void ForwardPerfSummary(const std::string& path, std::atomic<bool>& stop)
     if (file) fclose(file);
 }
 
+bool PresentPerfSummaryEnabled()
+{
+    const char* summary = std::getenv("WINEHUA_VTEST_PRESENT_PERF_SUMMARY");
+    return summary && summary[0] == '1' && !summary[1];
+}
+
 int WriteIpcResult(OHIPCParcel* reply, int32_t result)
 {
     return reply ? OH_IPCParcel_WriteInt32(reply, result) : OH_IPC_CHECK_PARAM_ERROR;
@@ -139,9 +142,13 @@ int OnVirglIpcRequest(uint32_t code, const OHIPCParcel* data,
         const char* shadowMode = OH_IPCParcel_ReadString(data);
         const char* shadowTrace = OH_IPCParcel_ReadString(data);
         const char* presentMode = OH_IPCParcel_ReadString(data);
+        const char* shadowMergeRanges = OH_IPCParcel_ReadString(data);
+        const char* descriptorUpdateSerialize = OH_IPCParcel_ReadString(data);
+        const char* gpuUploadWait = OH_IPCParcel_ReadString(data);
         if (!helperPath || helperPath[0] != '/' || !socketPath || socketPath[0] != '/' ||
             !libraryPath || libraryPath[0] != '/' || !syncMode || !logPath || logPath[0] != '/' ||
-            !shadowMode || !shadowTrace || !presentMode ||
+            !shadowMode || !shadowTrace || !presentMode || !shadowMergeRanges ||
+            !descriptorUpdateSerialize || !gpuUploadWait ||
             (strcmp(presentMode, "fifo") && strcmp(presentMode, "mailbox") &&
              strcmp(presentMode, "fifo-async") &&
              strcmp(presentMode, "fifo-poll")))
@@ -165,7 +172,23 @@ int OnVirglIpcRequest(uint32_t code, const OHIPCParcel* data,
                 g_vtestIpcConfig.shadowMode = shadowMode;
                 g_vtestIpcConfig.shadowTrace = shadowTrace;
                 g_vtestIpcConfig.presentMode = presentMode;
-                g_ipcChildMode = IpcChildMode::VtestServer;
+                g_vtestIpcConfig.shadowMergeRanges = shadowMergeRanges;
+                g_vtestIpcConfig.descriptorUpdateSerialize =
+                    descriptorUpdateSerialize;
+                g_vtestIpcConfig.gpuUploadWait = gpuUploadWait;
+                std::string configError;
+                if (!winehua::ValidateVirglHostConfig(
+                        g_vtestIpcConfig, &configError))
+                {
+                    OH_LOG_ERROR(LOG_APP,
+                                 "[VIRGL-ZC][NCP] invalid host config: %{public}s",
+                                 configError.c_str());
+                    result = -4;
+                }
+                else
+                {
+                    g_ipcChildMode = IpcChildMode::VtestServer;
+                }
             }
         }
         g_ipcChildCondition.notify_all();
@@ -245,16 +268,19 @@ bool IsAllowedHostEnv(const std::string& key)
            key == "WINEHUA_VKR_TRACE_PIPELINE" ||
            key == "WINEHUA_VKR_TRACE_CAPTURE" ||
            key == "WINEHUA_VKR_TRACE_CAPTURE_LIMIT" ||
+           key == "WINEHUA_RESOURCE_TRACE" ||
            key == "WINEHUA_VKR_TRACE_UBO_IDENTITY" ||
            key == "WINEHUA_VKR_TRACE_PRESENT_IMAGE" ||
            key == "VKR_WINEHUA_SHADOW_FROM_HOST" ||
            key == "VKR_WINEHUA_SHADOW_TRACE" ||
            key == "WINEHUA_VKR_PRESENT_STAGE_TRACE" ||
            key == "WINEHUA_VENUS_GPU_FRAME_PROFILE" ||
+           key == "WINEHUA_VTEST_PRESENT_PERF_SUMMARY" ||
            key == "VKR_WINEHUA_PERF_SUMMARY" ||
            key == "VKR_WINEHUA_PERF_SAMPLE_INTERVAL" ||
            key == "VKR_WINEHUA_FRAME_TIMELINE_INTERVAL" ||
            key == "VKR_WINEHUA_GPU_UPLOAD" ||
+           key == "VKR_WINEHUA_GPU_UPLOAD_WAIT" ||
            key == "VKR_WINEHUA_GPU_UPLOAD_INLINE" ||
            key == "VKR_WINEHUA_COVERAGE_SORT" ||
            key == "VKR_WINEHUA_GPU_UPLOAD_SERIALIZE" ||
@@ -388,7 +414,7 @@ int OnVtestVulkanPresent(uint32_t contextId,
     } else {
         failures = failureCount.fetch_add(1, std::memory_order_relaxed) + 1;
     }
-    if (call == 1 || !(call % 120) ||
+    if ((PresentPerfSummaryEnabled() && (call == 1 || !(call % 120))) ||
         (result < 0 && (failures == 1 || !(failures % 60)))) {
         OH_LOG_INFO(LOG_APP,
                     "[VENUS-PRESENT][NCP] callback count=%{public}llu ok=%{public}llu "
@@ -409,9 +435,60 @@ int OnVtestVulkanPresent(uint32_t contextId,
     return result;
 }
 
+int OnVtestVulkanDeviceRelease(uint32_t contextId, uintptr_t device,
+                               uint32_t phase, int32_t waitResult, void*)
+{
+    switch (phase) {
+    case 0:
+        return winehua::PrepareVenusDeviceRelease(contextId, device);
+    case 1:
+        return winehua::FinishVenusDeviceRelease(
+            contextId, device, waitResult);
+    default:
+        OH_LOG_ERROR(LOG_APP,
+                     "[VENUS-PRESENT][NCP] invalid device release phase=%{public}u "
+                     "ctx=%{public}u device=0x%{public}llx",
+                     phase, contextId,
+                     static_cast<unsigned long long>(device));
+        return -EINVAL;
+    }
+}
+
 } // namespace
 
 extern "C" __attribute__((visibility("default"))) void Main(NativeChildProcess_Args args);
+
+static int RunConfiguredVtestServer(const winehua::VirglHostConfig& config)
+{
+    winehua::VirglHostLaunchConfig launch;
+    std::string error;
+    if (!winehua::BuildVirglHostLaunchConfig(config, &launch, &error))
+    {
+        OH_LOG_ERROR(LOG_APP,
+                     "[virgl-child] host configuration rejected: %{public}s",
+                     error.c_str());
+        return -EINVAL;
+    }
+
+    NativeChildProcess_Args args = {};
+    args.entryParams = launch.entryParams.data();
+    OH_LOG_INFO(LOG_APP,
+                "[virgl-child] starting configured vtest server config=0x%{public}llx "
+                "shadow=%{public}s selector=%{public}s present=%{public}s",
+                static_cast<unsigned long long>(launch.fingerprint),
+                config.shadowMode.c_str(), config.shadowTrace.c_str(),
+                config.presentMode.c_str());
+    std::atomic<bool> perfLogStop{false};
+    std::thread perfLogThread;
+    if (launch.forwardPerfSummary)
+        perfLogThread = std::thread(ForwardPerfSummary, config.logPath,
+                                    std::ref(perfLogStop));
+    Main(args);
+    perfLogStop.store(true, std::memory_order_relaxed);
+    if (perfLogThread.joinable()) perfLogThread.join();
+    winehua::ResetVirglSurfaces();
+    return 0;
+}
 
 extern "C" __attribute__((visibility("default"))) OHIPCRemoteStub* NativeChildProcess_OnConnect()
 {
@@ -444,126 +521,11 @@ extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainPr
 
     if (completed && mode == IpcChildMode::VtestServer)
     {
-        const bool explicitToHost = config.shadowMode == "to-host-explicit";
-        const bool preciseDirty = config.shadowMode == "precise-dirty";
-        const bool precise = config.shadowMode == "precise" || preciseDirty;
-        const bool frameAssocTrace =
-            config.shadowTrace == "inline-gpu-upload-frame-assoc-trace";
-        const bool presentImageTrace = config.shadowTrace == "present-image-trace";
-        const bool gpuFrameProfile = config.shadowTrace == "gpu-frame-profile";
-        const bool frameTimeline = config.shadowTrace == "frame-timeline";
-        const bool sampledPerf =
-            config.shadowTrace == "inline-gpu-upload-coverage-sort-sampled";
-        const bool captureTrace = config.shadowTrace == "1" || frameAssocTrace;
-        const bool noGpuUploadFast =
-            config.shadowTrace == "no-gpu-upload-fast";
-        const bool noGpuUpload = config.shadowTrace == "no-gpu-upload" ||
-            noGpuUploadFast;
-        const bool serializedGpuUpload =
-            config.shadowTrace == "inline-gpu-upload-serialized";
-        const bool aliasCover =
-            config.shadowTrace == "inline-gpu-upload-alias-cover";
-        const bool coverageSort =
-            config.shadowTrace == "inline-gpu-upload-coverage-sort" || aliasCover ||
-            gpuFrameProfile || frameTimeline || sampledPerf;
-        const char* descriptorEnv = getenv("VKR_WINEHUA_DESCRIPTOR_UPDATE_SERIALIZE");
-        const bool descriptorSerialized =
-            (descriptorEnv && descriptorEnv[0] == 49 && !descriptorEnv[1]) ||
-            config.shadowTrace == "inline-gpu-upload-descriptor-serialized";
-        const bool inlineGpuUpload =
-            config.shadowTrace == "inline-gpu-upload" || serializedGpuUpload ||
-            coverageSort || descriptorSerialized || frameAssocTrace;
-        /* The regular precise-dirty path is a product configuration.  Its
-         * QueueSubmit counters take several clocks and atomics for every
-         * submission, but do not change upload selection or synchronization.
-         * Keep that instrumentation only for profiles explicitly intended to
-         * investigate it. */
-        const bool perfSummary = config.shadowTrace == "perf" ||
-            config.shadowTrace == "no-gpu-upload" || descriptorSerialized;
-        const bool boundBufferList = config.shadowTrace == "perf";
-        const bool cpuShadowUpload = config.shadowTrace == "cpu-upload";
-        const bool legacyHostSync = config.shadowTrace == "legacy-host-sync";
-        const char* mergeRanges = getenv("VKR_WINEHUA_SHADOW_MERGE_RANGES");
-        if (!mergeRanges || !mergeRanges[0]) mergeRanges = "1";
-        const std::string fromHostMode = explicitToHost ? "full" :
-            (precise ? "precise" : config.shadowMode);
-        const std::string toHostMode = explicitToHost || (precise && !preciseDirty)
-            ? "explicit" : "full";
-        const std::string sampledTrace = precise && !frameAssocTrace ? "0" : "1";
-        std::string entryParams = config.helperPath + "|" + config.socketPath +
-            "|__env=LD_LIBRARY_PATH=" + config.libraryPath +
-            "|__env=VTEST_USE_GLES=1" +
-            "|__env=VTEST_USE_EGL_SURFACELESS=1" +
-            "|__env=VTEST_SYNC_GL_FINISH=1" +
-            "|__env=WINEHUA_VIRGL_SYNC_MODE=" + config.syncMode +
-           "|__env=WINEHUA_VIRGL_LOG_PATH=" + config.logPath +
-           "|__env=WINEHUA_VKR_TRACE_SAMPLED=" + sampledTrace +
-           "|__env=WINEHUA_VKR_TRACE_CAPTURE=" +
-               (captureTrace ? "1" : "0") +
-           "|__env=WINEHUA_VKR_TRACE_CAPTURE_LIMIT=" +
-               (captureTrace ? "20000" : "512") +
-           "|__env=WINEHUA_VKR_TRACE_UBO_IDENTITY=" +
-               (frameAssocTrace ? "focused" : "0") +
-           "|__env=WINEHUA_VKR_TRACE_PRESENT_IMAGE=" +
-               (presentImageTrace ? "1" : "0") +
-           "|__env=WINEHUA_VKR_TRACE_PIPELINE=" +
-               (captureTrace ? "1" : "0") +
-           "|__env=VKR_WINEHUA_SHADOW_FROM_HOST=" + fromHostMode +
-            "|__env=VKR_WINEHUA_SHADOW_TO_HOST=" + toHostMode +
-            "|__env=VKR_WINEHUA_SHADOW_TRACE=" +
-               (captureTrace ? "1" : "0") +
-            "|__env=VKR_WINEHUA_PERF_SUMMARY=" +
-               (perfSummary ? "1" : "0") +
-           "|__env=VKR_WINEHUA_PERF_SAMPLE_INTERVAL=" +
-               (sampledPerf ? "120" : "0") +
-           "|__env=VKR_WINEHUA_FRAME_TIMELINE_INTERVAL=" +
-               (frameTimeline ? "120" : "0") +
-           "|__env=WINEHUA_VENUS_GPU_FRAME_PROFILE=" +
-               ((gpuFrameProfile || frameTimeline) ? "1" : "0") +
-           "|__env=VKR_WINEHUA_GPU_UPLOAD=" +
-               (noGpuUpload || cpuShadowUpload || legacyHostSync ? "0" : (captureTrace ? "1" : "auto")) +
-            "|__env=VKR_WINEHUA_GPU_UPLOAD_INLINE=" +
-               (inlineGpuUpload ? "1" : "0") +
-            "|__env=VKR_WINEHUA_COVERAGE_SORT=" +
-               (coverageSort ? "1" : "0") +
-            "|__env=VKR_WINEHUA_GPU_UPLOAD_SERIALIZE=" +
-               (serializedGpuUpload ? "1" : "0") +
-            "|__env=VKR_WINEHUA_SHADOW_GENERATION_SERIALIZE=" +
-               (frameAssocTrace ? "1" : "0") +
-            "|__env=VKR_WINEHUA_DESCRIPTOR_UPDATE_SERIALIZE=" +
-               (descriptorSerialized ? "1" : "0") +
-            "|__env=VKR_WINEHUA_SHADOW_DIRTY_LIST=" +
-               (legacyHostSync ? "0" : "1") +
-            "|__env=VKR_WINEHUA_BOUND_BUFFER_LIST=" +
-               (boundBufferList ? "1" : "0") +
-            "|__env=VKR_WINEHUA_BATCH_FLUSH=" +
-               (legacyHostSync || noGpuUploadFast ? "0" : "1") +
-            "|__env=VKR_WINEHUA_SHADOW_MERGE_RANGES=" + mergeRanges +
-            "|__env=VKR_WINEHUA_SHADOW_COVER_UPLOAD=" +
-               (aliasCover ? "1" : "0") +
-            "|__env=WINEHUA_VKR_PRESENT_STAGE_TRACE=" +
-               (captureTrace ? "1" : "0") +
-            "|__env=WINEHUA_VENUS_GPU_FRAME_PROFILE=" +
-               ((gpuFrameProfile || frameTimeline) ? "1" : "0") +
-            "|__env=WINEHUA_VENUS_PRESENT_MODE=" + config.presentMode +
-            "|__env=EGL_PLATFORM=surfaceless";
-        if (config.syncMode == "egl-thread")
-            entryParams += "|__env=VIRGL_DISABLE_NATIVE_FENCE_FD=1";
-        NativeChildProcess_Args args = {};
-        args.entryParams = entryParams.data();
-        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][NCP] starting persistent vtest server");
-        std::atomic<bool> perfLogStop{false};
-        std::thread perfLogThread;
-        /* The renderer file remains the authoritative performance record.
-         * Avoid duplicating each summary into hilog for the product selector;
-         * diagnostic profiles retain the live forwarding behavior. */
-        if (perfSummary && !coverageSort)
-            perfLogThread = std::thread(ForwardPerfSummary, config.logPath,
-                                        std::ref(perfLogStop));
-        Main(args);
-        perfLogStop.store(true, std::memory_order_relaxed);
-        if (perfLogThread.joinable()) perfLogThread.join();
-        winehua::ResetVirglSurfaces();
+        const int result = RunConfiguredVtestServer(config);
+        if (result != 0)
+            OH_LOG_ERROR(LOG_APP,
+                         "[VIRGL-ZC][NCP] configured vtest server failed result=%{public}d",
+                         result);
     }
     else
     {
@@ -578,6 +540,29 @@ extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainPr
     }
 }
 
+extern "C" __attribute__((visibility("default"))) int WinehuaVirgl_RunConfiguredHost(
+    const char* helperPath, const char* socketPath, const char* libraryPath,
+    const char* syncMode, const char* logPath, const char* shadowMode,
+    const char* shadowTrace, const char* presentMode,
+    const char* shadowMergeRanges, const char* descriptorUpdateSerialize,
+    const char* gpuUploadWait)
+{
+    const winehua::VirglHostConfig config = {
+        helperPath ? helperPath : "",
+        socketPath ? socketPath : "",
+        libraryPath ? libraryPath : "",
+        syncMode ? syncMode : "",
+        logPath ? logPath : "",
+        shadowMode ? shadowMode : "",
+        shadowTrace ? shadowTrace : "",
+        presentMode ? presentMode : "",
+        shadowMergeRanges ? shadowMergeRanges : "",
+        descriptorUpdateSerialize ? descriptorUpdateSerialize : "",
+        gpuUploadWait ? gpuUploadWait : "",
+    };
+    return RunConfiguredVtestServer(config);
+}
+
 extern "C" __attribute__((visibility("default"))) void Main(NativeChildProcess_Args args)
 {
     const char* entryParams = args.entryParams ? args.entryParams : "";
@@ -589,6 +574,7 @@ extern "C" __attribute__((visibility("default"))) void Main(NativeChildProcess_A
     WinehuaVtestMain vtestMain;
     WinehuaVtestSetPresentCallback setPresentCallback;
     WinehuaVtestSetVulkanPresentCallback setVulkanPresentCallback;
+    WinehuaVtestSetVulkanDeviceReleaseCallback setVulkanDeviceReleaseCallback;
 
     OH_LOG_INFO(LOG_APP, "[virgl-child] Main enter pid=%{public}d params=%{public}s",
                 getpid(), entryParams);
@@ -659,6 +645,17 @@ extern "C" __attribute__((visibility("default"))) void Main(NativeChildProcess_A
                     "[virgl-child] Vulkan present callback registration missing: %{public}s",
                     dlerror());
 
+    setVulkanDeviceReleaseCallback =
+        reinterpret_cast<WinehuaVtestSetVulkanDeviceReleaseCallback>(
+            dlsym(handle, "winehua_vtest_set_vulkan_device_release_callback"));
+    if (setVulkanDeviceReleaseCallback)
+        setVulkanDeviceReleaseCallback(OnVtestVulkanDeviceRelease, nullptr);
+    else
+        OH_LOG_WARN(LOG_APP,
+                    "[virgl-child] Vulkan device-release callback registration "
+                    "missing: %{public}s",
+                    dlerror());
+
     char arg0[] = "virgl_test_server";
     char arg1[] = "--no-fork";
     char arg2[] = "--multi-clients";
@@ -670,6 +667,8 @@ extern "C" __attribute__((visibility("default"))) void Main(NativeChildProcess_A
     int rc = vtestMain(8, argv);
 
     OH_LOG_WARN(LOG_APP, "[virgl-child] vtest exited rc=%{public}d", rc);
+    if (setVulkanDeviceReleaseCallback)
+        setVulkanDeviceReleaseCallback(nullptr, nullptr);
     if (setVulkanPresentCallback) setVulkanPresentCallback(nullptr, nullptr);
     if (setPresentCallback) setPresentCallback(nullptr, nullptr);
     dlclose(handle);
@@ -681,8 +680,9 @@ extern "C" __attribute__((visibility("default"))) void Main(NativeChildProcess_A
 extern "C" __attribute__((visibility("default"))) int WinehuaVirgl_AttachSurfaceTarget(
     uint64_t surfaceKey, uint64_t framePeriodNs, uint32_t flags, OHNativeWindow* window)
 {
-    // In-process 模式下 window 由调用方 (renderer) 持有引用，
-    // g_presenters.Attach 只借用指针，无需额外 NativeObjectReference。
+    // GraphicsBroker transfers one dedicated NativeWindow reference on a
+    // successful in-process attach. g_presenters owns and releases it when
+    // the target is detached; the renderer retains the NativeImage reference.
     if (!window) return -1;
     return winehua::AttachVirglSurfaceTarget(surfaceKey, framePeriodNs, flags, window);
 }

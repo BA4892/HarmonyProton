@@ -1165,14 +1165,22 @@ export class SmokeRunner {
             /* Guest and Host map different shadow files. Functional probes use
              * explicit flush/invalidate for their tiny readback allocations. */
             'VN_WINEHUA_REMOTE_MEMORY_SYNC': '1',
+            /* The OHOS shadow-memory bridge requires Host-side fence polling;
+             * guest fence-feedback slots are not visible across the mappings. */
+            'VN_PERF': spec.id === 'venus-offscreen-x64' ?
+              'no_fence_feedback,no_query_feedback' : '',
             'WINEHUA_VKR_TRACE_PIPELINE':
               this.request.suite === 'venus-heaven-material-layout' ? '1' : '0',
             'VKR_WINEHUA_SHADOW_TRACE':
-              spec.id.indexOf('input-verify') >= 0 ? '1' : '0',
+              spec.id.indexOf('input-verify') >= 0 || spec.id === 'venus-offscreen-x64' ? '1' : '0',
             'BOX64_DYNAREC_WEAKBARRIER':
               spec.id.indexOf('input-verify') >= 0 ? '0' : '2',
             'VN_WINEHUA_STRONG_RING_BARRIER':
-              spec.id.indexOf('input-verify') >= 0 ? '1' : '0'
+              spec.id.indexOf('input-verify') >= 0 ? '1' : '0',
+            /* Diagnostic only: establish whether 920 misses the Host idle
+             * status and therefore omits the wake-up control command. */
+            'VN_WINEHUA_ALWAYS_NOTIFY_RING':
+              spec.id === 'venus-offscreen-x64' ? '1' : ''
           },
         workingDirectory: GUEST_VULKAN_ROOT,
         automationMode: true
@@ -1216,6 +1224,10 @@ export class SmokeRunner {
         'VK_DRIVER_FILES': guestVulkanIcd,
         'VK_ICD_FILENAMES': guestVulkanIcd,
         'VN_DEBUG': 'vtest',
+        /* Wine Vulkan uses the same Guest/Host shadow mappings as DXVK.
+         * Keep the B3 smoke on the real remote-memory path even though it
+         * selects WineD3D as its unrelated D3D backend. */
+        'VN_WINEHUA_REMOTE_MEMORY_SYNC': '1',
         /* Host GPU feedback lands in the Host side of WineHua's explicit
          * shadow mapping. Use the synchronous Host query path so a stale
          * Guest availability word cannot hide a valid query result. */
@@ -1272,6 +1284,8 @@ export class SmokeRunner {
           this.perfProfile === 'shadow-precise-dirty-ring-frame-assoc-trace' ||
           this.perfProfile === 'shadow-precise-dirty-ring-present-image-trace' ||
           this.perfProfile === 'shadow-precise-dirty-ring-perf' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-gpu-frame-profile' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-frame-timeline' ||
           this.perfProfile === 'shadow-precise-strong-ring-trace' ||
           this.perfProfile === 'shadow-precise-strong-ring-perf' ||
           this.perfProfile === 'shadow-precise-strong-ring-async-present' ||
@@ -1304,6 +1318,8 @@ export class SmokeRunner {
           this.perfProfile === 'shadow-precise-dirty-ring-frame-assoc-trace' ||
           this.perfProfile === 'shadow-precise-dirty-ring-present-image-trace' ||
           this.perfProfile === 'shadow-precise-dirty-ring-perf' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-gpu-frame-profile' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-frame-timeline' ||
             this.perfProfile === 'shadow-precise-strong-ring-trace' ||
             this.perfProfile === 'shadow-precise-strong-ring-perf' ||
             this.perfProfile === 'shadow-precise-strong-ring-async-present' ||
@@ -1319,6 +1335,8 @@ export class SmokeRunner {
             smokeEnvironment['WINEHUA_DXVK_TRACE_PRESENT_IMAGE'] = '1';
           if (this.perfProfile === 'shadow-precise-retain-shmem')
             smokeEnvironment['VN_WINEHUA_DEFER_SHMEM_UNREF'] = '1';
+          if (this.perfProfile === 'shadow-precise-cpu-upload')
+            smokeEnvironment['VKR_WINEHUA_GPU_UPLOAD'] = '0';
         }
         if (this.request.suite === 'dxvk-layout-general')
           smokeEnvironment['DXVK_WINEHUA_FORCE_SAMPLED_GENERAL'] = '1';
@@ -1421,7 +1439,15 @@ export class SmokeRunner {
     }
 
     const results: SmokeSuiteTestResult[] = [];
-    for (const spec of specs) results.push(await this.runOne(spec));
+    for (const spec of specs) {
+      const result = await this.runOne(spec);
+      results.push(result);
+      const diagnostic = (result.message || 'no diagnostic').replaceAll('\n', ' ')
+        .replaceAll('\r', ' ').substring(0, 512);
+      hilog.info(DOMAIN, "SmokeRunner",
+        "result run=%{public}s test=%{public}s status=%{public}s stage=%{public}s message=%{public}s",
+        this.request.runId, result.testId, result.status, result.stage, diagnostic);
+    }
     const passed = results.every((result) => result.status === 'PASS');
     const summary: SmokeSuiteSummary = {
       schemaVersion: 1,
@@ -1435,6 +1461,9 @@ export class SmokeRunner {
     const text = JSON.stringify(summary, null, 2);
     writeAtomic(`${stableDirectory}/suite-summary.json`, text);
     writeAtomic(`${this.resultDirectory}/suite-summary.json`, text);
+    hilog.info(DOMAIN, "SmokeRunner",
+      "summary run=%{public}s suite=%{public}s status=%{public}s tests=%{public}d",
+      this.request.runId, this.request.suite, summary.status, results.length);
     this.onStatus(passed ? 'Smoke: PASS' : 'Smoke: FAIL');
   }
 }

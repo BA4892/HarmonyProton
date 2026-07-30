@@ -1,5 +1,6 @@
 #include "virgl_surface_presenter.h"
 #include "venus_surface_presenter.h"
+#include "native_window_lease.h"
 
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
@@ -10,6 +11,8 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -27,6 +30,7 @@ constexpr uint64_t kDefaultFramePeriodNs = 16666667;
 constexpr uint64_t kMinFramePeriodNs = 4000000;
 constexpr uint64_t kMaxFramePeriodNs = 33333333;
 constexpr uint64_t kProducerDispatchLeadNs = 500000;
+constexpr auto kVenusTargetAttachTimeout = std::chrono::milliseconds(2500);
 
 uint64_t NormalizeFramePeriodNs(uint64_t framePeriodNs)
 {
@@ -52,6 +56,12 @@ uint64_t NowNs()
         SteadyClock::now().time_since_epoch()).count());
 }
 
+bool PresentPerfSummaryEnabled()
+{
+    const char* summary = std::getenv("WINEHUA_VTEST_PRESENT_PERF_SUMMARY");
+    return summary && summary[0] == '1' && !summary[1];
+}
+
 GLuint CompilePresentShader(GLenum type, const char* source)
 {
     GLuint shader = glCreateShader(type);
@@ -71,13 +81,15 @@ GLuint CompilePresentShader(GLenum type, const char* source)
 class SurfaceQueueTarget {
 public:
     int Attach(uint64_t surfaceKey, uint64_t framePeriodNs,
-               OHNativeWindow* window)
+               OHNativeWindow* window, bool releaseWindowWithUnreference)
     {
         if (!surfaceKey || !window) return -1;
         std::lock_guard<std::mutex> lock(mutex_);
         ResetGlLocked();
-        if (window_) OH_NativeWindow_DestroyNativeWindow(window_);
-        window_ = window;
+        windowLease_.Adopt(
+            window, releaseWindowWithUnreference
+                ? winehua::NativeWindowReleaseMode::UnreferenceNativeObject
+                : winehua::NativeWindowReleaseMode::DestroyParcelWindow);
         surfaceKey_ = surfaceKey;
         width_ = 0;
         height_ = 0;
@@ -92,7 +104,7 @@ public:
                     "[VIRGL-ZC][NCP] target attached surface_key=%{public}llu "
                     "window=%{public}p display_period_us=%{public}llu "
                     "pace_period_us=%{public}llu",
-                    static_cast<unsigned long long>(surfaceKey_), window_,
+                    static_cast<unsigned long long>(surfaceKey_), windowLease_.Get(),
                     static_cast<unsigned long long>(displayPeriodNs_ / 1000),
                     static_cast<unsigned long long>(framePeriodNs_ / 1000));
         return 0;
@@ -139,7 +151,7 @@ public:
             glIsTexture(texture) == GL_TRUE;
         GLsync sourceReady = nullptr;
 
-        if (!window_) return -2;
+        if (!windowLease_) return -2;
         if (!sourceVisible) return -3;
         const uint64_t nowNs = NowNs();
         if (width_ == width && height_ == height && lastPresentNs_ &&
@@ -183,7 +195,7 @@ public:
         glUniform1i(textureLocation_, 0);
         const uint64_t frameTimestamp = NowNs();
         const int32_t timestampResult = OH_NativeWindow_NativeWindowHandleOpt(
-            window_, SET_UI_TIMESTAMP, frameTimestamp);
+            windowLease_.Get(), SET_UI_TIMESTAMP, frameTimestamp);
         if (timestampResult != 0)
         {
             ++timestampFailures_;
@@ -217,7 +229,8 @@ public:
         ++frames_;
         if (nextPresentDeadlineNs)
             *nextPresentDeadlineNs = lastPresentNs_ + framePeriodNs_;
-        if (frames_ == 1 || frames_ % 120 == 0)
+        if (PresentPerfSummaryEnabled() &&
+            (frames_ == 1 || frames_ % 120 == 0))
         {
             OH_LOG_INFO(LOG_APP,
                         "[VIRGL-ZC][NCP] blit frames=%{public}llu surface_key=%{public}llu "
@@ -252,18 +265,19 @@ private:
         if (context_ != EGL_NO_CONTEXT && surface_ != EGL_NO_SURFACE) return true;
 
         if (OH_NativeWindow_NativeWindowHandleOpt(
-                window_, SET_BUFFER_GEOMETRY,
+                windowLease_.Get(), SET_BUFFER_GEOMETRY,
                 static_cast<int32_t>(width), static_cast<int32_t>(height)) != 0)
             return false;
         OH_NativeWindow_NativeWindowHandleOpt(
-            window_, SET_FORMAT, NATIVEBUFFER_PIXEL_FMT_RGBA_8888);
+            windowLease_.Get(), SET_FORMAT, NATIVEBUFFER_PIXEL_FMT_RGBA_8888);
         OH_NativeWindow_NativeWindowHandleOpt(
-            window_, SET_USAGE,
+            windowLease_.Get(), SET_USAGE,
             static_cast<uint64_t>(NATIVEBUFFER_USAGE_HW_RENDER | NATIVEBUFFER_USAGE_HW_TEXTURE));
         const int32_t timeoutResult = OH_NativeWindow_NativeWindowHandleOpt(
-            window_, SET_TIMEOUT, static_cast<int32_t>(0));
+            windowLease_.Get(), SET_TIMEOUT, static_cast<int32_t>(0));
         int32_t queueSize = 0;
-        OH_NativeWindow_NativeWindowHandleOpt(window_, GET_BUFFERQUEUE_SIZE, &queueSize);
+        OH_NativeWindow_NativeWindowHandleOpt(
+            windowLease_.Get(), GET_BUFFERQUEUE_SIZE, &queueSize);
         OH_LOG_INFO(LOG_APP,
                     "[VIRGL-ZC][NCP] window configured size=%{public}ux%{public}u "
                     "queue=%{public}d timeout_ms=0 timeout_ret=%{public}d",
@@ -289,7 +303,8 @@ private:
             sourceDisplay, config, sourceContext, contextAttributes);
         if (context == EGL_NO_CONTEXT) return false;
         EGLSurface surface = eglCreateWindowSurface(
-            sourceDisplay, config, reinterpret_cast<EGLNativeWindowType>(window_), nullptr);
+            sourceDisplay, config,
+            reinterpret_cast<EGLNativeWindowType>(windowLease_.Get()), nullptr);
         if (surface == EGL_NO_SURFACE)
         {
             eglDestroyContext(sourceDisplay, context);
@@ -402,13 +417,17 @@ void main() { outColor = texture(uTexture, vTexCoord); }
     void ResetLocked()
     {
         ResetGlLocked();
-        if (window_) OH_NativeWindow_DestroyNativeWindow(window_);
-        window_ = nullptr;
+        ReleaseWindowLocked();
         surfaceKey_ = 0;
     }
 
+    void ReleaseWindowLocked()
+    {
+        windowLease_.Reset();
+    }
+
     std::mutex mutex_;
-    OHNativeWindow* window_ = nullptr;
+    winehua::NativeWindowLease windowLease_;
     uint64_t surfaceKey_ = 0;
     EGLDisplay display_ = EGL_NO_DISPLAY;
     EGLContext context_ = EGL_NO_CONTEXT;
@@ -436,22 +455,36 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         auto& entry = surfaces_[surfaceKey];
         entry.missingTargetLogged = false;
-        entry.info.flags = (entry.info.flags & ~winehua::virgl_ipc::kSurfaceVulkan) |
-                           (flags & winehua::virgl_ipc::kSurfaceVulkan);
+        const bool releaseWindowWithUnreference =
+            (flags & winehua::virgl_ipc::kSurfaceNativeObjectReference) != 0;
+        entry.info.flags =
+            (entry.info.flags & ~(winehua::virgl_ipc::kSurfaceVulkan |
+                                  winehua::virgl_ipc::kSurfaceAttached)) |
+            (flags & winehua::virgl_ipc::kSurfaceVulkan);
         int result;
         if (entry.info.flags & winehua::virgl_ipc::kSurfaceVulkan)
         {
-            if (!entry.venusTarget)
-                entry.venusTarget = std::make_unique<winehua::VenusSurfaceQueueTarget>();
-            result = entry.venusTarget->Attach(surfaceKey, framePeriodNs, window);
+            if (entry.virglTarget) {
+                entry.virglTarget->Detach(surfaceKey);
+                entry.virglTarget.reset();
+            }
+            RetireVenusTargetLocked(surfaceKey, entry.venusTarget);
+            entry.venusTarget = std::make_unique<winehua::VenusSurfaceQueueTarget>();
+            result = entry.venusTarget->Attach(surfaceKey, framePeriodNs, window,
+                                                releaseWindowWithUnreference);
         }
         else
         {
+            RetireVenusTargetLocked(surfaceKey, entry.venusTarget);
             if (!entry.virglTarget)
                 entry.virglTarget = std::make_unique<SurfaceQueueTarget>();
-            result = entry.virglTarget->Attach(surfaceKey, framePeriodNs, window);
+            result = entry.virglTarget->Attach(surfaceKey, framePeriodNs, window,
+                                               releaseWindowWithUnreference);
         }
-        if (result == 0) entry.info.flags |= winehua::virgl_ipc::kSurfaceAttached;
+        if (result == 0) {
+            entry.info.flags |= winehua::virgl_ipc::kSurfaceAttached;
+            targetCondition_.notify_all();
+        }
         return result;
     }
 
@@ -461,9 +494,64 @@ public:
         auto it = surfaces_.find(surfaceKey);
         if (it == surfaces_.end()) return 0;
         if (it->second.virglTarget) it->second.virglTarget->Detach(surfaceKey);
-        if (it->second.venusTarget) it->second.venusTarget->Detach(surfaceKey);
+        RetireVenusTargetLocked(surfaceKey, it->second.venusTarget);
+        ++surfaceGenerations_[surfaceKey];
         surfaces_.erase(it);
+        targetCondition_.notify_all();
         return 0;
+    }
+
+    int PrepareVenusDeviceRelease(uint32_t contextId, uintptr_t device)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        int matches = 0;
+        for (auto& [surfaceKey, entry] : surfaces_)
+        {
+            static_cast<void>(surfaceKey);
+            if (entry.venusTarget &&
+                entry.venusTarget->PrepareDeviceRelease(contextId, device))
+                ++matches;
+        }
+        for (auto& target : retiredVenusTargets_)
+        {
+            if (target->PrepareDeviceRelease(contextId, device)) ++matches;
+        }
+        OH_LOG_INFO(LOG_APP,
+                    "[VENUS-PRESENT][NCP] device release prepare complete "
+                    "ctx=%{public}u device=0x%{public}llx targets=%{public}d",
+                    contextId, static_cast<unsigned long long>(device), matches);
+        return matches;
+    }
+
+    int FinishVenusDeviceRelease(uint32_t contextId, uintptr_t device,
+                                 int32_t waitResult)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        int matches = 0;
+        for (auto& [surfaceKey, entry] : surfaces_)
+        {
+            static_cast<void>(surfaceKey);
+            if (entry.venusTarget && entry.venusTarget->FinishDeviceRelease(
+                    contextId, device, waitResult))
+                ++matches;
+        }
+        for (auto& target : retiredVenusTargets_)
+        {
+            if (target->FinishDeviceRelease(contextId, device, waitResult)) ++matches;
+        }
+        retiredVenusTargets_.erase(
+            std::remove_if(retiredVenusTargets_.begin(), retiredVenusTargets_.end(),
+                           [](const auto& target) {
+                               return !target->HasVulkanDevice();
+                           }),
+            retiredVenusTargets_.end());
+        OH_LOG_INFO(LOG_APP,
+                    "[VENUS-PRESENT][NCP] device release after-wait complete "
+                    "ctx=%{public}u device=0x%{public}llx wait_result=%{public}d "
+                    "targets=%{public}d",
+                    contextId, static_cast<unsigned long long>(device),
+                    waitResult, matches);
+        return matches;
     }
 
     int SetFramePeriod(uint64_t surfaceKey, uint64_t framePeriodNs)
@@ -522,7 +610,7 @@ public:
         if (!clientPid || !surfaceId) return -EINVAL;
         const uint64_t surfaceKey =
             (static_cast<uint64_t>(clientPid) << 32) | surfaceId;
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         auto& entry = surfaces_[surfaceKey];
         if (entry.virglTarget) return -EINVAL;
         entry.info.surfaceKey = surfaceKey;
@@ -533,7 +621,13 @@ public:
         entry.info.serial = serial;
         entry.info.flags |= winehua::virgl_ipc::kSurfaceVulkan;
         entry.lastPresentUs = NowUs();
-        if (!entry.venusTarget) {
+        const auto targetReady = [this, surfaceKey]() {
+            const auto it = surfaces_.find(surfaceKey);
+            return it != surfaces_.end() && it->second.venusTarget &&
+                   (it->second.info.flags &
+                    winehua::virgl_ipc::kSurfaceAttached);
+        };
+        if (!targetReady()) {
             if (!entry.missingTargetLogged) {
                 entry.missingTargetLogged = true;
                 OH_LOG_WARN(LOG_APP,
@@ -542,9 +636,37 @@ public:
                             static_cast<unsigned long long>(surfaceKey),
                             contextId, clientPid, surfaceId);
             }
-            return -EAGAIN;
+            const uint64_t generation = surfaceGenerations_[surfaceKey];
+            const auto waitStart = SteadyClock::now();
+            targetCondition_.wait_for(
+                lock, kVenusTargetAttachTimeout,
+                [this, surfaceKey, generation, &targetReady]() {
+                    return targetReady() ||
+                           surfaceGenerations_[surfaceKey] != generation;
+                });
+            const uint64_t waitedUs = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    SteadyClock::now() - waitStart).count());
+            if (!targetReady()) {
+                OH_LOG_WARN(LOG_APP,
+                            "[VENUS-PRESENT][NCP] target wait ended key=%{public}llu "
+                            "ctx=%{public}u waited_us=%{public}llu reason=%{public}s",
+                            static_cast<unsigned long long>(surfaceKey), contextId,
+                            static_cast<unsigned long long>(waitedUs),
+                            surfaceGenerations_[surfaceKey] != generation
+                                ? "detached" : "timeout");
+                return -EAGAIN;
+            }
+            OH_LOG_INFO(LOG_APP,
+                        "[VENUS-PRESENT][NCP] target ready key=%{public}llu "
+                        "ctx=%{public}u waited_us=%{public}llu",
+                        static_cast<unsigned long long>(surfaceKey), contextId,
+                        static_cast<unsigned long long>(waitedUs));
         }
-        return entry.venusTarget->Present(
+        auto readyIt = surfaces_.find(surfaceKey);
+        if (readyIt == surfaces_.end() || !readyIt->second.venusTarget)
+            return -EAGAIN;
+        return readyIt->second.venusTarget->Present(
             contextId, instance, physicalDevice, device, queue, image,
             queueFamily, width, height, format, layout, serial,
             nextPresentDeadlineNs, releaseQueue, queueSyncData);
@@ -594,12 +716,26 @@ public:
         for (auto& [surfaceKey, entry] : surfaces_)
         {
             if (entry.virglTarget) entry.virglTarget->Detach(surfaceKey);
-            if (entry.venusTarget) entry.venusTarget->Detach(surfaceKey);
+            RetireVenusTargetLocked(surfaceKey, entry.venusTarget);
+            ++surfaceGenerations_[surfaceKey];
         }
         surfaces_.clear();
+        targetCondition_.notify_all();
     }
 
 private:
+    void RetireVenusTargetLocked(
+        uint64_t surfaceKey,
+        std::unique_ptr<winehua::VenusSurfaceQueueTarget>& target)
+    {
+        if (!target) return;
+        target->Detach(surfaceKey);
+        if (target->HasVulkanDevice())
+            retiredVenusTargets_.push_back(std::move(target));
+        else
+            target.reset();
+    }
+
     struct Entry {
         winehua::virgl_ipc::SurfaceInfo info;
         std::unique_ptr<SurfaceQueueTarget> virglTarget;
@@ -609,7 +745,11 @@ private:
     };
 
     mutable std::mutex mutex_;
+    std::condition_variable targetCondition_;
     std::unordered_map<uint64_t, Entry> surfaces_;
+    std::unordered_map<uint64_t, uint64_t> surfaceGenerations_;
+    std::vector<std::unique_ptr<winehua::VenusSurfaceQueueTarget>>
+        retiredVenusTargets_;
 };
 
 SurfaceQueuePresenterManager g_presenters;
@@ -666,6 +806,18 @@ int PresentVenusSurface(uint32_t contextId,
         contextId, instance, physicalDevice, device, queue, image,
         queueFamily, width, height, format, layout, clientPid, surfaceId,
         serial, nextPresentDeadlineNs, releaseQueue, queueSyncData);
+}
+
+int PrepareVenusDeviceRelease(uint32_t contextId, uintptr_t device)
+{
+    return g_presenters.PrepareVenusDeviceRelease(contextId, device);
+}
+
+int FinishVenusDeviceRelease(uint32_t contextId, uintptr_t device,
+                             int32_t waitResult)
+{
+    return g_presenters.FinishVenusDeviceRelease(
+        contextId, device, waitResult);
 }
 
 virgl_ipc::SurfaceQueryReply QueryVirglSurfaces()

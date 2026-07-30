@@ -15,9 +15,14 @@ public:
     VenusSurfaceQueueTarget(const VenusSurfaceQueueTarget&) = delete;
     VenusSurfaceQueueTarget& operator=(const VenusSurfaceQueueTarget&) = delete;
 
-    int Attach(uint64_t surfaceKey, uint64_t framePeriodNs, OHNativeWindow* window);
+    int Attach(uint64_t surfaceKey, uint64_t framePeriodNs, OHNativeWindow* window,
+               bool releaseWindowWithUnreference);
     int Detach(uint64_t surfaceKey);
     int SetFramePeriod(uint64_t framePeriodNs);
+    bool HasVulkanDevice();
+    bool PrepareDeviceRelease(uint32_t contextId, uintptr_t device);
+    bool FinishDeviceRelease(uint32_t contextId, uintptr_t device,
+                             int32_t waitResult);
     int Present(uint32_t contextId,
                 uintptr_t instance,
                 uintptr_t physicalDevice,

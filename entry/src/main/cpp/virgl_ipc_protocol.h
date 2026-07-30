@@ -5,8 +5,9 @@
 namespace winehua::virgl_ipc {
 
 constexpr uint32_t kMagic = 0x57484950; // "WHIP"
-constexpr int32_t kProtocolVersion = 7;
+constexpr int32_t kProtocolVersion = 9;
 constexpr uint32_t kMaxSurfaces = 16;
+constexpr uint32_t kHostConfigStringCount = 11;
 
 enum RequestCode : uint32_t {
     kConfigureRequest = 1,
@@ -20,6 +21,10 @@ enum RequestCode : uint32_t {
 enum SurfaceFlags : uint32_t {
     kSurfaceAttached = 1u << 0,
     kSurfaceVulkan = 1u << 1,
+    // Private attach-only flag. The phone process passes an additional native
+    // object reference; it must be paired with NativeObjectUnreference rather
+    // than the DestroyNativeWindow ownership used by the NCP parcel path.
+    kSurfaceNativeObjectReference = 1u << 2,
 };
 
 struct SurfaceInfo {

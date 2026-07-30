@@ -35,12 +35,15 @@ void DispatchLoop(int fd, PhoneVirglHandler handler) {
         if (ok) {
             switch (code) {
             case vi::kConfigureRequest: {
-                int32_t version = 0; std::string s[5];
+                int32_t version = 0;
+                std::string s[vi::kHostConfigStringCount];
                 ok = sock::SockReadPod(fd, version);
-                for (int i = 0; ok && i < 5; ++i) ok = sock::SockReadStr(fd, s[i]);
+                for (uint32_t i = 0; ok && i < vi::kHostConfigStringCount; ++i)
+                    ok = sock::SockReadStr(fd, s[i]);
                 if (ok) {
                     OH_IPCParcel_WriteInt32(data, version);
-                    for (int i = 0; i < 5; ++i) OH_IPCParcel_WriteString(data, s[i].c_str());
+                    for (uint32_t i = 0; i < vi::kHostConfigStringCount; ++i)
+                        OH_IPCParcel_WriteString(data, s[i].c_str());
                 }
                 break;
             }

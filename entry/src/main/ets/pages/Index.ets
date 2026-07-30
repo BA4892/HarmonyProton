@@ -317,6 +317,14 @@ struct Index {
     }
     // 超时，仍然尝试刷新一次
     this.refreshPrefix();
+    if (this.prefixReady) {
+      this.initOverlayVisible = false;
+      this.startRequestedSmoke();
+      this.startRequestedGame();
+    } else {
+      this.setInitStatus('Wine 前缀初始化超时', false);
+      hilog.error(DOMAIN, 'wine', 'prefix remained unavailable after initialization timeout');
+    }
   }
 
   private refreshProcessList = (): void => {
@@ -483,6 +491,8 @@ struct Index {
         environment['WINEHUA_DXVK_TRACE_PRESENT_IMAGE'] = '1';
       if (this.perfProfileText === 'shadow-precise-retain-shmem')
         environment['VN_WINEHUA_DEFER_SHMEM_UNREF'] = '1';
+      if (this.perfProfileText === 'shadow-precise-cpu-upload')
+        environment['VKR_WINEHUA_GPU_UPLOAD'] = '0';
     }
     const overrideCount = Math.min(this.d3dEnvKeys.length, this.d3dEnvValues.length);
     for (let index = 0; index < overrideCount; ++index) {

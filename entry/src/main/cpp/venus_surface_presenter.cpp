@@ -1,6 +1,7 @@
 #define VK_USE_PLATFORM_OHOS 1
 
 #include "venus_surface_presenter.h"
+#include "native_window_lease.h"
 
 #include <hilog/log.h>
 #include <native_buffer/native_buffer.h>
@@ -92,6 +93,12 @@ bool GpuFrameProfileEnabled()
     return profile && profile[0] == '1' && !profile[1];
 }
 
+bool PresentPerfSummaryEnabled()
+{
+    const char* summary = std::getenv("WINEHUA_VTEST_PRESENT_PERF_SUMMARY");
+    return summary && summary[0] == '1' && !summary[1];
+}
+
 /* This is deliberately a presenter-only timestamp, not a scene GPU timer.
  * Sample it sparsely so the timeline profile retains the production path on
  * all ordinary frames. */
@@ -167,14 +174,20 @@ struct VenusSurfaceQueueTarget::Impl {
         VkQueryPool gpuTiming = VK_NULL_HANDLE;
     };
 
-    int Attach(uint64_t surfaceKey, uint64_t framePeriodNs, OHNativeWindow* window)
+    int Attach(uint64_t surfaceKey, uint64_t framePeriodNs, OHNativeWindow* window,
+               bool releaseWindowWithUnreference)
     {
         if (!surfaceKey || !window) return -EINVAL;
         std::lock_guard<std::mutex> lock(mutex_);
-        DestroyVulkanLocked(true);
-        if (window_) OH_NativeWindow_DestroyNativeWindow(window_);
-        window_ = window;
+        if (device_) return -EBUSY;
+        ReleaseWindowLocked();
+        windowLease_.Adopt(
+            window, releaseWindowWithUnreference
+                ? NativeWindowReleaseMode::UnreferenceNativeObject
+                : NativeWindowReleaseMode::DestroyParcelWindow);
         surfaceKey_ = surfaceKey;
+        surfaceAttached_ = true;
+        deviceReleasing_ = false;
         displayPeriodNs_ = NormalizeFramePeriodNs(framePeriodNs);
         framePeriodNs_ = PacingPeriodNs(displayPeriodNs_);
         lastPresentNs_ = 0;
@@ -199,7 +212,7 @@ struct VenusSurfaceQueueTarget::Impl {
         OH_LOG_INFO(LOG_APP,
                     "[VENUS-PRESENT][NCP] target attached key=%{public}llu "
                     "window=%{public}p display_period_us=%{public}llu",
-                    static_cast<unsigned long long>(surfaceKey_), window_,
+                    static_cast<unsigned long long>(surfaceKey_), windowLease_.Get(),
                     static_cast<unsigned long long>(displayPeriodNs_ / 1000));
         return 0;
     }
@@ -208,12 +221,24 @@ struct VenusSurfaceQueueTarget::Impl {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (surfaceKey_ && surfaceKey && surfaceKey_ != surfaceKey) return -EINVAL;
-        DestroyVulkanLocked(true);
-        if (window_) OH_NativeWindow_DestroyNativeWindow(window_);
-        window_ = nullptr;
-        surfaceKey_ = 0;
-        OH_LOG_INFO(LOG_APP, "[VENUS-PRESENT][NCP] target detached key=%{public}llu",
-                    static_cast<unsigned long long>(surfaceKey));
+        OH_LOG_INFO(LOG_APP,
+                    "[VENUS-PRESENT][NCP] detach begin key=%{public}llu window=%{public}p "
+                    "device=%{public}p swapchain=%{public}p surface=%{public}p",
+                    static_cast<unsigned long long>(surfaceKey), windowLease_.Get(),
+                    device_, swapchain_, surface_);
+        surfaceAttached_ = false;
+        if (!device_) {
+            ReleaseWindowLocked();
+            surfaceKey_ = 0;
+            OH_LOG_INFO(LOG_APP,
+                        "[VENUS-PRESENT][NCP] target detached key=%{public}llu",
+                        static_cast<unsigned long long>(surfaceKey));
+        } else {
+            OH_LOG_INFO(LOG_APP,
+                        "[VENUS-PRESENT][NCP] target detach deferred to device owner "
+                        "key=%{public}llu ctx=%{public}u device=%{public}p",
+                        static_cast<unsigned long long>(surfaceKey), contextId_, device_);
+        }
         return 0;
     }
 
@@ -223,6 +248,44 @@ struct VenusSurfaceQueueTarget::Impl {
         displayPeriodNs_ = NormalizeFramePeriodNs(framePeriodNs);
         framePeriodNs_ = PacingPeriodNs(displayPeriodNs_);
         return 0;
+    }
+
+    bool HasVulkanDevice()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return device_ != VK_NULL_HANDLE;
+    }
+
+    bool PrepareDeviceRelease(uint32_t contextId, uintptr_t device)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!MatchesDeviceLocked(contextId, device)) return false;
+        deviceReleasing_ = true;
+        OH_LOG_INFO(LOG_APP,
+                    "[VENUS-PRESENT][NCP] device release prepare key=%{public}llu "
+                    "ctx=%{public}u device=%{public}p attached=%{public}d",
+                    static_cast<unsigned long long>(surfaceKey_), contextId,
+                    device_, surfaceAttached_);
+        return true;
+    }
+
+    bool FinishDeviceRelease(uint32_t contextId, uintptr_t device,
+                             int32_t waitResult)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!MatchesDeviceLocked(contextId, device)) return false;
+        OH_LOG_INFO(LOG_APP,
+                    "[VENUS-PRESENT][NCP] device release after-wait key=%{public}llu "
+                    "ctx=%{public}u device=%{public}p wait_result=%{public}d",
+                    static_cast<unsigned long long>(surfaceKey_), contextId,
+                    device_, waitResult);
+        DestroyVulkanLocked();
+        deviceReleasing_ = false;
+        if (!surfaceAttached_) {
+            ReleaseWindowLocked();
+            surfaceKey_ = 0;
+        }
+        return true;
     }
 
     int Present(uint32_t contextId,
@@ -245,10 +308,11 @@ struct VenusSurfaceQueueTarget::Impl {
         const uint64_t presentStartNs = NowNs();
         TracePresentStage("enter", serial, image);
         if (nextPresentDeadlineNs) *nextPresentDeadlineNs = 0;
-        if (!window_) {
+        if (!surfaceAttached_ || !windowLease_) {
             OH_LOG_ERROR(LOG_APP, "[VENUS-PRESENT][NCP] present no window");
             return -EAGAIN;
         }
+        if (deviceReleasing_) return -ENODEV;
 
         const uint64_t nowNs = NowNs();
         if (lastPresentNs_ && nowNs - lastPresentNs_ < framePeriodNs_) {
@@ -267,8 +331,11 @@ struct VenusSurfaceQueueTarget::Impl {
         const VkFormat sourceFormat = static_cast<VkFormat>(format);
         const VkImageLayout sourceLayout = static_cast<VkImageLayout>(layout);
         int initError = 0;
-        if (!EnsureVulkanLocked(hostInstance, hostPhysical, hostDevice, hostQueue,
-                                queueFamily, width, height, sourceFormat, initError)) {
+        if (device_ && (contextId_ != contextId || device_ != hostDevice))
+            return -EAGAIN;
+        if (!EnsureVulkanLocked(contextId, hostInstance, hostPhysical, hostDevice,
+                                hostQueue, queueFamily, width, height,
+                                sourceFormat, initError)) {
             ++failures_;
             return initError ? initError : -EIO;
         }
@@ -432,7 +499,8 @@ struct VenusSurfaceQueueTarget::Impl {
         if (result != VK_SUCCESS) return FailLocked("end command", result, serial);
 
         const uint64_t timestamp = NowNs();
-        OH_NativeWindow_NativeWindowHandleOpt(window_, SET_UI_TIMESTAMP, timestamp);
+        OH_NativeWindow_NativeWindowHandleOpt(
+            windowLease_.Get(), SET_UI_TIMESTAMP, timestamp);
         VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
         VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         submit.waitSemaphoreCount = 1;
@@ -591,7 +659,8 @@ struct VenusSurfaceQueueTarget::Impl {
                         static_cast<unsigned long long>(timestamp));
         }
         TracePresentStage("published", serial, image);
-        if (framesPresented_ == 1 || !(framesPresented_ % 120)) {
+        if (PresentPerfSummaryEnabled() &&
+            (framesPresented_ == 1 || !(framesPresented_ % 120))) {
             const uint64_t elapsedNs = frameEndNs - firstPresentedNs_;
             const uint64_t fpsX100 = elapsedNs && framesPresented_ > 1
                 ? ((framesPresented_ - 1) * 100ULL * 1000000000ULL) / elapsedNs
@@ -645,8 +714,14 @@ struct VenusSurfaceQueueTarget::Impl {
     ~Impl()
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        DestroyVulkanLocked(true);
-        if (window_) OH_NativeWindow_DestroyNativeWindow(window_);
+        if (device_) {
+            OH_LOG_WARN(LOG_APP,
+                        "[VENUS-PRESENT][NCP] abandoning presenter objects without "
+                        "device-owner callback key=%{public}llu ctx=%{public}u device=%{public}p",
+                        static_cast<unsigned long long>(surfaceKey_), contextId_, device_);
+            ClearVulkanStateLocked();
+        }
+        ReleaseWindowLocked();
     }
 
 private:
@@ -663,7 +738,8 @@ private:
         return result == VK_ERROR_DEVICE_LOST ? -ENODEV : -EIO;
     }
 
-    bool EnsureVulkanLocked(VkInstance instance,
+    bool EnsureVulkanLocked(uint32_t contextId,
+                            VkInstance instance,
                             VkPhysicalDevice physicalDevice,
                             VkDevice device,
                             VkQueue queue,
@@ -673,7 +749,8 @@ private:
                             VkFormat sourceFormat,
                             int& error)
     {
-        const bool sameSource = instance_ == instance && physicalDevice_ == physicalDevice &&
+        const bool sameSource = contextId_ == contextId &&
+            instance_ == instance && physicalDevice_ == physicalDevice &&
             device_ == device && queue_ == queue && queueFamily_ == queueFamily &&
             sourceWidth_ == width && sourceHeight_ == height &&
             sourceFormat_ == sourceFormat;
@@ -683,7 +760,8 @@ private:
          * The dirty path has already waited for the per-frame fence and has
          * no newly acquired image, so it must not perform an unbounded
          * vkQueueWaitIdle during recovery. */
-        DestroyVulkanLocked(!swapchainDirty_);
+        DestroyVulkanLocked();
+        contextId_ = contextId;
         instance_ = instance;
         physicalDevice_ = physicalDevice;
         device_ = device;
@@ -700,16 +778,16 @@ private:
         }
 
         OH_NativeWindow_NativeWindowHandleOpt(
-            window_, SET_BUFFER_GEOMETRY,
+            windowLease_.Get(), SET_BUFFER_GEOMETRY,
             static_cast<int32_t>(width), static_cast<int32_t>(height));
         OH_NativeWindow_NativeWindowHandleOpt(
-            window_, SET_USAGE,
+            windowLease_.Get(), SET_USAGE,
             static_cast<uint64_t>(NATIVEBUFFER_USAGE_HW_RENDER |
                                   NATIVEBUFFER_USAGE_HW_TEXTURE));
-        OH_NativeWindow_NativeWindowHandleOpt(window_, SET_TIMEOUT, 0);
+        OH_NativeWindow_NativeWindowHandleOpt(windowLease_.Get(), SET_TIMEOUT, 0);
 
         VkSurfaceCreateInfoOHOS surfaceInfo{VK_STRUCTURE_TYPE_SURFACE_CREATE_INFO_OHOS};
-        surfaceInfo.window = window_;
+        surfaceInfo.window = windowLease_.Get();
         VkResult result = vkCreateSurfaceOHOS(instance_, &surfaceInfo, nullptr, &surface_);
         if (result != VK_SUCCESS) {
             error = -ENOTSUP;
@@ -965,9 +1043,14 @@ private:
         return true;
     }
 
-    void DestroyVulkanLocked(bool waitQueue)
+    bool MatchesDeviceLocked(uint32_t contextId, uintptr_t device) const
     {
-        if (waitQueue && device_ && queue_) vkQueueWaitIdle(queue_);
+        return contextId_ == contextId && device_ != VK_NULL_HANDLE &&
+            reinterpret_cast<uintptr_t>(device_) == device;
+    }
+
+    void DestroyVulkanLocked()
+    {
         if (device_) {
             for (auto& frame : frames_) {
                 if (frame.gpuTiming) vkDestroyQueryPool(device_, frame.gpuTiming, nullptr);
@@ -978,9 +1061,26 @@ private:
                 if (semaphore) vkDestroySemaphore(device_, semaphore, nullptr);
             }
             if (commandPool_) vkDestroyCommandPool(device_, commandPool_, nullptr);
-            if (swapchain_) vkDestroySwapchainKHR(device_, swapchain_, nullptr);
+            if (swapchain_) {
+                OH_LOG_INFO(LOG_APP, "[VENUS-PRESENT][NCP] destroy swapchain begin key=%{public}llu",
+                            static_cast<unsigned long long>(surfaceKey_));
+                vkDestroySwapchainKHR(device_, swapchain_, nullptr);
+                OH_LOG_INFO(LOG_APP, "[VENUS-PRESENT][NCP] destroy swapchain end key=%{public}llu",
+                            static_cast<unsigned long long>(surfaceKey_));
+            }
         }
-        if (instance_ && surface_) vkDestroySurfaceKHR(instance_, surface_, nullptr);
+        if (instance_ && surface_) {
+            OH_LOG_INFO(LOG_APP, "[VENUS-PRESENT][NCP] destroy surface begin key=%{public}llu",
+                        static_cast<unsigned long long>(surfaceKey_));
+            vkDestroySurfaceKHR(instance_, surface_, nullptr);
+            OH_LOG_INFO(LOG_APP, "[VENUS-PRESENT][NCP] destroy surface end key=%{public}llu",
+                        static_cast<unsigned long long>(surfaceKey_));
+        }
+        ClearVulkanStateLocked();
+    }
+
+    void ClearVulkanStateLocked()
+    {
         frames_.clear();
         renderFinished_.clear();
         targetInitialized_.clear();
@@ -988,6 +1088,7 @@ private:
         commandPool_ = VK_NULL_HANDLE;
         swapchain_ = VK_NULL_HANDLE;
         surface_ = VK_NULL_HANDLE;
+        contextId_ = 0;
         instance_ = VK_NULL_HANDLE;
         physicalDevice_ = VK_NULL_HANDLE;
         device_ = VK_NULL_HANDLE;
@@ -1005,11 +1106,36 @@ private:
         gpuTimingRequested_ = false;
         gpuTimingEnabled_ = false;
         timestampPeriodNs_ = 0.0f;
+        swapchainDirty_ = false;
+    }
+
+    void ReleaseWindowLocked()
+    {
+        if (!windowLease_) return;
+        const bool unreference = windowLease_.UsesNativeObjectReference();
+        if (unreference) {
+            OH_LOG_INFO(LOG_APP,
+                        "[VENUS-PRESENT][NCP] detach window-unreference begin key=%{public}llu",
+                        static_cast<unsigned long long>(surfaceKey_));
+            const int32_t result = windowLease_.Reset();
+            OH_LOG_INFO(LOG_APP,
+                        "[VENUS-PRESENT][NCP] detach window-unreference end key=%{public}llu result=%{public}d",
+                        static_cast<unsigned long long>(surfaceKey_), result);
+        } else {
+            OH_LOG_INFO(LOG_APP, "[VENUS-PRESENT][NCP] detach window-destroy begin key=%{public}llu",
+                        static_cast<unsigned long long>(surfaceKey_));
+            windowLease_.Reset();
+            OH_LOG_INFO(LOG_APP, "[VENUS-PRESENT][NCP] detach window-destroy end key=%{public}llu",
+                        static_cast<unsigned long long>(surfaceKey_));
+        }
     }
 
     std::mutex mutex_;
-    OHNativeWindow* window_ = nullptr;
+    NativeWindowLease windowLease_;
     uint64_t surfaceKey_ = 0;
+    uint32_t contextId_ = 0;
+    bool surfaceAttached_ = false;
+    bool deviceReleasing_ = false;
     VkInstance instance_ = VK_NULL_HANDLE;
     VkPhysicalDevice physicalDevice_ = VK_NULL_HANDLE;
     VkDevice device_ = VK_NULL_HANDLE;
@@ -1066,9 +1192,10 @@ VenusSurfaceQueueTarget::VenusSurfaceQueueTarget()
 VenusSurfaceQueueTarget::~VenusSurfaceQueueTarget() = default;
 
 int VenusSurfaceQueueTarget::Attach(uint64_t surfaceKey, uint64_t framePeriodNs,
-                                    OHNativeWindow* window)
+                                    OHNativeWindow* window,
+                                    bool releaseWindowWithUnreference)
 {
-    return impl_->Attach(surfaceKey, framePeriodNs, window);
+    return impl_->Attach(surfaceKey, framePeriodNs, window, releaseWindowWithUnreference);
 }
 
 int VenusSurfaceQueueTarget::Detach(uint64_t surfaceKey)
@@ -1079,6 +1206,24 @@ int VenusSurfaceQueueTarget::Detach(uint64_t surfaceKey)
 int VenusSurfaceQueueTarget::SetFramePeriod(uint64_t framePeriodNs)
 {
     return impl_->SetFramePeriod(framePeriodNs);
+}
+
+bool VenusSurfaceQueueTarget::HasVulkanDevice()
+{
+    return impl_->HasVulkanDevice();
+}
+
+bool VenusSurfaceQueueTarget::PrepareDeviceRelease(uint32_t contextId,
+                                                   uintptr_t device)
+{
+    return impl_->PrepareDeviceRelease(contextId, device);
+}
+
+bool VenusSurfaceQueueTarget::FinishDeviceRelease(uint32_t contextId,
+                                                  uintptr_t device,
+                                                  int32_t waitResult)
+{
+    return impl_->FinishDeviceRelease(contextId, device, waitResult);
 }
 
 int VenusSurfaceQueueTarget::Present(uint32_t contextId,

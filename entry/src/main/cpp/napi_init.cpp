@@ -233,6 +233,18 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
     const char* presentMode = mailboxPresent ? "mailbox" :
         (asyncPresent ? "fifo-async" : (pollPresent ? "fifo-poll" : "fifo"));
     setenv("WINEHUA_VENUS_PRESENT_MODE", presentMode, 1);
+    /* Keep the App-side control plane separate from renderer environment.
+     * Phone hosts run in this process, so virgl_child's derived renderer
+     * settings must not change the profile observed by a later EnsureStarted. */
+    setenv("WINEHUA_VIRGL_HOST_SHADOW_MODE", mode, 1);
+    setenv("WINEHUA_VIRGL_HOST_SHADOW_SELECTOR", shadowSelector, 1);
+    setenv("WINEHUA_VIRGL_HOST_SHADOW_MERGE_RANGES",
+           preciseDirtyNoMerge ? "0" : "1", 1);
+    setenv("WINEHUA_VIRGL_HOST_GPU_UPLOAD_WAIT",
+           waitShadowUpload ? "1" : "0", 1);
+    setenv("WINEHUA_VIRGL_HOST_DESCRIPTOR_UPDATE_SERIALIZE",
+           preciseDirtyDescriptorSerialized ? "1" : "0", 1);
+    setenv("WINEHUA_VIRGL_HOST_PRESENT_MODE", presentMode, 1);
     OH_LOG_INFO(LOG_APP,
                 "[NAPI] host shadow profile=%{public}s mode=%{public}s "
                 "trace=%{public}s selector=%{public}s perf_summary=%{public}s "

@@ -427,26 +427,63 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
 
 void EglRenderer::ReleaseZeroCopyBinding()
 {
+    // Teardown logs below distinguish SurfaceQueue ownership failures from rendering failures.
+    const uint64_t surfaceKey = zeroCopySurfaceKey_;
+    OH_LOG_INFO(LOG_APP,
+                "[VIRGL-ZC][MAIN] release begin tl=%{public}u key=%{public}llu "
+                "registered=%{public}d ready=%{public}d listener=%{public}d image=%{public}p",
+                toplevelId_, static_cast<unsigned long long>(surfaceKey),
+                zeroCopyRegistered_, zeroCopyReadyPublished_, zeroCopyListenerSet_,
+                zeroCopyImage_);
     if (zeroCopySurfaceKey_)
     {
+        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release ready-off begin key=%{public}llu",
+                    static_cast<unsigned long long>(surfaceKey));
         winehua::GraphicsBroker::GetInstance().SetZeroCopySurfaceReady(
             zeroCopySurfaceKey_, false);
+        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release ready-off end key=%{public}llu",
+                    static_cast<unsigned long long>(surfaceKey));
+        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release compositor-off begin key=%{public}llu",
+                    static_cast<unsigned long long>(surfaceKey));
         WaylandServer::GetInstance()->SetSurfaceZeroCopy(zeroCopySurfaceKey_, false);
+        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release compositor-off end key=%{public}llu",
+                    static_cast<unsigned long long>(surfaceKey));
     }
     zeroCopyReadyPublished_ = false;
     zeroCopyFallbackPending_ = false;
-    if (zeroCopyRegistered_)
+    if (zeroCopyRegistered_) {
+        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release detach begin key=%{public}llu",
+                    static_cast<unsigned long long>(surfaceKey));
         winehua::GraphicsBroker::GetInstance().DetachZeroCopyTarget(zeroCopySurfaceKey_);
+        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release detach end key=%{public}llu",
+                    static_cast<unsigned long long>(surfaceKey));
+    }
     zeroCopyRegistered_ = false;
-    if (zeroCopyImage_ && zeroCopyListenerSet_)
-        OH_NativeImage_UnsetOnFrameAvailableListener(zeroCopyImage_);
+    if (zeroCopyImage_ && zeroCopyListenerSet_) {
+        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release listener-unset begin key=%{public}llu",
+                    static_cast<unsigned long long>(surfaceKey));
+        const int32_t unsetResult = OH_NativeImage_UnsetOnFrameAvailableListener(zeroCopyImage_);
+        OH_LOG_INFO(LOG_APP,
+                    "[VIRGL-ZC][MAIN] release listener-unset end key=%{public}llu result=%{public}d",
+                    static_cast<unsigned long long>(surfaceKey), unsetResult);
+    }
     zeroCopyListenerSet_ = false;
     zeroCopyProducerWindow_ = nullptr;
-    if (zeroCopyImage_) OH_NativeImage_Destroy(&zeroCopyImage_);
+    if (zeroCopyImage_) {
+        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release image-destroy begin key=%{public}llu",
+                    static_cast<unsigned long long>(surfaceKey));
+        OH_NativeImage_Destroy(&zeroCopyImage_);
+        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release image-destroy end key=%{public}llu",
+                    static_cast<unsigned long long>(surfaceKey));
+    }
     if (zeroCopyTexture_)
     {
+        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release texture-delete begin key=%{public}llu",
+                    static_cast<unsigned long long>(surfaceKey));
         glDeleteTextures(1, &zeroCopyTexture_);
         zeroCopyTexture_ = 0;
+        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release texture-delete end key=%{public}llu",
+                    static_cast<unsigned long long>(surfaceKey));
     }
     zeroCopyFrameAvailable_.store(false, std::memory_order_release);
     zeroCopyHasFrame_ = false;
@@ -465,6 +502,8 @@ void EglRenderer::ReleaseZeroCopyBinding()
     zeroCopySourceW_ = 0;
     zeroCopySourceH_ = 0;
     zeroCopyVulkanSource_ = false;
+    OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release complete tl=%{public}u key=%{public}llu",
+                toplevelId_, static_cast<unsigned long long>(surfaceKey));
 }
 
 void EglRenderer::ShutdownZeroCopyConsumer()

@@ -1,11 +1,77 @@
 # WineHua Phase 2 DXVK Status Memo
 
-> Last updated: 2026-07-28
+> Last updated: 2026-07-30
 >
 > Purpose: this is the durable handoff for resuming the DXVK investigation.
 > Read this file before changing DXVK, Venus present, SmokeRunner, or game launch
 > code. Update it whenever a conclusion, gate result, commit, HAP, or primary
 > blocker changes.
+
+## 2026-07-30 DXVK 1.10.3 stable baseline
+
+`dxvk_legacy` is the Phase 2 user-facing baseline. It uses DXVK 1.10.3 over
+Wine Vulkan, x86_64 Venus, and the Host Vulkan broker presenter. WineD3D/VirGL
+remains the explicit fallback; Modern DXVK and DirectPresent are not part of
+this baseline.
+
+The product profile is:
+
+    shadow-precise-dirty-ring-inline-upload-coverage-sort
+
+It keeps the required precise dirty shadow contract, remote-memory ring
+publication, inline GPU upload, and coverage ordering. It is not a generic
+"debug" profile and must remain the default for DXVK Legacy launches until a
+replacement passes the same gates.
+
+The tested signed HAP is:
+
+    HAP SHA-256:
+      f18e279a9e4973aae3144112319ea1cef42841fd4a7f4f5ff8d0bab96ce486db
+    wine-data SHA-256:
+      d56c9308858b37e53fae0c7a46a9b7780fb953ab298504a452a6ee5077e8dced
+    archive:
+      D:\MyProject\winehua-logs\automation\release-dxvk-1.10.3-20260730
+
+Physical-device evidence:
+
+- 910 tablet, `release-stable-910-20260730`: full `dxvk` suite PASS.
+- 920 phone, `release-stable-920-20260730`: full `dxvk` suite PASS.
+- 910 tablet, `release-logquiet-910-20260730`: full `dxvk` suite PASS with
+  no periodic vtest/present/fence/blob/busy-wait log lines.
+- 910 tablet, `release-timeline-fixed-910-20260730`: full `dxvk` suite PASS
+  while Host `WineHuaFrameTimeline` and sampled vtest summaries are present.
+
+The stable suite validates x86 WoW64 and x64 DXVK loading from the managed
+runtime, Feature Level 11.0, Win32 present, no WineD3D fallback, BC sampling,
+mips/arrays/cube views, depth/stencil, MSAA resolve, MRT, compute/UAV,
+descriptor rebinding/lifetime, 3D textures, and a 675-frame cube sequence with
+`angleRegressions=0`. It records zero CPU full-frame readback/upload and zero
+per-frame `vkDeviceWaitIdle`.
+
+### Product logging and diagnostics
+
+Normal product runs set `WINEHUA_VTEST_PRESENT_PERF_SUMMARY=0`. This suppresses
+periodic present, submit, fence, busy-wait, and successful blob lifecycle
+records that previously wrote and flushed the Host log during normal play.
+Initialization, teardown, protocol/submit/resource failures, and fence
+regressions remain logged. Resource identity logging remains available under
+the explicit capture profile through `WINEHUA_RESOURCE_TRACE=1`.
+
+`shadow-precise-dirty-ring-frame-timeline` is a diagnostic-only profile. It
+inherits the same Guest DXVK precise-shadow and strong-ring-barrier contract as
+the product profile, then enables sparse Host frame timelines and vtest
+summaries. Do not remove the SmokeRunner environment inheritance for this
+profile: doing so silently changes the Guest shadow semantics and causes valid
+texture/3D/UAV probes to fail.
+
+### Release boundary
+
+This baseline is suitable for user selection and controlled game testing. It
+does not prove universal DX11 compatibility: untested games may require new
+format, shader, synchronization, Box64, or Wine work. Preserve the per-game
+fallback to WineD3D, collect the affected smoke/log archive before changing a
+product default, and run the stable suite on both architectures after every
+DXVK, Mesa, virglrenderer, Wine Vulkan, or presenter change.
 
 ## 2026-07-28 SNORM default, DLL search fix, and Crysis 3 boundary
 

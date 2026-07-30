@@ -33,6 +33,9 @@ int PresentVenusSurface(uint32_t contextId,
                         uint64_t* nextPresentDeadlineNs,
                         void (*releaseQueue)(void*),
                         void* queueSyncData);
+int PrepareVenusDeviceRelease(uint32_t contextId, uintptr_t device);
+int FinishVenusDeviceRelease(uint32_t contextId, uintptr_t device,
+                             int32_t waitResult);
 virgl_ipc::SurfaceQueryReply QueryVirglSurfaces();
 void ResetVirglSurfaces();
 

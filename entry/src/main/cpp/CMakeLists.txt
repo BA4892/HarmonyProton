@@ -24,6 +24,7 @@ add_library(entry SHARED
     audio_ipc_server.cpp
     audio_stream.cpp
     graphics_broker.cpp
+    virgl_host_config.cpp
     napi_init.cpp
     wine_process.cpp
     wine_env.cpp
@@ -86,6 +87,7 @@ target_link_libraries(wine_child PUBLIC libhilog_ndk.z.so libchild_process.so)
 
 add_library(virgl_child SHARED
     virgl_child.cpp
+    virgl_host_config.cpp
     virgl_surface_presenter.cpp
     venus_surface_presenter.cpp
     phone_adapter/phone_virgl_dispatch.cpp
