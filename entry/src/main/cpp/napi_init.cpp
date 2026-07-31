@@ -12,7 +12,6 @@
 #include "wine_process.h"
 #include "wine_launch.h"
 #include "wine_exe.h"
-#include "wine_mmap_test.h"
 #include "host_vulkan_probe.h"
 #include "phone_adapter/phone_adapter.h"
 
@@ -906,9 +905,6 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"createRenderer",  nullptr, CreateRenderer,  nullptr, nullptr, nullptr, napi_default, nullptr},
         {"resizeRenderer",  nullptr, ResizeRenderer,  nullptr, nullptr, nullptr, napi_default, nullptr},
         {"destroyRenderer", nullptr, DestroyRenderer, nullptr, nullptr, nullptr, napi_default, nullptr},
-#ifdef DEBUG_MMAP_TEST
-        {"runMmapTests",  nullptr, RunMmapTests,  nullptr, nullptr, nullptr, napi_default, nullptr},
-#endif
         {"setOutputSize",   nullptr, SetOutputSize,   nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setDisplayScale",  nullptr, SetDisplayScale,  nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setDesktopMode",   nullptr, SetDesktopMode,   nullptr, nullptr, nullptr, napi_default, nullptr},

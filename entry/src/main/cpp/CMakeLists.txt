@@ -30,7 +30,6 @@ add_library(entry SHARED
     wine_env.cpp
     wine_launch.cpp
     wine_exe.cpp
-    wine_mmap_test.cpp
     host_vulkan_probe.cpp
     broker.cpp
     ncp_dispatch.cpp
@@ -81,7 +80,6 @@ target_link_libraries(entry PUBLIC
 
 add_library(wine_child SHARED
     wine_child.cpp
-    wine_mmap_child.cpp
 )
 target_link_libraries(wine_child PUBLIC libhilog_ndk.z.so libchild_process.so)
 
