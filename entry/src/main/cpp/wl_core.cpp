@@ -96,6 +96,10 @@ void WaylandServer::compositor_create_surface(wl_client* client, wl_resource* co
     sd->clientPid = GetWaylandClientPid(client);
     sd->protocolId = id;
     sd->surfaceKey = MakeSurfaceKey(sd->clientPid, id);
+    OH_LOG_INFO(LOG_APP,
+                "[MW-ZC] surface created pid=%{public}u surface=%{public}u key=%{public}llu resource=%{public}p",
+                sd->clientPid, sd->protocolId,
+                static_cast<unsigned long long>(sd->surfaceKey), surfRes);
     wl_resource_set_implementation(surfRes, &kSurfaceImpl, sd, [](wl_resource* r) {
         auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(r));
         auto* self = GetInstance();
@@ -229,10 +233,12 @@ void WaylandServer::subsurface_place_above(wl_client*, wl_resource* ssRes, wl_re
     if (!childSurf || !sibling) return;
     auto* self = GetInstance();
     auto lk = self->toplevelMgr_.Lock();
-    self->desktopCompositor_.ReorderSubsurfaceLayerAbove(childSurf, sibling);
-    if (self->Policy().RootCompositing()) self->MarkDesktopRootDirtyLocked();
-    OH_LOG_INFO(LOG_APP, "[MW-SUBSURF] place_above child=%{public}p above sibling=%{public}p",
-                childSurf, sibling);
+    const bool changed =
+        self->desktopCompositor_.ReorderSubsurfaceLayerAbove(childSurf, sibling);
+    if (changed && self->Policy().RootCompositing()) self->MarkDesktopRootDirtyLocked();
+    if (changed)
+        OH_LOG_INFO(LOG_APP, "[MW-SUBSURF] place_above child=%{public}p above sibling=%{public}p",
+                    childSurf, sibling);
 }
 
 void WaylandServer::subsurface_place_below(wl_client*, wl_resource* ssRes, wl_resource* sibling) {
@@ -240,10 +246,12 @@ void WaylandServer::subsurface_place_below(wl_client*, wl_resource* ssRes, wl_re
     if (!childSurf || !sibling) return;
     auto* self = GetInstance();
     auto lk = self->toplevelMgr_.Lock();
-    self->desktopCompositor_.ReorderSubsurfaceLayerBelow(childSurf, sibling);
-    if (self->Policy().RootCompositing()) self->MarkDesktopRootDirtyLocked();
-    OH_LOG_INFO(LOG_APP, "[MW-SUBSURF] place_below child=%{public}p below sibling=%{public}p",
-                childSurf, sibling);
+    const bool changed =
+        self->desktopCompositor_.ReorderSubsurfaceLayerBelow(childSurf, sibling);
+    if (changed && self->Policy().RootCompositing()) self->MarkDesktopRootDirtyLocked();
+    if (changed)
+        OH_LOG_INFO(LOG_APP, "[MW-SUBSURF] place_below child=%{public}p below sibling=%{public}p",
+                    childSurf, sibling);
 }
 
 void WaylandServer::subsurface_destroy(wl_client*, wl_resource* r) {

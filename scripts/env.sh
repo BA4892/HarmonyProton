@@ -88,11 +88,13 @@ WINE_DEVICE_ROOT="/data/storage/el2/base/files/wine"
 # 源码路径
 WINE_SRC="$ROOT/thirdparty/wine"
 BOX64_SRC="$ROOT/thirdparty/box64"
+DXVK_SRC="$ROOT/thirdparty/dxvk"
 
 # 产物路径
 BUILD_DIR="$ROOT/build"          # 源码构建中间产物
 SYSROOT_EXT="$BUILD_DIR/sysroot-ext"  # 交叉编译扩展 (不污染 SDK)
 STAGING_DIR="$BUILD_DIR/staging"   # 打包临时目录
+DXVK_BUILD_ROOT="$BUILD_DIR/dxvk/legacy"
 
 # sysroot-ext 目录结构
 SYSROOT_EXT_INC="$SYSROOT_EXT/usr/include"

@@ -227,4 +227,3 @@ void Seat::keyboard_destroy(wl_resource* r) {
     }
     OH_LOG_INFO(LOG_APP, "[Seat] wl_keyboard destroyed (remaining=%{public}d)", self->kbdCount_.load());
 }
-

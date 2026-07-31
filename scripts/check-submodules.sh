@@ -3,12 +3,13 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+failed=0
 
 echo "=== Submodule 状态检查 ==="
 echo ""
 
-for sm in wine box64 libepoxy mesa virglrenderer libdrm; do
-    path="thirdparty/$sm"
+while IFS= read -r path; do
+    sm="${path##*/}"
     HEAD=$(git ls-tree HEAD "$path" | awk '{print $3}')
     
     # 获取 default branch
@@ -17,12 +18,19 @@ for sm in wine box64 libepoxy mesa virglrenderer libdrm; do
     # 获取 remote HEAD
     cd "$path"
     remote_url=$(git remote get-url origin)
-    remote_sha=$(git ls-remote origin "$branch" 2>/dev/null | awk '{print $1}')
+    remote_sha=$(git ls-remote origin "refs/heads/$branch" 2>/dev/null | awk '{print $1}')
     
     echo "--- $sm ($branch) ---"
     echo "  tracked: $HEAD"
     echo "  remote:  $remote_sha"
     
+    if git fetch --dry-run --no-tags origin "$HEAD" >/dev/null 2>&1; then
+        echo "  CI can fetch the exact tracked gitlink"
+    else
+        echo "  ERROR: remote cannot fetch the exact tracked gitlink"
+        failed=1
+    fi
+
     if [ "$HEAD" = "$remote_sha" ]; then
         echo "  ✅ 与 remote 一致"
     else
@@ -35,4 +43,6 @@ for sm in wine box64 libepoxy mesa virglrenderer libdrm; do
     fi
     echo ""
     cd "$ROOT"
-done
+done < <(git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | awk '{print $2}')
+
+exit "$failed"

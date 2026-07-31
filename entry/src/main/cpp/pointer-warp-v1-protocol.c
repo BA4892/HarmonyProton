@@ -59,4 +59,3 @@ WL_PRIVATE const struct wl_interface wp_pointer_warp_v1_interface = {
 	2, wp_pointer_warp_v1_requests,
 	0, NULL,
 };
-

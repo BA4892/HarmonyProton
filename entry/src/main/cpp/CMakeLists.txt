@@ -24,12 +24,14 @@ add_library(entry SHARED
     audio_ipc_server.cpp
     audio_stream.cpp
     graphics_broker.cpp
+    virgl_host_config.cpp
     napi_init.cpp
     wine_process.cpp
     wine_env.cpp
     wine_launch.cpp
     wine_exe.cpp
     wine_mmap_test.cpp
+    host_vulkan_probe.cpp
     broker.cpp
     ncp_dispatch.cpp
     perf_utils.cpp
@@ -69,6 +71,7 @@ target_link_libraries(entry PUBLIC
     libnative_vsync.so
     libEGL.so
     libGLESv3.so
+    libvulkan.so
     libhilog_ndk.z.so
     libchild_process.so
     libipc_capi.so
@@ -84,12 +87,15 @@ target_link_libraries(wine_child PUBLIC libhilog_ndk.z.so libchild_process.so)
 
 add_library(virgl_child SHARED
     virgl_child.cpp
+    virgl_host_config.cpp
     virgl_surface_presenter.cpp
+    venus_surface_presenter.cpp
     phone_adapter/phone_virgl_dispatch.cpp
 )
 target_link_libraries(virgl_child PUBLIC
     libEGL.so
     libGLESv3.so
+    libvulkan.so
     libnative_window.so
     libhilog_ndk.z.so
     libchild_process.so

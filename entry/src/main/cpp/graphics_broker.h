@@ -9,6 +9,8 @@
 #include <vector>
 #include <native_window/external_window.h>
 
+#include "virgl_host_config.h"
+
 struct OHIPCRemoteProxy;
 
 namespace winehua {
@@ -47,6 +49,7 @@ struct ZeroCopySurfaceInfo
     uint32_t height = 0;
     uint32_t serial = 0;
     bool attached = false;
+    bool vulkan = false;
 };
 
 class GraphicsBroker
@@ -59,6 +62,8 @@ public:
     void SetWineRuntimeBinaryDir(const std::string& wineBinDir);
 
     void SetRequestedBackend(GraphicsBackend backend);
+    void SetVulkanPresentMode(bool enabled);
+    bool IsVulkanPresentMode() const;
     GraphicsBackendState GetState() const;
 
     void AppendWineEnv(std::vector<std::string>& env) const;
@@ -92,12 +97,10 @@ private:
     static void OnVirglIpcProcessStarted(int errorCode, OHIPCRemoteProxy* remoteProxy);
     bool SendVirglConfigureLocked();
     bool SendVirglTargetLocked(uint64_t surfaceKey, OHNativeWindow* producerWindow,
-                               uint64_t framePeriodNs);
+                               uint64_t framePeriodNs, uint32_t flags);
     bool SendVirglFramePeriodLocked(uint64_t surfaceKey, uint64_t framePeriodNs);
     bool SendVirglDetachLocked(uint64_t surfaceKey);
-    bool StartVirglInProcessHostLocked(const std::string& ldLibraryPath,
-                                       const std::string& syncMode,
-                                       const std::string& logPath);
+    bool StartVirglInProcessHostLocked(const VirglHostConfig& config);
     void ResetVirglInProcessSurfacesLocked();
     void ShutdownVirglIpc();
 
@@ -126,6 +129,7 @@ private:
     bool virglServerUsesIpc_ = false;
     std::atomic<bool> virglServerUsesInProcess_{false};
     std::atomic<bool> virglServerRunning_{false};
+    std::atomic<bool> vulkanPresentMode_{false};
     void* virglInProcessHandle_ = nullptr;
     void* virglInProcessAttach_ = nullptr;
     void* virglInProcessDetach_ = nullptr;
@@ -140,11 +144,8 @@ private:
     bool virglIpcCallbackComplete_ = false;
     bool virglIpcConfigured_ = false;
     int virglIpcError_ = 0;
-    std::string virglIpcHelperPath_;
-    std::string virglIpcSocketPath_;
-    std::string virglIpcLibraryPath_;
-    std::string virglIpcSyncMode_;
-    std::string virglIpcLogPath_;
+    VirglHostConfig virglHostConfig_;
+    uint64_t virglHostConfigHash_ = 0;
     std::unordered_set<uint64_t> zeroCopyAttachedSurfaces_;
 };
 

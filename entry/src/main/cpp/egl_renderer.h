@@ -63,6 +63,10 @@ private:
     std::atomic<bool> zeroCopyFrameAvailable_{false};
     std::atomic<uint64_t> zeroCopyFrameSignals_{0};
     uint64_t zeroCopyFrames_ = 0;
+    uint64_t zeroCopyUpdates_ = 0;
+    uint64_t zeroCopyLastConsumedSignal_ = 0;
+    uint64_t zeroCopyCoalescedSignals_ = 0;
+    uint64_t zeroCopyDuplicateTimestamps_ = 0;
     uint64_t zeroCopyFailures_ = 0;
     uint64_t zeroCopyFallbackShmSerial_ = 0;
     uint64_t zeroCopyTimestampRegressions_ = 0;
@@ -81,11 +85,18 @@ private:
     bool zeroCopyListenerSet_ = false;
     bool zeroCopyReadyPublished_ = false;
     bool zeroCopyHasFrame_ = false;
+    bool zeroCopyVulkanSource_ = false;
     bool zeroCopyFallbackPending_ = false;
     bool zeroCopyGeometryDirty_ = false;
     bool zeroCopyFullscreen_ = false;  // 所属 toplevel 全屏: ZC 层保比例铺满显示区
     uint32_t zeroCopyConsecutiveFailures_ = 0;
     float zeroCopyTransform_[16] = {
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1,
+    };
+    float zeroCopySamplingTransform_[16] = {
         1, 0, 0, 0,
         0, 1, 0, 0,
         0, 0, 1, 0,

@@ -12,7 +12,13 @@ struct LaunchParams {
     std::string sockDir;
     std::string sockName;
     std::string winehuaBin;
+    std::string prefixDir;
+    std::string d3dBackend = "dxvk_legacy";
+    bool automationMode = false;
+    std::vector<std::string> envStrs;
+    std::vector<char*> envp;
 };
 
 void LaunchThreadFunc(LaunchParams* p);
+bool IsWinePrefixInitialized(const std::string& prefixDir);
 bool IsWinePrefixInitialized();

@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y \
     # 编译工具链
     build-essential cmake ninja-build meson \
     bison flex autoconf automake libtool \
-    pkgconf zip git file python3 python3-pip \
+    pkgconf zip git file python3 python3-pip glslang-tools \
     # wayland-scanner 原生构建 (生成 Wayland 协议代码)
     libexpat1-dev libxml2-dev libffi-dev \
     # sfnt2fon 字体工具 (Wine .fon 生成)

@@ -80,8 +80,11 @@ constexpr const char* GUEST_GFX_ENVFILE = "winehua-guest-gfx.env";
 constexpr const char* ZERO_COPY_READY_DIR = "/data/storage/el2/base/cache";
 constexpr const char* ZERO_COPY_READY_PREFIX = "winehua_zc_surface_";
 
-using VirglChildMainFn = void (*)(NativeChildProcess_Args);
-using VirglInProcessAttachFn = int (*)(uint64_t, uint64_t, OHNativeWindow*);
+using VirglInProcessRunFn = int (*)(
+    const char*, const char*, const char*, const char*, const char*,
+    const char*, const char*, const char*, const char*, const char*,
+    const char*);
+using VirglInProcessAttachFn = int (*)(uint64_t, uint64_t, uint32_t, OHNativeWindow*);
 using VirglInProcessDetachFn = int (*)(uint64_t);
 using VirglInProcessSetFramePeriodFn = int (*)(uint64_t, uint64_t);
 using VirglInProcessQueryFn = int (*)(virgl_ipc::SurfaceQueryReply*);
@@ -171,10 +174,15 @@ GraphicsBroker::GraphicsBroker()
     }
 }
 
-bool GraphicsBroker::StartVirglInProcessHostLocked(const std::string& ldLibraryPath,
-                                                    const std::string& syncMode,
-                                                    const std::string& logPath)
+bool GraphicsBroker::StartVirglInProcessHostLocked(const VirglHostConfig& config)
 {
+    std::string configError;
+    if (!ValidateVirglHostConfig(config, &configError))
+    {
+        lastError_ = "invalid in-process VirGL host config: " + configError;
+        OH_LOG_ERROR(LOG_APP, "[GraphicsBroker] %{public}s", lastError_.c_str());
+        return false;
+    }
     if (!virglInProcessHandle_)
     {
         const std::string bundleDir = CurrentSharedObjectDir();
@@ -194,14 +202,15 @@ bool GraphicsBroker::StartVirglInProcessHostLocked(const std::string& ldLibraryP
         }
     }
 
-    auto mainFn = reinterpret_cast<VirglChildMainFn>(dlsym(virglInProcessHandle_, "Main"));
+    auto runFn = reinterpret_cast<VirglInProcessRunFn>(
+        dlsym(virglInProcessHandle_, "WinehuaVirgl_RunConfiguredHost"));
     virglInProcessAttach_ = dlsym(virglInProcessHandle_, "WinehuaVirgl_AttachSurfaceTarget");
     virglInProcessDetach_ = dlsym(virglInProcessHandle_, "WinehuaVirgl_DetachSurfaceTarget");
     virglInProcessSetFramePeriod_ = dlsym(
         virglInProcessHandle_, "WinehuaVirgl_SetSurfaceFramePeriod");
     virglInProcessQuery_ = dlsym(virglInProcessHandle_, "WinehuaVirgl_QuerySurfaces");
     virglInProcessReset_ = dlsym(virglInProcessHandle_, "WinehuaVirgl_ResetSurfaces");
-    if (!mainFn || !virglInProcessAttach_ || !virglInProcessDetach_ ||
+    if (!runFn || !virglInProcessAttach_ || !virglInProcessDetach_ ||
         !virglInProcessSetFramePeriod_ || !virglInProcessQuery_ || !virglInProcessReset_)
     {
         const char* error = dlerror();
@@ -210,17 +219,6 @@ bool GraphicsBroker::StartVirglInProcessHostLocked(const std::string& ldLibraryP
         OH_LOG_ERROR(LOG_APP, "[GraphicsBroker] %{public}s", lastError_.c_str());
         return false;
     }
-
-    std::string entryParams = virglVtestLibraryPath_ + "|" + virglSocketPath_ +
-        "|__env=LD_LIBRARY_PATH=" + ldLibraryPath +
-        "|__env=VTEST_USE_GLES=1" +
-        "|__env=VTEST_USE_EGL_SURFACELESS=1" +
-        "|__env=VTEST_SYNC_GL_FINISH=1" +
-        "|__env=WINEHUA_VIRGL_SYNC_MODE=" + syncMode +
-        "|__env=WINEHUA_VIRGL_LOG_PATH=" + logPath +
-        "|__env=EGL_PLATFORM=surfaceless";
-    if (syncMode == "egl-thread")
-        entryParams += "|__env=VIRGL_DISABLE_NATIVE_FENCE_FD=1";
 
     virglServerPid_ = getpid();
     virglServerUsesNcp_ = false;
@@ -233,17 +231,27 @@ bool GraphicsBroker::StartVirglInProcessHostLocked(const std::string& ldLibraryP
         virglIpcCallbackComplete_ = true;
     }
 
-    std::thread([this, mainFn, entryParams = std::move(entryParams)]() mutable {
-        NativeChildProcess_Args args = {};
-        args.entryParams = entryParams.data();
-        OH_LOG_INFO(LOG_APP, "[GraphicsBroker] phone in-process VirGL host starting");
-        mainFn(args);
+    std::thread([this, runFn, config]() {
+        const uint64_t configHash = FingerprintVirglHostConfig(config);
+        OH_LOG_INFO(LOG_APP,
+                    "[GraphicsBroker] phone in-process VirGL host starting config=0x%{public}llx",
+                    static_cast<unsigned long long>(configHash));
+        const int result = runFn(
+            config.helperPath.c_str(), config.socketPath.c_str(),
+            config.libraryPath.c_str(), config.syncMode.c_str(),
+            config.logPath.c_str(), config.shadowMode.c_str(),
+            config.shadowTrace.c_str(), config.presentMode.c_str(),
+            config.shadowMergeRanges.c_str(),
+            config.descriptorUpdateSerialize.c_str(),
+            config.gpuUploadWait.c_str());
         virglServerRunning_.store(false, std::memory_order_release);
         {
             std::lock_guard<std::mutex> ipcLock(virglIpcMutex_);
             virglIpcConfigured_ = false;
         }
-        OH_LOG_WARN(LOG_APP, "[GraphicsBroker] phone in-process VirGL host exited");
+        OH_LOG_WARN(LOG_APP,
+                    "[GraphicsBroker] phone in-process VirGL host exited result=%{public}d config=0x%{public}llx",
+                    result, static_cast<unsigned long long>(configHash));
     }).detach();
     return true;
 }
@@ -295,15 +303,30 @@ bool GraphicsBroker::SendVirglConfigureLocked()
         ? OH_IPCParcel_WriteInt32(request, virgl_ipc::kProtocolVersion)
         : OH_IPC_MEM_ALLOCATOR_ERROR;
     if (writeResult == OH_IPC_SUCCESS)
-        writeResult = OH_IPCParcel_WriteString(request, virglIpcHelperPath_.c_str());
+        writeResult = OH_IPCParcel_WriteString(request, virglHostConfig_.helperPath.c_str());
     if (writeResult == OH_IPC_SUCCESS)
-        writeResult = OH_IPCParcel_WriteString(request, virglIpcSocketPath_.c_str());
+        writeResult = OH_IPCParcel_WriteString(request, virglHostConfig_.socketPath.c_str());
     if (writeResult == OH_IPC_SUCCESS)
-        writeResult = OH_IPCParcel_WriteString(request, virglIpcLibraryPath_.c_str());
+        writeResult = OH_IPCParcel_WriteString(request, virglHostConfig_.libraryPath.c_str());
     if (writeResult == OH_IPC_SUCCESS)
-        writeResult = OH_IPCParcel_WriteString(request, virglIpcSyncMode_.c_str());
+        writeResult = OH_IPCParcel_WriteString(request, virglHostConfig_.syncMode.c_str());
     if (writeResult == OH_IPC_SUCCESS)
-        writeResult = OH_IPCParcel_WriteString(request, virglIpcLogPath_.c_str());
+        writeResult = OH_IPCParcel_WriteString(request, virglHostConfig_.logPath.c_str());
+    if (writeResult == OH_IPC_SUCCESS)
+        writeResult = OH_IPCParcel_WriteString(request, virglHostConfig_.shadowMode.c_str());
+    if (writeResult == OH_IPC_SUCCESS)
+        writeResult = OH_IPCParcel_WriteString(request, virglHostConfig_.shadowTrace.c_str());
+    if (writeResult == OH_IPC_SUCCESS)
+        writeResult = OH_IPCParcel_WriteString(request, virglHostConfig_.presentMode.c_str());
+    if (writeResult == OH_IPC_SUCCESS)
+        writeResult = OH_IPCParcel_WriteString(
+            request, virglHostConfig_.shadowMergeRanges.c_str());
+    if (writeResult == OH_IPC_SUCCESS)
+        writeResult = OH_IPCParcel_WriteString(
+            request, virglHostConfig_.descriptorUpdateSerialize.c_str());
+    if (writeResult == OH_IPC_SUCCESS)
+        writeResult = OH_IPCParcel_WriteString(
+            request, virglHostConfig_.gpuUploadWait.c_str());
 
     int32_t childResult = -1;
     int32_t sendResult = writeResult;
@@ -324,14 +347,37 @@ bool GraphicsBroker::SendVirglConfigureLocked()
 
 bool GraphicsBroker::SendVirglTargetLocked(uint64_t surfaceKey,
                                            OHNativeWindow* producerWindow,
-                                           uint64_t framePeriodNs)
+                                           uint64_t framePeriodNs,
+                                           uint32_t flags)
 {
     if (!virglIpcConfigured_ || !producerWindow || !surfaceKey)
         return false;
     if (virglServerUsesInProcess_.load(std::memory_order_acquire))
     {
+        /* The phone runtime keeps the presenter in this process so its
+         * NativeWindow remains valid. SurfaceQueuePresenterManager selects
+         * VenusSurfaceQueueTarget for kSurfaceVulkan, just as it selects the
+         * GLES target for VirGL surfaces. Rejecting the flag here leaves DXVK
+         * presenting only the empty Wayland buffer.
+         *
+         * OH_NativeImage owns the reference returned by AcquireNativeWindow,
+         * while both presenter targets destroy the reference they retain at
+         * detach. Give the in-process target a distinct reference; otherwise
+         * closing a presented Wine window destroys the NativeImage-owned
+         * window and the subsequent NativeImage teardown can abort the App. */
+        const int32_t referenceResult =
+            OH_NativeWindow_NativeObjectReference(producerWindow);
+        if (referenceResult != 0)
+        {
+            OH_LOG_WARN(LOG_APP,
+                        "[VIRGL-ZC][MAIN] direct attach reference failed key=%{public}llu result=%{public}d",
+                        static_cast<unsigned long long>(surfaceKey), referenceResult);
+            return false;
+        }
         auto attachFn = reinterpret_cast<VirglInProcessAttachFn>(virglInProcessAttach_);
-        const int result = attachFn ? attachFn(surfaceKey, framePeriodNs, producerWindow) : -1;
+        const int result = attachFn ? attachFn(surfaceKey, framePeriodNs, flags, producerWindow) : -1;
+        if (result != 0)
+            OH_NativeWindow_NativeObjectUnreference(producerWindow);
         OH_LOG_INFO(LOG_APP,
                     "[VIRGL-ZC][MAIN] direct attach surface_key=%{public}llu "
                     "period_ns=%{public}llu result=%{public}d",
@@ -350,6 +396,8 @@ bool GraphicsBroker::SendVirglTargetLocked(uint64_t surfaceKey,
         writeResult = OH_IPCParcel_WriteInt64(request, static_cast<int64_t>(surfaceKey));
     if (writeResult == OH_IPC_SUCCESS)
         writeResult = OH_IPCParcel_WriteInt64(request, static_cast<int64_t>(framePeriodNs));
+    if (writeResult == OH_IPC_SUCCESS)
+        writeResult = OH_IPCParcel_WriteInt32(request, static_cast<int32_t>(flags));
     if (writeResult == OH_IPC_SUCCESS)
         writeResult = OH_NativeWindow_WriteToParcel(producerWindow, request);
 
@@ -460,7 +508,11 @@ bool GraphicsBroker::AttachZeroCopyTarget(uint64_t surfaceKey,
 
     std::lock_guard<std::mutex> lock(virglIpcMutex_);
     if (zeroCopyAttachedSurfaces_.count(surfaceKey)) return true;
-    if (!SendVirglTargetLocked(surfaceKey, producerWindow, framePeriodNs)) return false;
+    uint32_t flags = vulkanPresentMode_.load(std::memory_order_acquire)
+        ? virgl_ipc::kSurfaceVulkan : 0;
+    if (virglServerUsesInProcess_.load(std::memory_order_acquire))
+        flags |= virgl_ipc::kSurfaceNativeObjectReference;
+    if (!SendVirglTargetLocked(surfaceKey, producerWindow, framePeriodNs, flags)) return false;
     zeroCopyAttachedSurfaces_.insert(surfaceKey);
     return true;
 }
@@ -483,7 +535,13 @@ void GraphicsBroker::DetachZeroCopyTarget(uint64_t surfaceKey)
     std::lock_guard<std::mutex> lock(virglIpcMutex_);
     if (!surfaceKey || !zeroCopyAttachedSurfaces_.count(surfaceKey)) return;
 
-    SendVirglDetachLocked(surfaceKey);
+    OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] broker detach begin key=%{public}llu in_process=%{public}d",
+                static_cast<unsigned long long>(surfaceKey),
+                virglServerUsesInProcess_.load(std::memory_order_acquire));
+    const bool detached = SendVirglDetachLocked(surfaceKey);
+    OH_LOG_INFO(LOG_APP,
+                "[VIRGL-ZC][MAIN] broker detach end key=%{public}llu result=%{public}d",
+                static_cast<unsigned long long>(surfaceKey), detached);
     zeroCopyAttachedSurfaces_.erase(surfaceKey);
     unlink(ZeroCopyReadyPath(surfaceKey).c_str());
     OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] detached surface_key=%{public}llu",
@@ -511,7 +569,8 @@ bool GraphicsBroker::QueryZeroCopySurfaces(std::vector<ZeroCopySurfaceInfo>& sur
             const auto& item = queryReply.surfaces[i];
             surfaces.push_back({item.surfaceKey, item.clientPid, item.surfaceId,
                                 item.width, item.height, item.serial,
-                                (item.flags & virgl_ipc::kSurfaceAttached) != 0});
+                                (item.flags & virgl_ipc::kSurfaceAttached) != 0,
+                                (item.flags & virgl_ipc::kSurfaceVulkan) != 0});
         }
         return true;
     }
@@ -558,7 +617,8 @@ bool GraphicsBroker::QueryZeroCopySurfaces(std::vector<ZeroCopySurfaceInfo>& sur
             const auto& item = queryReply.surfaces[i];
             surfaces.push_back({item.surfaceKey, item.clientPid, item.surfaceId,
                                 item.width, item.height, item.serial,
-                                (item.flags & virgl_ipc::kSurfaceAttached) != 0});
+                                (item.flags & virgl_ipc::kSurfaceAttached) != 0,
+                                (item.flags & virgl_ipc::kSurfaceVulkan) != 0});
         }
     }
     if (reply) OH_IPCParcel_Destroy(reply);
@@ -741,6 +801,16 @@ void GraphicsBroker::SetRequestedBackend(GraphicsBackend backend)
     UpdateActiveBackendLocked();
 }
 
+void GraphicsBroker::SetVulkanPresentMode(bool enabled)
+{
+    vulkanPresentMode_.store(enabled, std::memory_order_release);
+}
+
+bool GraphicsBroker::IsVulkanPresentMode() const
+{
+    return vulkanPresentMode_.load(std::memory_order_acquire);
+}
+
 GraphicsBackendState GraphicsBroker::GetState() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -795,6 +865,8 @@ void GraphicsBroker::AppendWineEnv(std::vector<std::string>& env) const
     if (!state.lastError.empty()) env.push_back("WINEHUA_GRAPHICS_NOTE=" + state.lastError);
     env.push_back(std::string("WINEHUA_VIRGL_READY=") +
                   ((state.active == GraphicsBackend::Virgl) ? "1" : "0"));
+    if (vulkanPresentMode_.load(std::memory_order_acquire))
+        env.push_back("WINEHUA_VULKAN_PRESENT=1");
     if (state.active == GraphicsBackend::Virgl)
     {
         if (!state.guestReceiverRuntimeDir.empty())
@@ -889,10 +961,35 @@ bool GraphicsBroker::IsVirglServerProcessAliveLocked()
     if (virglServerUsesIpc_)
     {
         std::lock_guard<std::mutex> lock(virglIpcMutex_);
+        bool responsive = false;
         if (virglRemoteProxy_ && VirglProxyIsRemoteDead(virglRemoteProxy_) == 0)
-            return true;
+        {
+            OHIPCParcel* request = OH_IPCParcel_Create();
+            OHIPCParcel* reply = OH_IPCParcel_Create();
+            int32_t result = request
+                ? OH_IPCParcel_WriteInt32(request, virgl_ipc::kProtocolVersion)
+                : OH_IPC_MEM_ALLOCATOR_ERROR;
+            if (result == OH_IPC_SUCCESS && reply)
+            {
+                OH_IPC_MessageOption option = {OH_IPC_REQUEST_MODE_SYNC, 0, nullptr};
+                result = SendVirglRequestLocked(
+                    virglRemoteProxy_, virgl_ipc::kQuerySurfacesRequest,
+                    request, reply, &option);
+            }
+            responsive = result == OH_IPC_SUCCESS;
+            if (reply) OH_IPCParcel_Destroy(reply);
+            if (request) OH_IPCParcel_Destroy(request);
+        }
+        if (responsive) return true;
 
-        lastError_ = "virgl IPC native child process is not running";
+        lastError_ = "virgl IPC native child process is not responding";
+        if (virglRemoteProxy_)
+        {
+            VirglProxyDestroy(virglRemoteProxy_);
+            virglRemoteProxy_ = nullptr;
+        }
+        virglIpcConfigured_ = false;
+        virglIpcCallbackComplete_ = false;
         virglServerUsesIpc_ = false;
         virglServerRunning_.store(false, std::memory_order_release);
         virglSocketReady_ = false;
@@ -1029,13 +1126,6 @@ void GraphicsBroker::StartVirglSocketServerLocked()
     std::string ldLibraryPath;
 
     if (!runtimeReady_ || virglSocketPath_.empty()) return;
-    if (virglServerRunning_.load(std::memory_order_acquire) && IsVirglServerProcessAliveLocked())
-    {
-        virglSocketReady_ = FileExists(virglSocketPath_);
-        if (!virglSocketReady_)
-            lastError_ = "virgl host is still starting; waiting for vtest socket";
-        return;
-    }
     if (wineRuntimeBinDir_.empty())
     {
         lastError_ = "wine runtime bin dir is not configured; using shm fallback";
@@ -1050,7 +1140,6 @@ void GraphicsBroker::StartVirglSocketServerLocked()
 
     serverDir = DirNameCopy(virglVtestLibraryPath_);
     ldLibraryPath = serverDir;
-    unlink(virglSocketPath_.c_str());
     {
         const char* requestedSyncMode = getenv("WINEHUA_VIRGL_SYNC_MODE");
         std::string syncMode = requestedSyncMode ? requestedSyncMode : "egl-main";
@@ -1062,13 +1151,81 @@ void GraphicsBroker::StartVirglSocketServerLocked()
         }
         const std::string virglLogPath = "/data/storage/el2/base/cache/winehua_virgl_host.log";
         const bool phoneMode = PhoneAdapter_IsPhoneMode();
+        const char* requestedShadowMode =
+            getenv("WINEHUA_VIRGL_HOST_SHADOW_MODE");
+        if (!requestedShadowMode || !requestedShadowMode[0])
+            requestedShadowMode = getenv("VKR_WINEHUA_SHADOW_FROM_HOST");
+        const char* requestedShadowTrace =
+            getenv("WINEHUA_VIRGL_HOST_SHADOW_SELECTOR");
+        if (!requestedShadowTrace || !requestedShadowTrace[0])
+            requestedShadowTrace = getenv("VKR_WINEHUA_SHADOW_TRACE");
+        const char* requestedPresentMode =
+            getenv("WINEHUA_VIRGL_HOST_PRESENT_MODE");
+        if (!requestedPresentMode || !requestedPresentMode[0])
+            requestedPresentMode = getenv("WINEHUA_VENUS_PRESENT_MODE");
+        const std::string shadowMode = requestedShadowMode && requestedShadowMode[0]
+            ? requestedShadowMode : "full";
+        const std::string shadowTrace = requestedShadowTrace && requestedShadowTrace[0]
+            ? requestedShadowTrace : "0";
+        const std::string presentMode = requestedPresentMode &&
+            (!strcmp(requestedPresentMode, "mailbox") ||
+             !strcmp(requestedPresentMode, "fifo-async") ||
+             !strcmp(requestedPresentMode, "fifo-poll"))
+            ? requestedPresentMode : "fifo";
+        const char* requestedMergeRanges =
+            getenv("WINEHUA_VIRGL_HOST_SHADOW_MERGE_RANGES");
+        if (!requestedMergeRanges || !requestedMergeRanges[0])
+            requestedMergeRanges = getenv("VKR_WINEHUA_SHADOW_MERGE_RANGES");
+        const char* requestedDescriptorSerialize =
+            getenv("WINEHUA_VIRGL_HOST_DESCRIPTOR_UPDATE_SERIALIZE");
+        if (!requestedDescriptorSerialize || !requestedDescriptorSerialize[0])
+            requestedDescriptorSerialize =
+                getenv("VKR_WINEHUA_DESCRIPTOR_UPDATE_SERIALIZE");
+        const char* requestedGpuUploadWait =
+            getenv("WINEHUA_VIRGL_HOST_GPU_UPLOAD_WAIT");
+        if (!requestedGpuUploadWait || !requestedGpuUploadWait[0])
+            requestedGpuUploadWait = getenv("VKR_WINEHUA_GPU_UPLOAD_WAIT");
+        VirglHostConfig desiredConfig = {
+            virglVtestLibraryPath_, virglSocketPath_, ldLibraryPath, syncMode,
+            virglLogPath, shadowMode, shadowTrace, presentMode,
+            requestedMergeRanges && requestedMergeRanges[0]
+                ? requestedMergeRanges : "1",
+            requestedDescriptorSerialize && requestedDescriptorSerialize[0]
+                ? requestedDescriptorSerialize : "0",
+            requestedGpuUploadWait && requestedGpuUploadWait[0]
+                ? requestedGpuUploadWait : "0",
+        };
+        std::string configError;
+        if (!ValidateVirglHostConfig(desiredConfig, &configError))
+        {
+            lastError_ = "invalid VirGL host configuration: " + configError;
+            OH_LOG_ERROR(LOG_APP, "[GraphicsBroker] %{public}s", lastError_.c_str());
+            return;
+        }
+        const uint64_t desiredConfigHash = FingerprintVirglHostConfig(desiredConfig);
+        if (virglServerRunning_.load(std::memory_order_acquire) &&
+            IsVirglServerProcessAliveLocked())
+        {
+            virglSocketReady_ = FileExists(virglSocketPath_);
+            if (virglHostConfigHash_ != 0 && virglHostConfigHash_ != desiredConfigHash)
+            {
+                lastError_ = "VirGL host configuration changed after startup; App restart required";
+                OH_LOG_ERROR(LOG_APP,
+                             "[GraphicsBroker] host config stale active=0x%{public}llx desired=0x%{public}llx",
+                             static_cast<unsigned long long>(virglHostConfigHash_),
+                             static_cast<unsigned long long>(desiredConfigHash));
+            }
+            else if (!virglSocketReady_)
+            {
+                lastError_ = "virgl host is still starting; waiting for vtest socket";
+            }
+            return;
+        }
+        unlink(virglSocketPath_.c_str());
         {
             std::lock_guard<std::mutex> ipcLock(virglIpcMutex_);
-            virglIpcHelperPath_ = virglVtestLibraryPath_;
-            virglIpcSocketPath_ = virglSocketPath_;
-            virglIpcLibraryPath_ = ldLibraryPath;
-            virglIpcSyncMode_ = syncMode;
-            virglIpcLogPath_ = virglLogPath;
+            virglHostConfig_ = desiredConfig;
+            virglHostConfigHash_ = desiredConfigHash;
             virglIpcAcceptCallback_ = !phoneMode;
             virglIpcCallbackComplete_ = false;
             virglIpcConfigured_ = false;
@@ -1077,7 +1234,7 @@ void GraphicsBroker::StartVirglSocketServerLocked()
 
         if (phoneMode)
         {
-            if (!StartVirglInProcessHostLocked(ldLibraryPath, syncMode, virglLogPath))
+            if (!StartVirglInProcessHostLocked(desiredConfig))
             {
                 virglServerRunning_.store(false, std::memory_order_release);
                 virglSocketReady_ = false;
@@ -1085,9 +1242,10 @@ void GraphicsBroker::StartVirglSocketServerLocked()
             }
             OH_LOG_INFO(LOG_APP,
                         "[GraphicsBroker] phone in-process VirGL host configured "
-                        "helper=%{public}s socket=%{public}s hostLib=%{public}s",
+                        "helper=%{public}s socket=%{public}s hostLib=%{public}s config=0x%{public}llx",
                         virglVtestLibraryPath_.c_str(), virglSocketPath_.c_str(),
-                        ldLibraryPath.c_str());
+                        ldLibraryPath.c_str(),
+                        static_cast<unsigned long long>(desiredConfigHash));
         }
         else
         {
@@ -1127,9 +1285,12 @@ void GraphicsBroker::StartVirglSocketServerLocked()
             virglServerRunning_.store(true, std::memory_order_release);
             OH_LOG_INFO(LOG_APP,
                         "[GraphicsBroker] IPC NCP virgl_child configured helper=%{public}s "
-                        "socket=%{public}s hostLib=%{public}s sync=%{public}s log=%{public}s",
+                        "socket=%{public}s hostLib=%{public}s sync=%{public}s log=%{public}s "
+                        "present=%{public}s config=0x%{public}llx",
                         virglVtestLibraryPath_.c_str(), virglSocketPath_.c_str(),
-                        ldLibraryPath.c_str(), syncMode.c_str(), virglLogPath.c_str());
+                        ldLibraryPath.c_str(), syncMode.c_str(), virglLogPath.c_str(),
+                        presentMode.c_str(),
+                        static_cast<unsigned long long>(desiredConfigHash));
         }
     }
 

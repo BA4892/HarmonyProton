@@ -105,4 +105,3 @@ WL_PRIVATE const struct wl_interface zwp_confined_pointer_v1_interface = {
 	2, zwp_confined_pointer_v1_requests,
 	2, zwp_confined_pointer_v1_events,
 };
-

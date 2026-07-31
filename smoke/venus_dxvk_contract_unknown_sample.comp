@@ -1,0 +1,17 @@
+#version 450
+
+/* Same sampler-first descriptor contract as DXVK's sampled-image CS, but
+ * deliberately uses a formatless storage image and a minimal body.  This is
+ * the control for separating StorageImageWriteWithoutFormat support from
+ * DXVK's generated control flow. */
+layout(set = 0, binding = 0) uniform sampler sourceSampler;
+layout(set = 0, binding = 1) uniform texture2D sourceTexture;
+layout(set = 0, binding = 2) uniform writeonly image2D outputImage;
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+void main()
+{
+    vec4 value = textureLod(
+        sampler2D(sourceTexture, sourceSampler), vec2(0.125, 0.125), 0.0);
+    imageStore(outputImage, ivec2(0, 0), value);
+}

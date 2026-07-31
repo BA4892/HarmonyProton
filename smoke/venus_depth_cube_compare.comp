@@ -1,0 +1,25 @@
+#version 450
+
+#extension GL_EXT_texture_shadow_lod : require
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0) uniform samplerCubeShadow sourceDepth;
+layout(set = 0, binding = 1, std430) buffer Output {
+    uint values[12];
+} outputBuffer;
+
+vec3 cubeDirection(uint face) {
+    if (face == 0) return vec3(1.0, 0.0, 0.0);
+    if (face == 1) return vec3(-1.0, 0.0, 0.0);
+    if (face == 2) return vec3(0.0, 1.0, 0.0);
+    if (face == 3) return vec3(0.0, -1.0, 0.0);
+    if (face == 4) return vec3(0.0, 0.0, 1.0);
+    return vec3(0.0, 0.0, -1.0);
+}
+
+void main() {
+    uint face = gl_GlobalInvocationID.x;
+    float value = textureLod(
+        sourceDepth, vec4(cubeDirection(face), 0.5), 0.0);
+    outputBuffer.values[face] = uint(round(clamp(value, 0.0, 1.0)));
+}

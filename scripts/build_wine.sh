@@ -63,9 +63,10 @@ build_ohos_unix() {
     mkdir -p "$BUILD_DIR/wine-ohos"
     cd "$BUILD_DIR/wine-ohos"
 
-    # 检查是否需要重新 configure (FreeType/Wayland 启用/禁用 状态变更)
+    # 检查是否需要重新 configure (FreeType/Wayland/Vulkan 启用状态变更)
     if [ ! -f "Makefile" ] || ! grep -q '#define SONAME_LIBFREETYPE' include/config.h 2>/dev/null \
-       || ! grep -q '#define SONAME_LIBWAYLAND_CLIENT' include/config.h 2>/dev/null; then
+       || ! grep -q '#define SONAME_LIBWAYLAND_CLIENT' include/config.h 2>/dev/null \
+       || ! grep -q '#define SONAME_LIBVULKAN "libvulkan.so.1"' include/config.h 2>/dev/null; then
         export FREETYPE_CFLAGS="-I$SYSROOT_EXT_INC/freetype2"
         export FREETYPE_LIBS="-L$SYSROOT_EXT_LIB -lfreetype"
         export ac_cv_header_ft2build_h=yes
@@ -79,6 +80,10 @@ build_ohos_unix() {
         export ac_cv_lib_soname_xkbcommon="libxkbcommon.so.0"
         export ac_cv_header_xkbcommon_xkbregistry_h=yes
         export ac_cv_lib_soname_xkbregistry="libxkbregistry.so.0"
+        # The x86_64 Guest Vulkan Loader is assembled separately from the OHOS
+        # sysroot. Wine only dlopens it at runtime, so provide the canonical
+        # soname explicitly instead of linking the cross build against it.
+        export ac_cv_lib_soname_vulkan="libvulkan.so.1"
         export WAYLAND_CLIENT_CFLAGS="-I$SYSROOT_EXT_INC"
         export WAYLAND_CLIENT_LIBS="-L$SYSROOT_EXT_LIB -lwayland-client"
         export XKBCOMMON_CFLAGS="-I$SYSROOT_EXT_INC"
@@ -110,7 +115,7 @@ build_ohos_unix() {
             --with-mingw=gcc \
             --disable-tests \
             --without-x --without-alsa \
-            --with-opengl --without-vulkan
+            --with-opengl --with-vulkan
     fi
 
     make -j$JOBS \

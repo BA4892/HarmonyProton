@@ -25,6 +25,7 @@
 - **[NOEXEC_MMAP_ANALYSIS.md](NOEXEC_MMAP_ANALYSIS.md)** — noexec 文件系统上 mmap+PROT_EXEC 问题深度分析
 - **[OHOS_MMAP_ANALYSIS.md](OHOS_MMAP_ANALYSIS.md)** — OHOS mmap 权限调研报告
 - **[BOX32_MMAP_PROBE.md](BOX32_MMAP_PROBE.md)** — Box32 32-bit mmap 探针测试结果
+- **[DXVK_MODERN_UPGRADE_READINESS.md](DXVK_MODERN_UPGRADE_READINESS.md)** — DXVK 2.x/VKD3D 升级能力矩阵、迁移清单与准入门禁
 
 ### 优化指南
 - **[virgl_display_optimization_guide.md](virgl_display_optimization_guide.md)** — 显示管线优化设计

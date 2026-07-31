@@ -7,7 +7,9 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 #include <mutex>
 #include <fcntl.h>
@@ -30,6 +32,25 @@ static std::once_flag gDisplayOnce;
 using winehua::PerfClock;
 using winehua::PerfNowUs;
 using winehua::RendererPerfWindow;
+
+static bool TraceFrameOrder()
+{
+    const char* trace = std::getenv("VKR_WINEHUA_SHADOW_TRACE");
+    return trace && ((!strcmp(trace, "1")) || !strcmp(trace, "present-image-trace"));
+}
+
+static void ComposeZeroCopySamplingTransform(const float* nativeTransform,
+                                             bool flipY,
+                                             float* samplingTransform)
+{
+    if (!nativeTransform || !samplingTransform) return;
+    std::copy(nativeTransform, nativeTransform + 16, samplingTransform);
+    if (!flipY) return;
+    for (int row = 0; row < 4; ++row) {
+        samplingTransform[4 + row] = -nativeTransform[4 + row];
+        samplingTransform[12 + row] = nativeTransform[4 + row] + nativeTransform[12 + row];
+    }
+}
 
 void EglRenderer::OnVSync(long long timestamp, void* data)
 {
@@ -112,7 +133,8 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
     if (zeroCopyRegistered_)
     {
         WaylandServer::ZeroCopyLayerInfo layer;
-        if (!server->GetZeroCopyLayerInfo(zeroCopySurfaceKey_, rendererToplevelId, layer))
+        if (!server->GetZeroCopyLayerInfo(zeroCopySurfaceKey_, rendererToplevelId,
+                                          zeroCopySourceW_, zeroCopySourceH_, layer))
         {
             ReleaseZeroCopyBinding();
         }
@@ -154,18 +176,27 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
         for (const auto& surface : surfaces)
         {
             if (surface.surfaceKey != zeroCopySurfaceKey_) continue;
+            if (surface.vulkan != broker.IsVulkanPresentMode()) {
+                ReleaseZeroCopyBinding();
+                break;
+            }
             zeroCopySourceW_ = static_cast<int>(surface.width);
             zeroCopySourceH_ = static_cast<int>(surface.height);
+            zeroCopyVulkanSource_ = surface.vulkan;
             return true;
         }
         return true;
     }
 
+    const bool wantVulkanSurface = broker.IsVulkanPresentMode();
     for (const auto& surface : surfaces)
     {
         if (!surface.surfaceKey || surface.attached) continue;
+        if (surface.vulkan != wantVulkanSurface) continue;
         WaylandServer::ZeroCopyLayerInfo layer;
-        if (!server->GetZeroCopyLayerInfo(surface.surfaceKey, rendererToplevelId, layer)) continue;
+        if (!server->GetZeroCopyLayerInfo(surface.surfaceKey, rendererToplevelId,
+                                          static_cast<int>(surface.width),
+                                          static_cast<int>(surface.height), layer)) continue;
 
         glGenTextures(1, &zeroCopyTexture_);
         glBindTexture(GL_TEXTURE_EXTERNAL_OES, zeroCopyTexture_);
@@ -215,6 +246,7 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
         zeroCopySurfaceId_ = surface.surfaceId;
         zeroCopySourceW_ = static_cast<int>(surface.width);
         zeroCopySourceH_ = static_cast<int>(surface.height);
+        zeroCopyVulkanSource_ = surface.vulkan || broker.IsVulkanPresentMode();
         zeroCopyLayerX_ = layer.x;
         zeroCopyLayerY_ = layer.y;
         zeroCopyLayerW_ = layer.width;
@@ -227,6 +259,10 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
         zeroCopyLastTimestamp_ = 0;
         zeroCopyTimestampRegressions_ = 0;
         zeroCopyFrames_ = 0;
+        zeroCopyUpdates_ = 0;
+        zeroCopyLastConsumedSignal_ = 0;
+        zeroCopyCoalescedSignals_ = 0;
+        zeroCopyDuplicateTimestamps_ = 0;
         zeroCopyFailures_ = 0;
         OH_LOG_INFO(LOG_APP,
                     "[VIRGL-ZC][MAIN] consumer attached tl=%{public}u key=%{public}llu "
@@ -250,6 +286,13 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
         !zeroCopyFrameAvailable_.exchange(false, std::memory_order_acq_rel))
         return false;
 
+    const uint64_t signalCount = zeroCopyFrameSignals_.load(std::memory_order_acquire);
+    const uint64_t signalDelta = signalCount >= zeroCopyLastConsumedSignal_
+        ? signalCount - zeroCopyLastConsumedSignal_ : 0;
+    if (signalDelta > 1) zeroCopyCoalescedSignals_ += signalDelta - 1;
+    zeroCopyLastConsumedSignal_ = signalCount;
+    ++zeroCopyUpdates_;
+
     const int32_t updateResult = OH_NativeImage_UpdateSurfaceImage(zeroCopyImage_);
     const int32_t transformResult = updateResult == 0
         ? OH_NativeImage_GetTransformMatrixV2(zeroCopyImage_, zeroCopyTransform_) : -1;
@@ -271,7 +314,8 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
             WaylandServer* server = WaylandServer::GetInstance();
             if (server->Policy().RootCompositing())
                 rendererToplevelId = server->GetDesktopRootToplevelId();
-            if (server->GetZeroCopyLayerInfo(zeroCopySurfaceKey_, rendererToplevelId, layer))
+            if (server->GetZeroCopyLayerInfo(zeroCopySurfaceKey_, rendererToplevelId,
+                                              zeroCopySourceW_, zeroCopySourceH_, layer))
                 zeroCopyFallbackShmSerial_ = layer.shmCommitSerial;
             winehua::GraphicsBroker::GetInstance().SetZeroCopySurfaceReady(
                 zeroCopySurfaceKey_, false);
@@ -289,31 +333,39 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
     }
 
     zeroCopyConsecutiveFailures_ = 0;
+    ComposeZeroCopySamplingTransform(zeroCopyTransform_, zeroCopyVulkanSource_,
+                                      zeroCopySamplingTransform_);
     const int64_t imageTimestamp = OH_NativeImage_GetTimestamp(zeroCopyImage_);
+    const int64_t previousTimestamp = zeroCopyLastTimestamp_;
+    int64_t timestampDeltaUs = 0;
     if (imageTimestamp > 0)
     {
-        if (zeroCopyLastTimestamp_ > 0 && imageTimestamp <= zeroCopyLastTimestamp_)
+        if (previousTimestamp > 0)
         {
-            ++zeroCopyTimestampRegressions_;
-            if (zeroCopyTimestampRegressions_ == 1 || zeroCopyTimestampRegressions_ % 60 == 0)
-                OH_LOG_WARN(LOG_APP,
-                            "[VIRGL-ZC][MAIN] timestamp regression tl=%{public}u "
-                            "current=%{public}lld previous=%{public}lld count=%{public}llu",
-                            toplevelId_, static_cast<long long>(imageTimestamp),
-                            static_cast<long long>(zeroCopyLastTimestamp_),
-                            static_cast<unsigned long long>(zeroCopyTimestampRegressions_));
+            timestampDeltaUs = (imageTimestamp - previousTimestamp) / 1000;
+            if (imageTimestamp < previousTimestamp) {
+                ++zeroCopyTimestampRegressions_;
+                if (zeroCopyTimestampRegressions_ == 1 || zeroCopyTimestampRegressions_ % 60 == 0)
+                    OH_LOG_WARN(LOG_APP,
+                                "[VIRGL-ZC][MAIN] timestamp regression tl=%{public}u "
+                                "current=%{public}lld previous=%{public}lld count=%{public}llu",
+                                toplevelId_, static_cast<long long>(imageTimestamp),
+                                static_cast<long long>(previousTimestamp),
+                                static_cast<unsigned long long>(zeroCopyTimestampRegressions_));
+            } else if (imageTimestamp == previousTimestamp) {
+                ++zeroCopyDuplicateTimestamps_;
+            }
         }
-        else
-        {
+        if (imageTimestamp > zeroCopyLastTimestamp_)
             zeroCopyLastTimestamp_ = imageTimestamp;
-        }
     }
 
     WaylandServer::ZeroCopyLayerInfo layer;
     uint32_t rendererToplevelId = toplevelId_;
     WaylandServer* server = WaylandServer::GetInstance();
     if (server->Policy().RootCompositing()) rendererToplevelId = server->GetDesktopRootToplevelId();
-    if (!server->GetZeroCopyLayerInfo(zeroCopySurfaceKey_, rendererToplevelId, layer))
+    if (!server->GetZeroCopyLayerInfo(zeroCopySurfaceKey_, rendererToplevelId,
+                                      zeroCopySourceW_, zeroCopySourceH_, layer))
     {
         ReleaseZeroCopyBinding();
         return false;
@@ -346,6 +398,20 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
                     static_cast<unsigned long long>(zeroCopySurfaceKey_));
     }
     ++zeroCopyFrames_;
+    if (TraceFrameOrder() && zeroCopyFrames_ <= 600)
+        OH_LOG_INFO(LOG_APP,
+                    "[VENUS-ORDER][MAIN] frame=%{public}llu signals=%{public}llu "
+                    "updates=%{public}llu signal_delta=%{public}llu coalesced=%{public}llu "
+                    "timestamp=%{public}lld timestamp_delta_us=%{public}lld "
+                    "timestamp_dup=%{public}llu timestamp_regress=%{public}llu",
+                    static_cast<unsigned long long>(zeroCopyFrames_),
+                    static_cast<unsigned long long>(zeroCopyFrameSignals_.load()),
+                    static_cast<unsigned long long>(zeroCopyUpdates_),
+                    static_cast<unsigned long long>(signalDelta),
+                    static_cast<unsigned long long>(zeroCopyCoalescedSignals_),
+                    static_cast<long long>(imageTimestamp), static_cast<long long>(timestampDeltaUs),
+                    static_cast<unsigned long long>(zeroCopyDuplicateTimestamps_),
+                    static_cast<unsigned long long>(zeroCopyTimestampRegressions_));
     if (zeroCopyFrames_ == 1 || zeroCopyFrames_ % 120 == 0)
         OH_LOG_INFO(LOG_APP,
                     "[VIRGL-ZC][MAIN] frame=%{public}llu tl=%{public}u key=%{public}llu "
@@ -361,26 +427,63 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
 
 void EglRenderer::ReleaseZeroCopyBinding()
 {
+    // Teardown logs below distinguish SurfaceQueue ownership failures from rendering failures.
+    const uint64_t surfaceKey = zeroCopySurfaceKey_;
+    OH_LOG_INFO(LOG_APP,
+                "[VIRGL-ZC][MAIN] release begin tl=%{public}u key=%{public}llu "
+                "registered=%{public}d ready=%{public}d listener=%{public}d image=%{public}p",
+                toplevelId_, static_cast<unsigned long long>(surfaceKey),
+                zeroCopyRegistered_, zeroCopyReadyPublished_, zeroCopyListenerSet_,
+                zeroCopyImage_);
     if (zeroCopySurfaceKey_)
     {
+        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release ready-off begin key=%{public}llu",
+                    static_cast<unsigned long long>(surfaceKey));
         winehua::GraphicsBroker::GetInstance().SetZeroCopySurfaceReady(
             zeroCopySurfaceKey_, false);
+        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release ready-off end key=%{public}llu",
+                    static_cast<unsigned long long>(surfaceKey));
+        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release compositor-off begin key=%{public}llu",
+                    static_cast<unsigned long long>(surfaceKey));
         WaylandServer::GetInstance()->SetSurfaceZeroCopy(zeroCopySurfaceKey_, false);
+        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release compositor-off end key=%{public}llu",
+                    static_cast<unsigned long long>(surfaceKey));
     }
     zeroCopyReadyPublished_ = false;
     zeroCopyFallbackPending_ = false;
-    if (zeroCopyRegistered_)
+    if (zeroCopyRegistered_) {
+        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release detach begin key=%{public}llu",
+                    static_cast<unsigned long long>(surfaceKey));
         winehua::GraphicsBroker::GetInstance().DetachZeroCopyTarget(zeroCopySurfaceKey_);
+        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release detach end key=%{public}llu",
+                    static_cast<unsigned long long>(surfaceKey));
+    }
     zeroCopyRegistered_ = false;
-    if (zeroCopyImage_ && zeroCopyListenerSet_)
-        OH_NativeImage_UnsetOnFrameAvailableListener(zeroCopyImage_);
+    if (zeroCopyImage_ && zeroCopyListenerSet_) {
+        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release listener-unset begin key=%{public}llu",
+                    static_cast<unsigned long long>(surfaceKey));
+        const int32_t unsetResult = OH_NativeImage_UnsetOnFrameAvailableListener(zeroCopyImage_);
+        OH_LOG_INFO(LOG_APP,
+                    "[VIRGL-ZC][MAIN] release listener-unset end key=%{public}llu result=%{public}d",
+                    static_cast<unsigned long long>(surfaceKey), unsetResult);
+    }
     zeroCopyListenerSet_ = false;
     zeroCopyProducerWindow_ = nullptr;
-    if (zeroCopyImage_) OH_NativeImage_Destroy(&zeroCopyImage_);
+    if (zeroCopyImage_) {
+        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release image-destroy begin key=%{public}llu",
+                    static_cast<unsigned long long>(surfaceKey));
+        OH_NativeImage_Destroy(&zeroCopyImage_);
+        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release image-destroy end key=%{public}llu",
+                    static_cast<unsigned long long>(surfaceKey));
+    }
     if (zeroCopyTexture_)
     {
+        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release texture-delete begin key=%{public}llu",
+                    static_cast<unsigned long long>(surfaceKey));
         glDeleteTextures(1, &zeroCopyTexture_);
         zeroCopyTexture_ = 0;
+        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release texture-delete end key=%{public}llu",
+                    static_cast<unsigned long long>(surfaceKey));
     }
     zeroCopyFrameAvailable_.store(false, std::memory_order_release);
     zeroCopyHasFrame_ = false;
@@ -389,11 +492,18 @@ void EglRenderer::ReleaseZeroCopyBinding()
     zeroCopyFallbackShmSerial_ = 0;
     zeroCopyLastTimestamp_ = 0;
     zeroCopyTimestampRegressions_ = 0;
+    zeroCopyUpdates_ = 0;
+    zeroCopyLastConsumedSignal_ = 0;
+    zeroCopyCoalescedSignals_ = 0;
+    zeroCopyDuplicateTimestamps_ = 0;
     zeroCopySurfaceKey_ = 0;
     zeroCopyClientPid_ = 0;
     zeroCopySurfaceId_ = 0;
     zeroCopySourceW_ = 0;
     zeroCopySourceH_ = 0;
+    zeroCopyVulkanSource_ = false;
+    OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release complete tl=%{public}u key=%{public}llu",
+                toplevelId_, static_cast<unsigned long long>(surfaceKey));
 }
 
 void EglRenderer::ShutdownZeroCopyConsumer()
@@ -784,7 +894,8 @@ void EglRenderer::RenderLoop() {
             glUseProgram(zeroCopyProgram_);
             glBindTexture(GL_TEXTURE_EXTERNAL_OES, zeroCopyTexture_);
             glUniform1i(glGetUniformLocation(zeroCopyProgram_, "uTex"), 0);
-            glUniformMatrix4fv(zeroCopyTransformLocation_, 1, GL_FALSE, zeroCopyTransform_);
+            glUniformMatrix4fv(zeroCopyTransformLocation_, 1, GL_FALSE,
+                               zeroCopySamplingTransform_);
             glDrawArrays(GL_TRIANGLES, 0, 6);
 
             // Desktop 模式 z-order 修复: GL overlay 不参与 CPU 合成的层序,

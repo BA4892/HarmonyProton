@@ -9,12 +9,16 @@
 #include <string>
 #include <vector>
 
+#include "wine_constants.h"
+
 // -- Box64 性能调优 (static inline, 供 napi_init / wine_child 共用) --
 static inline void SetBox64PerfEnv() {
     setenv("BOX64_LOG", "0", 1);
     setenv("BOX64_NOBANNER", "1", 1);
     setenv("BOX64_SHOWSEGV", "1", 1);
-    setenv("BOX64_DYNAREC_SAFEFLAGS", "0", 1);
+    // Keep Box64's compatibility default. Forcing 0 breaks code that observes
+    // x86 flags across translated blocks, including protected startup code.
+    setenv("BOX64_DYNAREC_SAFEFLAGS", "1", 1);
     setenv("BOX64_DYNAREC_BIGBLOCK", "3", 1);
     setenv("BOX64_DYNAREC_CALLRET", "2", 1);
     setenv("BOX64_DYNAREC_FORWARD", "1024", 1);
@@ -39,7 +43,7 @@ inline void AppendBox64PerfStrings(std::vector<std::string>& env) {
     env.push_back("BOX64_LOG=0");
     env.push_back("BOX64_NOBANNER=1");
     env.push_back("BOX64_SHOWSEGV=1");
-    env.push_back("BOX64_DYNAREC_SAFEFLAGS=0");
+    env.push_back("BOX64_DYNAREC_SAFEFLAGS=1");
     env.push_back("BOX64_DYNAREC_BIGBLOCK=3");
     env.push_back("BOX64_DYNAREC_CALLRET=2");
     env.push_back("BOX64_DYNAREC_FORWARD=1024");
@@ -56,12 +60,22 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
                                       const std::string& libPath,
                                       const std::string& binDir,
                                       int audioBootstrapFd,
-                                      const std::string& homeDir);
+                                      const std::string& homeDir,
+                                      const std::string& prefixDir = WINE_PREFIX);
+
+// Add the managed product D3D backend overlay to a process environment. The
+// caller selects the product backend once per Wine session; the default is
+// dxvk_legacy, while wined3d remains an explicit compatibility fallback.
+void AppendD3dBackendEnv(std::vector<std::string>& env,
+                         const std::string& d3dBackend,
+                         const std::string& binDir);
 
 // -- Audio bootstrap --
 int CreateAudioBootstrapFd(const std::string& runtimeDir);
 
 // -- entryParams 序列化 --
+size_t AppendMissingEntryParamsEnvOverrides(std::string& entryParams,
+                                            const std::vector<std::string>& env);
 std::string SerializeEnvToEntryParams(const std::vector<std::string>& env);
 
 // -- Graphics 辅助 --

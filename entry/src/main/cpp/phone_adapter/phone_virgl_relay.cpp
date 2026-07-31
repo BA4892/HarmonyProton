@@ -38,16 +38,17 @@ int PhoneVirgl_RelayRequest(uint32_t code, const OHIPCParcel* data, OHIPCParcel*
     switch (code) {
     case vi::kConfigureRequest: {
         int32_t version = 0;
-        const char* s[5] = {};
+        const char* s[vi::kHostConfigStringCount] = {};
         if (OH_IPCParcel_ReadInt32(data, &version) != OH_IPC_SUCCESS) return kPhoneVirglRelayError;
         uint32_t len = sizeof(version);
-        for (int i = 0; i < 5; ++i) {
+        for (uint32_t i = 0; i < vi::kHostConfigStringCount; ++i) {
             s[i] = OH_IPCParcel_ReadString(data);
             if (!s[i]) return kPhoneVirglRelayError;
             len += sizeof(uint32_t) + static_cast<uint32_t>(strlen(s[i])) + 1;
         }
         if (!sock::SockWritePod(fd, len) || !sock::SockWritePod(fd, version)) return kPhoneVirglRelayError;
-        for (int i = 0; i < 5; ++i) if (!sock::SockWriteStr(fd, s[i])) return kPhoneVirglRelayError;
+        for (uint32_t i = 0; i < vi::kHostConfigStringCount; ++i)
+            if (!sock::SockWriteStr(fd, s[i])) return kPhoneVirglRelayError;
         break;
     }
     case vi::kDetachSurfaceRequest: {

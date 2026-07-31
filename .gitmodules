@@ -43,3 +43,7 @@
 	path = thirdparty/libdrm
 	url = https://gitee.com/openharmony/third_party_libdrm.git
 	branch = OpenHarmony-6.0-Beta1
+[submodule "thirdparty/dxvk"]
+	path = thirdparty/dxvk
+	url = https://github.com/winehua/dxvk.git
+	branch = dxvk-legacy-1.10.3

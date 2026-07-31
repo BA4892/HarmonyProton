@@ -44,11 +44,17 @@ static bool DirExists(const char* path) {
     return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
 }
 
+bool IsWinePrefixInitialized(const std::string& prefixDir) {
+    const std::string prefix = prefixDir.empty() ? WINE_PREFIX : prefixDir;
+    return FileHasData((prefix + "/system.reg").c_str()) &&
+           FileHasData((prefix + "/user.reg").c_str()) &&
+           DirExists((prefix + "/drive_c/windows/system32").c_str()) &&
+           DirExists((prefix + "/drive_c/windows/temp").c_str()) &&
+           DirExists((prefix + "/drive_c/users").c_str());
+}
+
 bool IsWinePrefixInitialized() {
-    return FileHasData(WINE_PREFIX "/system.reg") &&
-           FileHasData(WINE_PREFIX "/user.reg") &&
-           DirExists(WINE_PREFIX "/drive_c/windows/system32") &&
-           DirExists(WINE_PREFIX "/drive_c/users");
+    return IsWinePrefixInitialized(WINE_PREFIX);
 }
 
 // fork 模式下子进程退出先变僵尸、/proc/<pid> 不消失（NCP 模式由 appspawn 立即 reap）。
@@ -89,6 +95,29 @@ static bool EnsureDirRecursive(const std::string& path, mode_t mode)
     return EnsureDir(path, mode);
 }
 
+static bool EnsureExternalPePrefixSkeleton(const std::string& prefixDir)
+{
+    // The external-PE runtime resolves 64-bit Windows binaries from
+    // x86_64-windows instead of copying them into drive_c.  wineboot therefore
+    // does not necessarily materialize directories which Windows services and
+    // diagnostics still use as working/output directories.
+    static const char* const suffixes[] = {
+        "/drive_c/windows/system32",
+        "/drive_c/windows/system32/drivers",
+        "/drive_c/windows/system32/spool",
+        "/drive_c/windows/system32/tasks",
+        "/drive_c/windows/temp",
+    };
+
+    bool ok = true;
+    for (const char* suffix : suffixes)
+        ok = EnsureDirRecursive(prefixDir + suffix, 0777) && ok;
+
+    OH_LOG_INFO(LOG_APP, "[Launch-Async] external-PE prefix skeleton %{public}s",
+                ok ? "ready" : "failed");
+    return ok;
+}
+
 static bool HasRuntimeFileExtension(const char* name)
 {
     const char* dot = strrchr(name, '.');
@@ -104,7 +133,8 @@ static bool CopyFileIfNeeded(const std::string& src, const std::string& dst)
     struct stat srcSt;
     struct stat dstSt;
     if (stat(src.c_str(), &srcSt) != 0 || !S_ISREG(srcSt.st_mode)) return false;
-    if (stat(dst.c_str(), &dstSt) == 0 && S_ISREG(dstSt.st_mode) && dstSt.st_size == srcSt.st_size)
+    if (stat(dst.c_str(), &dstSt) == 0 && S_ISREG(dstSt.st_mode) &&
+        dstSt.st_size == srcSt.st_size && dstSt.st_mtime >= srcSt.st_mtime)
         return true;
 
     int inFd = open(src.c_str(), O_RDONLY);
@@ -115,14 +145,18 @@ static bool CopyFileIfNeeded(const std::string& src, const std::string& dst)
         return false;
     }
 
-    int outFd = open(dst.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    std::string temporaryTemplate = dst + ".winehua.tmp.XXXXXX";
+    std::vector<char> temporary(temporaryTemplate.begin(), temporaryTemplate.end());
+    temporary.push_back('\0');
+    int outFd = mkstemp(temporary.data());
     if (outFd < 0)
     {
-        OH_LOG_ERROR(LOG_APP, "[Launch-Async] open dst %{public}s failed: %{public}s",
+        OH_LOG_ERROR(LOG_APP, "[Launch-Async] create temporary for %{public}s failed: %{public}s",
                      dst.c_str(), strerror(errno));
         close(inFd);
         return false;
     }
+    fchmod(outFd, 0666);
 
     char buffer[64 * 1024];
     bool ok = true;
@@ -153,16 +187,28 @@ static bool CopyFileIfNeeded(const std::string& src, const std::string& dst)
                      src.c_str(), strerror(errno));
     }
 
+    if (ok && fsync(outFd) != 0)
+    {
+        ok = false;
+        OH_LOG_ERROR(LOG_APP, "[Launch-Async] fsync dst %{public}s failed: %{public}s",
+                     dst.c_str(), strerror(errno));
+    }
     close(outFd);
     close(inFd);
-    if (!ok) unlink(dst.c_str());
+    if (ok && rename(temporary.data(), dst.c_str()) != 0)
+    {
+        ok = false;
+        OH_LOG_ERROR(LOG_APP, "[Launch-Async] replace dst %{public}s failed: %{public}s",
+                     dst.c_str(), strerror(errno));
+    }
+    if (!ok) unlink(temporary.data());
     return ok;
 }
 
-static bool EnsureWow64Files(const std::string& binDir)
+static bool EnsureWow64Files(const std::string& binDir, const std::string& prefixDir)
 {
     const std::string srcDir = binDir + "/i386-windows";
-    const std::string dstDir = WINE_PREFIX "/drive_c/windows/syswow64";
+    const std::string dstDir = prefixDir + "/drive_c/windows/syswow64";
 
     DIR* src = opendir(srcDir.c_str());
     if (!src)
@@ -195,10 +241,9 @@ static bool EnsureWow64Files(const std::string& binDir)
                 total, copied, failed);
     return total > 0 && failed == 0;
 }
-static bool IsWineserverSocketReady() {
-    const char* prefix = WINE_PREFIX;
+static bool IsWineserverSocketReady(const std::string& prefix) {
     char sockDir[512];
-    snprintf(sockDir, sizeof(sockDir), "%s/.wineserver", prefix);
+    snprintf(sockDir, sizeof(sockDir), "%s/.wineserver", prefix.c_str());
     DIR* d = opendir(sockDir);
     if (!d) return false;
     bool found = false;
@@ -214,12 +259,89 @@ static bool IsWineserverSocketReady() {
     return found;
 }
 
-static void PrepareGraphicsEnv(const LaunchParams& params)
+static std::string FindLaunchEnvironmentValue(const LaunchParams& params,
+                                              const char* key)
+{
+    const std::string prefix = std::string(key) + "=";
+    for (auto it = params.envStrs.rbegin(); it != params.envStrs.rend(); ++it) {
+        if (it->rfind(prefix, 0) == 0)
+            return it->substr(prefix.size());
+    }
+    return {};
+}
+
+static void AppendStableDesktopDxvkEnv(std::vector<std::string>& env,
+                                       const LaunchParams& params)
+{
+    if (params.d3dBackend.rfind("dxvk_", 0) != 0) return;
+
+    /* SetHostShadowProfile carries the selected diagnostic profile through
+     * the host-side broker environment before Explorer is launched.  Keep
+     * the desktop descendants on that explicit profile instead of replacing
+     * it with the product default below. */
+    const char* shadowTrace = getenv("VKR_WINEHUA_SHADOW_TRACE");
+    const bool guestPerf = shadowTrace && !strcmp(shadowTrace, "perf");
+    std::string selectedProfile =
+        FindLaunchEnvironmentValue(params, "WINEHUA_PERF_PROFILE");
+    if (selectedProfile.empty()) {
+        if (shadowTrace && !strcmp(shadowTrace, "inline-gpu-upload-frame-assoc-trace"))
+            selectedProfile = "shadow-precise-dirty-ring-frame-assoc-trace";
+        else if (shadowTrace && !strcmp(shadowTrace, "present-image-trace"))
+            selectedProfile = "shadow-precise-dirty-ring-present-image-trace";
+        else if (shadowTrace && !strcmp(shadowTrace, "gpu-frame-profile"))
+            selectedProfile = "shadow-precise-dirty-ring-gpu-frame-profile";
+        else if (shadowTrace && !strcmp(shadowTrace, "frame-timeline"))
+            selectedProfile = "shadow-precise-dirty-ring-frame-timeline";
+        else if (shadowTrace && !strcmp(shadowTrace, "inline-gpu-upload-descriptor-serialized"))
+            selectedProfile = "shadow-precise-dirty-ring-inline-upload-descriptor-serialized";
+        else if (shadowTrace && !strcmp(shadowTrace, "inline-gpu-upload-serialized"))
+            selectedProfile = "shadow-precise-dirty-ring-inline-upload-serialized";
+        else if (shadowTrace && !strcmp(shadowTrace, "inline-gpu-upload-alias-cover"))
+            selectedProfile = "shadow-precise-dirty-ring-inline-upload-alias-cover";
+        else if (shadowTrace && !strcmp(shadowTrace, "inline-gpu-upload-coverage-sort"))
+            selectedProfile = "shadow-precise-dirty-ring-inline-upload-coverage-sort";
+        else if (shadowTrace && !strcmp(shadowTrace, "inline-gpu-upload"))
+            selectedProfile = "shadow-precise-dirty-ring-inline-upload";
+        else if (shadowTrace && !strcmp(shadowTrace, "no-gpu-upload-fast"))
+            selectedProfile = "shadow-precise-dirty-ring-no-upload-fast";
+        else if (shadowTrace && !strcmp(shadowTrace, "no-gpu-upload"))
+            selectedProfile = "shadow-precise-dirty-ring-no-upload";
+        else
+            selectedProfile = guestPerf ? "shadow-precise-strong-ring-perf"
+                                        : "shadow-precise-dirty-ring-inline-upload-coverage-sort";
+    }
+
+    /* Explorer-launched programs inherit the desktop process environment and
+     * bypass Index.d3dLaunchEnvironment(). Keep the product-correct settings
+     * here without changing the explicit A/B profiles used by runWineProgram. */
+    /* Product sessions retain warnings and errors without formatting DXVK's
+     * informational startup stream. Smoke and explicit diagnostics override
+     * this through runWineProgram's per-process environment. */
+    env.push_back("DXVK_LOG_LEVEL=warn");
+    env.push_back("DXVK_LOG_PATH=C:\\windows\\temp");
+    env.push_back("BOX64_DYNAREC_WEAKBARRIER=0");
+    env.push_back("WINEHUA_PERF_PROFILE=" + selectedProfile);
+    env.push_back("DXVK_WINEHUA_PRECISE_SHADOW=1");
+    if (selectedProfile == "shadow-precise-dirty-ring-inline-upload-descriptor-serialized") {
+        env.push_back("VKR_WINEHUA_DESCRIPTOR_UPDATE_SERIALIZE=1");
+    }
+    env.push_back("VN_WINEHUA_STRONG_RING_BARRIER=1");
+    if (guestPerf) {
+        env.push_back("VN_WINEHUA_PERF_SUMMARY=1");
+        env.push_back("VN_WINEHUA_PERF_LOG=/storage/Users/currentUser/Download/app.hackeris.winehua/winehua_guest_ring_perf.log");
+        /* vn_log uses MESA_LOG_DEBUG.  Raise only the explicit diagnostic
+         * profile so the Guest ring summary survives the OHOS logger filter. */
+        env.push_back("MESA_LOG_LEVEL=debug");
+    }
+}
+
+static void PrepareDesktopSessionGraphicsEnv(const LaunchParams& params)
 {
     OH_LOG_INFO(LOG_APP, "[Launch-Async] preparing graphics env for child processes");
     auto& gb = winehua::GraphicsBroker::GetInstance();
     gb.SetWineRuntimeBinaryDir(params.winehuaBin);
     gb.SetRequestedBackend(winehua::GraphicsBackend::Virgl);
+    gb.SetVulkanPresentMode(params.d3dBackend.rfind("dxvk_", 0) == 0);
     gb.EnsureStarted(params.sockDir);
 
     winehua::GraphicsBackendState state = gb.GetState();
@@ -232,15 +354,59 @@ static void PrepareGraphicsEnv(const LaunchParams& params)
         return;
     }
 
-    LogGraphicsBackendStateForLaunch("GraphicsSession");
+    std::vector<std::string> env;
+    gb.AppendWineEnv(env);
+    AppendD3dBackendEnv(env, params.d3dBackend, params.winehuaBin);
+    AppendStableDesktopDxvkEnv(env, params);
+    /* The broker now receives the finalized environment through the
+     * serialized __env entryParams channel. Keep this helper side-effect
+     * free so the old broker-global environment path cannot diverge from
+     * Explorer and smoke launches. */
+    LogGraphicsBackendStateForLaunch("DesktopSession");
 }
 
-static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd, const std::string& serializedEnv) {
+static void AppendDesktopD3dEntryEnv(std::string& entryParams, const LaunchParams& params)
+{
+    /* Explorer is launched directly through NCP during desktop bootstrap and
+     * therefore does not pass through the process broker. NCP children do not
+     * inherit the session environment reliably, so carry the same base
+     * Wine/Wayland/VirGL environment that was built for broker launches.
+     * Audio and WINESERVERSOCKET are intentionally filtered by
+     * AppendMissingEntryParamsEnvOverrides; their per-process descriptors are
+     * installed by WineChild after the fd list is applied. */
+    std::vector<std::string> env;
+    /* Refresh the graphics portion immediately before spawning Explorer.
+     * params.envStrs was assembled before wineboot and the VirGL receiver
+     * finished starting, so it may still contain a stale SHM fallback. */
+    winehua::GraphicsBroker::GetInstance().AppendWineEnv(env);
+    AppendD3dBackendEnv(env, params.d3dBackend, params.winehuaBin);
+    AppendStableDesktopDxvkEnv(env, params);
+    AppendMissingEntryParamsEnvOverrides(entryParams, env);
+
+    /* Fill in the remaining stable baseline values (HOME, prefix, loader
+     * paths, etc.) without allowing that early snapshot to replace the fresh
+     * graphics state above. */
+    AppendMissingEntryParamsEnvOverrides(entryParams, params.envStrs);
+}
+
+static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
+                          const std::string& serializedEnv) {
     // 通过 fdList 传递 audio bootstrap fd (仅 explorer 需要音频)
     NativeChildProcess_Fd audioFdNode;
     audioFdNode.fdName = const_cast<char*>("wine_audio_bootstrap");
     audioFdNode.fd = audioBootstrapFd;
     audioFdNode.next = nullptr;
+
+    // Prefix registry and user data survive runtime upgrades, while the
+    // syswow64 PE files are managed copies. Validate them before wineserver
+    // starts so an interrupted prior refresh cannot leave a zero-length DLL.
+    if (!EnsureExternalPePrefixSkeleton(p->prefixDir) ||
+        !EnsureWow64Files(p->winehuaBin, p->prefixDir)) {
+        OH_LOG_ERROR(LOG_APP, "[Launch-Async] external-PE prefix preparation failed");
+        if (gStateTsfn)
+            napi_call_threadsafe_function(gStateTsfn, strdup("wineboot-failed"), napi_tsfn_blocking);
+        return false;
+    }
 
     // -- wineserver via NCP --
     // wineserver 走 WineserverMain 入口, 不解析 __env__, 不需要环境变量
@@ -261,7 +427,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd, const std::stri
             return false;
         }
         OH_LOG_INFO(LOG_APP, "[Launch-Async] wineserver pid=%{public}d (via appspawn)", wsChildPid);
-        if (!WaitFor("wineserver socket", IsWineserverSocketReady, 5000, 100)) {
+        if (!WaitFor("wineserver socket", [p]() { return IsWineserverSocketReady(p->prefixDir); }, 5000, 100)) {
             OH_LOG_WARN(LOG_APP, "[Launch-Async] wineserver socket not detected, "
                         "wineboot will recover via server_connect retry+start_server");
         }
@@ -275,18 +441,34 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd, const std::stri
     setenv("PROCESSBROKER", WINE_BROKER_SOCKET, 1);
 
     // -- wineboot --init --
-    bool prefixReady = IsWinePrefixInitialized();
+    const std::string initMarker = p->prefixDir + "/.winehua-init-in-progress";
+    bool prefixReady = IsWinePrefixInitialized(p->prefixDir)
+        && access(initMarker.c_str(), F_OK) != 0;
 
     if (!prefixReady) {
         OH_LOG_INFO(LOG_APP, "[Launch-Async] prefix not initialized, preparing WoW64 and running wineboot --init...");
+        if (FILE* marker = fopen(initMarker.c_str(), "w")) {
+            fputs("wineboot\n", marker);
+            fclose(marker);
+        } else {
+            OH_LOG_ERROR(LOG_APP, "[Launch-Async] cannot create prefix init marker: %{public}s",
+                         initMarker.c_str());
+            return false;
+        }
         auto* ws = WaylandServer::GetInstance();
         ws->SetDesktopRootRecognitionEnabled(false);
-        EnsureWow64Files(p->winehuaBin);
-        const char* desktopTag = ws->IsDesktopMode() ? "__winehua_desktop__|" : "";
+        // wineboot creates shell-owned helper windows while initializing a fresh
+        // prefix.  Keep those helpers on the desktop path even when the smoke
+        // suite itself uses managed windows; otherwise the first clean-prefix
+        // session can leave Wayland/audio/graphics services half initialized.
+        const char* desktopTag =
+            (ws->IsDesktopMode() || p->automationMode) ? "__winehua_desktop__|" : "";
 #ifdef __aarch64__
-        std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|" + desktopTag + "wineboot|--init";
+        std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|" + desktopTag +
+            "wineboot|--init|__env=WINEPREFIX=" + p->prefixDir;
 #else
-        std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|" + desktopTag + "wine|wineboot|--init";
+        std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|" + desktopTag +
+            "wine|wineboot|--init|__env=WINEPREFIX=" + p->prefixDir;
 #endif
         // 注意: wineboot --init 只需要初始化 prefix, 不传完整环境变量以节省 entryParams 长度
         NativeChildProcess_Args childArgs = {};
@@ -303,7 +485,6 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd, const std::stri
             return false;
         }
         OH_LOG_INFO(LOG_APP, "[Launch-Async] wineboot started, pid=%{public}d", childPid);
-
         /* 首次初始化 (wine.inf 的 PreInstall/DefaultInstall/Wow64Install + 可选 Mono)
          * 耗时与设备性能强相关, 模拟器上可超过 30s — 固定死线会把仍在正常初始化的
          * wineboot 误判为失败。改为进程活性驱动: wineboot 活着就继续等,
@@ -328,21 +509,31 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd, const std::stri
         }
         /* wineboot 已退出: registry 仍在 wineserver flush 途中 (实测落盘延迟
          * 稳定 ~13s), 宽限窗口等文件就绪 — 文件到位即通过, 不会满等 */
-        if (!WaitFor("wine prefix", IsWinePrefixInitialized, 60000, 200)) {
+        if (!WaitFor("wine prefix",
+                     [&p]() { return IsWinePrefixInitialized(p->prefixDir); },
+                     60000, 200)) {
             OH_LOG_ERROR(LOG_APP, "[Launch-Async] wineboot exited but prefix incomplete, abort");
             if (gStateTsfn)
                 napi_call_threadsafe_function(gStateTsfn, strdup("wineboot-failed"), napi_tsfn_blocking);
             return false;
         }
         OH_LOG_INFO(LOG_APP, "[Launch-Async] wineboot completed (%{public}d s)", aliveMs / 1000);
+        unlink(initMarker.c_str());
         ws->SetDesktopRootRecognitionEnabled(true);
         ws->PromotePendingDesktopRoot();
     } else {
         OH_LOG_INFO(LOG_APP, "[Launch-Async] prefix already initialized, skipping wineboot");
     }
 
+    // -- explorer desktop shell (仅 desktop 模式) --
+    PrepareDesktopSessionGraphicsEnv(*p);
+
+    if (p->automationMode)
+    {
+        OH_LOG_INFO(LOG_APP, "[Launch-Async] automation session ready; Explorer intentionally skipped");
+    }
+    else if (WaylandServer::GetInstance()->IsDesktopMode())
     // -- explorer (Desktop 或 Pad 模式均启动) --
-    if (WaylandServer::GetInstance()->IsDesktopMode())
     {
         auto* ws = WaylandServer::GetInstance();
         ws->SetDesktopRootRecognitionEnabled(true);
@@ -360,6 +551,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd, const std::stri
 #else
         std::string exEntry = p->homeDir + "|" + p->winehuaBin + serializedEnv + "|__winehua_desktop__|wine|explorer|" + desktopArg;
 #endif
+        AppendDesktopD3dEntryEnv(exEntry, *p);
         NativeChildProcess_Args exArgs = {};
         exArgs.entryParams = const_cast<char*>(exEntry.c_str());
         exArgs.fdList.head = (audioBootstrapFd >= 0) ? &audioFdNode : nullptr;
@@ -371,6 +563,19 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd, const std::stri
         OH_LOG_INFO(LOG_APP, "[Launch-Async] explorer desktop pid=%{public}d ret=%{public}d",
                     exPid, (int)exRet);
         ws->PromotePendingDesktopRoot();
+        /* StartNativeChildProcess returning only means that appspawn accepted
+         * the Explorer request. On a warm prefix the child can still need
+         * several seconds to connect to wineserver and commit its desktop
+         * surface. Do not publish wine-ready until that stable launch boundary
+         * exists, otherwise an automatic game can race Wine's own bootstrap
+         * and die before DXGI initialization. */
+        if (exRet == NCP_NO_ERROR &&
+            !WaitFor("explorer desktop root", [ws]() {
+                return ws->GetDesktopRootToplevelId() != 0;
+            }, 15000, 100)) {
+            OH_LOG_WARN(LOG_APP, "[Launch-Async] explorer desktop root not ready; "
+                        "continuing after bounded readiness wait");
+        }
     }
     else
     {
@@ -380,6 +585,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd, const std::stri
 #else
         std::string exEntry = p->homeDir + "|" + p->winehuaBin + serializedEnv + "|wine|explorer";
 #endif
+        AppendDesktopD3dEntryEnv(exEntry, *p);
         NativeChildProcess_Args exArgs = {};
         exArgs.entryParams = const_cast<char*>(exEntry.c_str());
         NativeChildProcess_Options exOpts = {};
@@ -398,19 +604,21 @@ void LaunchThreadFunc(LaunchParams* p) {
     OH_LOG_INFO(LOG_APP, "[Launch-Async] XKB_CONFIG_ROOT=%{public}s",
                 (p->winehuaBin + "/../share/X11/xkb").c_str());
 
-    winehua::GraphicsBroker::GetInstance().SetWineRuntimeBinaryDir(p->winehuaBin);
-    winehua::GraphicsBroker::GetInstance().EnsureStarted(p->sockDir);
+    auto& graphicsBroker = winehua::GraphicsBroker::GetInstance();
+    graphicsBroker.SetWineRuntimeBinaryDir(p->winehuaBin);
+    graphicsBroker.SetVulkanPresentMode(p->d3dBackend.rfind("dxvk_", 0) == 0);
+    graphicsBroker.EnsureStarted(p->sockDir);
 
     int audioBootstrapFd = CreateAudioBootstrapFd(p->sockDir);
+    // Resolve VirGL/backend state before serializing the environment so NCP
+    // children inherit the active receiver rather than an early SHM snapshot.
+    PrepareDesktopSessionGraphicsEnv(*p);
+    p->envStrs = BuildWineEnv(p->sockDir, p->sockName, p->libPath, p->winehuaBin,
+                               audioBootstrapFd, p->homeDir, p->prefixDir);
+    AppendD3dBackendEnv(p->envStrs, p->d3dBackend, p->winehuaBin);
+    const std::string serializedEnv = SerializeEnvToEntryParams(p->envStrs);
 
-    // 在 BuildWineEnv 前确定 VirGL backend, 确保产出的环境变量是最终版本
-    PrepareGraphicsEnv(*p);
-
-    std::vector<std::string> wineEnv = BuildWineEnv(p->sockDir, p->sockName, p->libPath,
-                                                     p->winehuaBin, audioBootstrapFd, p->homeDir);
-    std::string serializedEnv = SerializeEnvToEntryParams(wineEnv);
-
-    mkdir(WINE_PREFIX, 0755);
+    mkdir(p->prefixDir.c_str(), 0755);
 
     if (gStateTsfn)
         napi_call_threadsafe_function(gStateTsfn, strdup("wineserver-starting"), napi_tsfn_blocking);

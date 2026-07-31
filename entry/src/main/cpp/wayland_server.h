@@ -52,8 +52,10 @@ public:
         return desktopCompositor_.TakeToplevelFrame(id, out, w, h);
     }
     bool GetZeroCopyLayerInfo(uint64_t surfaceKey, uint32_t rendererToplevelId,
+                              int fallbackWidth, int fallbackHeight,
                               ZeroCopyLayerInfo& info) {
-        return desktopCompositor_.GetZeroCopyLayerInfo(surfaceKey, rendererToplevelId, info);
+        return desktopCompositor_.GetZeroCopyLayerInfo(
+            surfaceKey, rendererToplevelId, fallbackWidth, fallbackHeight, info);
     }
     void SetSurfaceZeroCopy(uint64_t surfaceKey, bool enabled) {
         desktopCompositor_.SetSurfaceZeroCopy(surfaceKey, enabled);
