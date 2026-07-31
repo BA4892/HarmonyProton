@@ -1,24 +1,32 @@
-# OpenGL / VirGL Step 1 设计说明
+# OpenGL / VirGL 设计说明
 
-> 更新日期: 2026-07-25
+> 更新日期: 2026-07-31
+> 本文记录 VirGL/OpenGL 链路（Step 1 → Step 3）的设计与演进。后续又增加了
+> Vulkan/DXVK 链路（见 [PHASE2_DXVK_STATUS_MEMO.md](PHASE2_DXVK_STATUS_MEMO.md)），
+> 现为 OpenGL 程序的 fallback 渲染路径。
 
 ## 目标
 
 在不要求 Windows 应用改动的前提下，让 Wine 内的 OpenGL 程序在 HarmonyOS 上跑通，并尽量复用现有 Wayland 窗口与上屏链路。
 
-## 当前结论
+## 当前结论（2026-07-31 现状）
 
-- `x86_64 + HarmonyOS PC emulator` 上，`winehua_graphics_smoke.exe` 已能正确出图
-- 3D 命令路径已经切到 `guest Mesa virpipe -> vtest socket -> virgl_test_server -> virglrenderer`
-- 最终显示路径仍复用现有 `Wayland -> TakeFrame -> EglRenderer -> XComponent`
-- 当前显示传输模式仍是 `wl_shm + cpu_copy + gl_upload`
-- 当前不是零拷贝显示方案，也不是多窗口专项方案
+- 3D 命令路径已切到 `guest Mesa virpipe -> vtest socket -> virgl_test_server -> virglrenderer`
+- **zero-copy 显示已落地**：virgl 生效时传输模式为 `virgl_texture+surface_queue+external_oes`
+  （`virgl_surface_presenter.cpp` 把 OHNativeWindow producer 直接接进 virgl，`TakeFrame`/`EglRenderer`
+  降为 CPU fallback），支持多窗口 per-surface zero-copy（surfaceKey 粒度 attach/detach）
+- Wine 侧新增专用接收端：`winewayland.drv/wayland_surface_ohos.c`（读 `WINEHUA_ZERO_COPY_READY_DIR`）
+  与 `opengl_readback.c`
+- virgl 运行时支持三种启动方式：NCP 子进程、OH_IPC 远程代理（`OHIPCRemoteProxy`）、进程内 host
+  （`StartVirglInProcessHostLocked`，phone 模式）
+- Vulkan/DXVK 链路已合并为产品路径（guest DXVK 1.10.3 → Wine Vulkan → Venus → virglrenderer Venus
+  → host Vulkan present），OpenGL 为显式 fallback
 
 ## 当前架构
 
 ```mermaid
 flowchart LR
-    A["Windows App (OpenGL / future DX)"] --> B["Wine opengl32 + win32u/opengl"]
+    A["Windows App (OpenGL / DX)"] --> B["Wine opengl32 + win32u/opengl"]
     B --> C["winewayland.drv"]
     C --> D["guest_gfx bundle: libEGL / libGLES / libgallium (virpipe)"]
     D --> E["VTEST_SOCKET_NAME"]
@@ -26,9 +34,10 @@ flowchart LR
     F --> G["libvirglrenderer + host EGL/GLES"]
     C --> H["Wayland wl_surface"]
     H --> I["内嵌 Wayland compositor"]
-    I --> J["GraphicsBroker::TakeFrame"]
-    J --> K["EglRenderer glTexImage2D / glTexSubImage2D"]
-    K --> L["Harmony XComponent"]
+    I --> J["zero-copy: virgl_surface_presenter (OH_NativeBuffer + external OES)"]
+    J --> L["Harmony XComponent"]
+    I --> K["fallback: TakeFrame → EglRenderer glTexSubImage2D"]
+    K --> L
 ```
 
 ## 复用了什么
@@ -99,6 +108,7 @@ flowchart LR
 | `WINEHUA_SHM_FALLBACK` | `0` / `1` | 是否回落到了 shm 路径 |
 | `WINEHUA_FRAME_ZERO_COPY` | `0` / `1` | 零拷贝帧路径是否生效 |
 | `WINEHUA_FRAME_TRANSPORT` | 字符串 | 显示传输模式，如 `wl_shm+cpu_copy+gl_upload`、`virgl_texture+surface_queue+external_oes` |
+| `WINEHUA_VULKAN_PRESENT` | `1` | Vulkan present 模式（`vulkanPresentMode_` 为真时注入，DXVK/Venus 链路） |
 | `WINEHUA_GUEST_GFX_READY` | `0` / `1` | guest_gfx receiver bundle 是否就绪 |
 | `WINEHUA_GUEST_GFX_MODE` | `mesa-virpipe` / `stock-egl` | guest 3D receiver 模式 |
 | `WINEHUA_GUEST_GFX_DIR` | 路径 | bundle 运行时目录（仅在非空时注入） |
@@ -150,14 +160,14 @@ flowchart LR
 - 已加上 Wine 侧和宿主侧的关键诊断日志，便于判断卡在库加载、socket、EGL 还是像素格式阶段
 - 已完成 x86_64 模拟器上的 Step 1 OpenGL 正确出图验证
 
-## 当前未完成
+## 演进记录（原"当前未完成"项均已落地）
 
-- 最终显示仍不是零拷贝，当前仍有 CPU copy 和 GL upload
-- 没有做多窗口 GL 专项支持，当前以单窗口 smoke / 现有窗口链路为主
-- 宿主侧 `virgl_renderer_init()` 进程内探针仍然关闭，避免 OHOS 下破坏宿主 EGL 状态
-- 还没有实现专用的 Wine 3D 接收端改造；当前是“复用 Wine 现有 OpenGL 路径 + 替换运行时库”
-- 还没有给 DX / Vulkan 做最终验证结论
-- 还没有把 arm64 用户态作为主验证目标
+- 零拷贝显示：已落地（surface-queue + external OES，见上）
+- 多窗口 GL 专项支持：已做（per-surface zero-copy attach/detach、`QueryVirglSurfaces`）
+- 进程内 `virgl_renderer_init()` 探针：已启用（`StartVirglInProcessHostLocked`，phone 模式）
+- 专用 Wine 3D 接收端：已实现（`wayland_surface_ohos.c` + `opengl_readback.c`）
+- DX / Vulkan 验证结论：已出（DXVK 1.10.3 stable baseline，双设备 suite PASS）
+- arm64 用户态主验证目标：已是当前调试目标
 
 ## Wine 改了什么
 
@@ -215,17 +225,13 @@ flowchart LR
 
 ## 当前最重要的边界
 
-- 这一步打通的是 OpenGL Step 1，不代表 DX 已经完成
-- 当前 3D 命令路径和最终上屏路径是两段链路，不要把“VirGL 已接上”误解成“显示已经零拷贝”
-- 当前方案的重点是“复用 Wine 现有路径”，不是新写一个私有 OpenGL 驱动
+- OpenGL 链路现在是 **fallback**：DXVK 稳定后 D3D11 走 Vulkan 链路，OpenGL 程序走本文链路
+- 3D 命令路径与上屏路径仍是两段链路，zero-copy 只覆盖 virgl backend
+- 方案重点是“复用 Wine 现有路径”，不是新写一个私有 OpenGL 驱动
 
 ## 后续待办
 
-- [ ] 把最终显示从 `wl_shm + cpu_copy + gl_upload` 推进到更高效路径
-- [ ] 评估 `dmabuf / zero-copy` 是否能并入现有 compositor 和 `EglRenderer`
 - [ ] 继续验证更多 OpenGL 程序，而不只是一支 smoke exe
-- [ ] 评估 DX9/DX10/Direct3D 经 `wined3d` 走同一条 guest Mesa 路径的可行性
-- [ ] 评估 Vulkan / Zink 路径是否要作为 Step 2
 - [ ] 整理 Wine 补丁，区分“可上游”与“仅项目集成”两类
 
 ## 未来提交版本时的建议拆分

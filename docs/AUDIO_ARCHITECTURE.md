@@ -1,13 +1,15 @@
 # WineHua 音频架构
 
-> 更新日期: 2026-06-22
+> 更新日期: 2026-07-31
 
 ## 概览
 
-当前音频方案只做一件事:
+音频方案做三件事:
 
 ```text
-把 Win32 程序输出的 PCM 音频稳定地桥接到宿主扬声器
+1. 把 Win32 程序输出的 PCM 音频稳定地桥接到宿主扬声器 (render)
+2. 把宿主麦克风采集的 PCM 桥接给 Win32 程序 (capture)
+3. MIDI 软合成 (winehua-gm.sf2 SoundFont)
 ```
 
 主链路如下:
@@ -21,8 +23,8 @@ flowchart LR
     D --> F["数据面: Shared Memory Ring"]
     E --> G["Host AudioBroker"]
     F --> G
-    G --> H["OH_AudioRenderer"]
-    H --> I["Speaker"]
+    G --> H["OH_AudioRenderer / OH_AudioCapturer"]
+    H --> I["Speaker / Microphone"]
 ```
 
 ## 设计原则
@@ -58,14 +60,14 @@ flowchart LR
 - `entry/src/main/cpp/audio_stream.cpp`
 - `entry/src/main/cpp/ring_buffer.h`
 - `entry/src/main/cpp/ring_buffer.cpp`
-- `shared/audio/audio_ipc_protocol.h`
+- `entry/src/main/cpp/include/audio_ipc_protocol.h`
 
 职责:
 
 - 管理 broker 生命周期
-- 创建和管理 stream
+- 创建和管理 stream（render / capture 双向，`AudioStreamDirection`）
 - 为每个 stream 创建 memfd ring buffer
-- 在 OHAudio callback 中读取并混音
+- 在 OHAudio callback 中读取并混音（render），或写入采集数据（capture）
 
 ## 控制面和数据面
 
@@ -83,7 +85,7 @@ App 启动前创建 bootstrap fd
 
 协议定义在:
 
-- `shared/audio/audio_ipc_protocol.h`
+- `entry/src/main/cpp/include/audio_ipc_protocol.h`
 
 当前命令:
 
@@ -94,6 +96,8 @@ App 启动前创建 bootstrap fd
 - `RESET`
 - `CLOSE`
 - `GET_STATUS`
+
+stream 方向由 `WINEHUA_AUDIO_STREAM_FLAG_CAPTURE` 标记区分（`AudioStreamDirection::Capture`）。
 
 ### 数据面
 
@@ -161,16 +165,14 @@ flowchart TD
 
 ## 当前边界
 
-当前版本只覆盖:
+当前版本覆盖:
 
-- render
-- shared mode
-- 默认播放设备
-- 多 stream 混音
+- render（多 stream 混音，共享模式，默认播放设备）
+- capture（`OH_AudioCapturer`，`WINEHUA_AUDIO_STREAM_FLAG_CAPTURE`）
+- MIDI 软合成（`wineohos.drv/ohos_midi.c` + `MIDI_SOUNDFONT_PATH`）
 
 当前不做:
 
-- capture
 - exclusive mode
 - multichannel output
 - broader format negotiation
@@ -181,7 +183,7 @@ flowchart TD
 - [ ] Format matrix: `WAV / MP3 / video audio track`
 - [ ] Confirm non-audio Wine processes are not slowed by broker init
 - [ ] Reduce control-plane overhead on the event-callback path
-- [ ] If features expand later, add `capture`, `exclusive mode`, `multichannel output`, `broader PCM support`
+- [ ] exclusive mode / multichannel output / broader PCM support
 
 ## 调试入口
 

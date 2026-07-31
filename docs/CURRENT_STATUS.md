@@ -1,7 +1,7 @@
 # Wine for HarmonyOS — 当前状态
 
-> 更新: 2026-07-13
-> 状态: ✅ VirGL | ✅ Audio | ✅ Explorer 桌面 | ✅ 输入 | ✅ 多窗口
+> 更新: 2026-07-31
+> 状态: ✅ DXVK (D3D11) | ✅ VirGL (OpenGL fallback) | ✅ Audio | ✅ Explorer 桌面 | ✅ 输入 | ✅ 多窗口
 
 ---
 
@@ -13,7 +13,7 @@ Box64 编译为共享库 (box64.so)，由 NCP 子进程 (`wine_child.so`) dlopen
 
 ### 2. NCP 子进程架构 ✅
 
-wine、wineserver、virgl_test_server 全部通过 `OH_Ability_StartNativeChildProcess` (NCP) 创建。Broker (`broker.cpp`) 中继 Wine 进程内 fork → NCP 的转换，支持命名多 fd 和环境变量转发。
+wine、wineserver、virgl_test_server 全部通过 `OH_Ability_StartNativeChildProcess` (NCP) 创建。Broker (`broker.cpp`) 中继 Wine 进程内 `CreateProcess` → NCP 的转换，支持命名多 fd 和环境变量转发。
 
 ### 3. Wine prefix 初始化 ✅
 
@@ -21,19 +21,27 @@ wine、wineserver、virgl_test_server 全部通过 `OH_Ability_StartNativeChildP
 
 ### 4. Explorer 桌面 ✅
 
-`explorer /desktop=shell,<w>x<h>` 桌面窗口通过 Wayland compositor 渲染上屏。
+`explorer /desktop=shell,<w>x<h>` 桌面窗口通过 Wayland compositor 渲染上屏。桌面生命周期管理（`winehua_keep` 持久化、退出不死锁）已完善。
 
 ### 5. 输入框架 ✅
 
-鼠标/键盘事件 ArkTS → NAPI → InputManager → Wayland → Wine 完整链路。支持物理像素 → Wine 逻辑坐标映射。
+鼠标/键盘事件 ArkTS → NAPI → InputManager → Wayland → Wine 完整链路。支持物理像素 → Wine 逻辑坐标映射。桌面模式输入命中裁决在 `compositor/input_resolver`（全屏→层→toplevel→root）。
 
 ### 6. 音频 ✅
 
-Host-broker 音频引擎：Wine 侧通过 IPC + ring buffer 传输 PCM，宿主进程集中持有 `OH_AudioRenderer`。支持 WASAPI / DirectSound / waveOut / MCI / MIDI（含 winehua-gm.sf2 SoundFont）。
+Host-broker 音频引擎：Wine 侧通过 IPC + ring buffer 传输 PCM，宿主进程集中持有 `OH_AudioRenderer`。支持 WASAPI / DirectSound / waveOut / MCI / MIDI（含 winehua-gm.sf2 SoundFont）+ 麦克风 capture。详见 [AUDIO_ARCHITECTURE.md](AUDIO_ARCHITECTURE.md)。
 
-### 7. VirGL / OpenGL ✅
+### 7. VirGL / OpenGL ✅（现为 fallback）
 
-guest Mesa (virpipe Gallium driver) → Unix socket → virgl_test_server (NCP 子进程) → virglrenderer → host EGL。支持 guest Mesa WGL contexts。性能优化：Native VSync 帧同步、帧缓冲复用、subsurface 合成签名。
+guest Mesa (virpipe Gallium driver) → Unix socket → virgl_test_server (NCP 子进程) → virglrenderer → host EGL。zero-copy 显示路径已落地（`virgl_texture+surface_queue+external_oes`，见 [OPENGL_VIRGL_DESIGN.md](OPENGL_VIRGL_DESIGN.md)）。DXVK 稳定后 WineD3D/VirGL 为显式 fallback。
+
+### 8. DXVK 1.10.3 stable baseline ✅
+
+guest DXVK 1.10.3 (D3D11) → Wine Vulkan → Mesa Venus (vtest) → virglrenderer Venus → host Vulkan present。产品 profile: `shadow-precise-dirty-ring-inline-upload-coverage-sort`。910/920 双设备 `dxvk` suite 全 PASS（FE 11.0、BC 采样、MSAA、compute/UAV、675 帧 cube 序列 `angleRegressions=0`）。详见 [PHASE2_DXVK_STATUS_MEMO.md](PHASE2_DXVK_STATUS_MEMO.md)。
+
+### 9. Compositor 状态重构完成 ✅
+
+`compositor/` 子目录 owning-class 拆分（toplevel_manager / desktop_compositor / input_resolver / desktop_root_manager / move_grab / display_policy），不变式集中管理。复盘见 [archive/CPP_REFACTOR_PLAN.md](archive/CPP_REFACTOR_PLAN.md)。
 
 ---
 
@@ -41,18 +49,24 @@ guest Mesa (virpipe Gallium driver) → Unix socket → virgl_test_server (NCP �
 
 ```
 NCP 子进程 (appspawn)
-  wine_child.so: Main() / WineserverMain() / MmapTestMain()
+  wine_child.so: Main() / WineserverMain()
     ├─ arm64: dlopen("box64.so") → box64_hmos_main() → Wine x86_64 ELF
     └─ x86_64: dlopen("ntdll.so") → __wine_main()
+    └─ 渲染路径（D3D11 应用）:
+         DXVK 1.10.3 (guest) → winevulkan → Mesa Venus → vtest socket
+         → virglrenderer Venus → host Vulkan → venus_surface_presenter → XComponent
+    └─ 渲染路径（OpenGL 应用, fallback）:
+         Wine OpenGL → guest Mesa virpipe → vtest socket
+         → virgl_test_server → virglrenderer → host EGL → virgl_surface_presenter (zero-copy)
 
-  virgl_child.so: VirglTestServerMain()
-    嵌入式 Wayland compositor (ARM64 原生, HAP 内)
-      ↓ EGL/GLES
-    XComponent 上屏
+  virgl_child.so: VirglTestServerMain()（含 IPC 远程代理与进程内 host 模式）
+
+嵌入式 Wayland compositor (ARM64 原生, HAP 内)
+  └─ desktop_compositor 帧合成 → egl_renderer / surface presenters → XComponent 上屏
 ```
 
 - Broker (`broker.cpp`) 中继 Wine 进程内 `CreateProcess` → NCP，转发环境变量
-- Desktop 模式：staging → master PR，submodule push 先于主仓库合并
+- 运行时打包：`wine-data.zip` 内含 dxvk/legacy、guest_vulkan、host_vulkan、smoke、audio 等（见 [BUILD_GUIDE.md](BUILD_GUIDE.md)）
 
 ---
 
@@ -61,7 +75,7 @@ NCP 子进程 (appspawn)
 | # | 问题 | 修复方案 |
 |---|------|---------|
 | 1 | TEB 分配崩溃 | `anon_mmap_alloc()` fallback |
-| 2 | Noexec 文件系统 PROT_EXEC | 匿名 mmap + pread |
+| 2 | Noexec 文件系统 PROT_EXEC | 匿名 mmap + pread（现为 `ohos_map_exec_section` + JIT enable） |
 | 3 | prctl(0x6a6974) SIGSEGV | Box64 my_prctl 清零 r10/r8 |
 | 4 | PR_SET_NAME fallthrough SIGSEGV | Box64 my_prctl 直接 return 0 |
 | 5 | Box64 fork 子进程 RWX 失败 | NCP appspawn + .so dlopen 替代 fork |
@@ -73,6 +87,16 @@ NCP 子进程 (appspawn)
 | 11 | 鼠标 action 常量错误 | 对齐 ArkTS MouseAction |
 | 12 | dxg_surface use-after-free | wl_resource destroy 回调 + pending auto-destroy |
 | 13 | 多窗口 XComponent exports 冲突 | surfaceId + XComponentController |
+| 14 | dnsapi / nsiproxy musl 编译错误 | musl 适配完成，DLL 正常构建（不再跳过） |
+| 15 | executable PE section 保护缺失 | 恢复 section protection（c31c2a3） |
+| 16 | OHOS 系统 DLL 解析失败 (Crysis3 0xC0000135) | 恢复 `C:\windows\system32` 搜索路径（db9ade1） |
+| 17 | Tomb Raider 暗色渲染 (RGBA8 SNORM) | `DXVK_WINEHUA_EMULATE_RGBA8_SNORM_RT=auto` 默认启用（b2113e3） |
+| 18 | steam_api64.dll AV (Crysis3) | Box64 `BOX64_DYNAREC_SAFEFLAGS=1` 兼容默认（2adb3af） |
+| 19 | broker env 序列化缺失 | 串行化 wine 程序环境（f51fdcd） |
+| 20 | RunWineExe/RunWineProgram 未接入桌面 | 桌面模式进程接入 shell desktop（39dbd7d/68ddea3） |
+| 21 | 桌面退出卡死 | 退出后关闭 DesktopAbility（12c30c9） |
+| 22 | 桌面持久化缺失 | `winehua_keep` 方案（b9e37b0） |
+| 23 | 双击误触发 explorer 打开+重命名 | 修复多发送一次点击（6d64109） |
 
 ---
 
@@ -81,9 +105,9 @@ NCP 子进程 (appspawn)
 | 问题 | 影响 | 说明 |
 |------|------|------|
 | services.exe 无法启动 | 非阻塞 | 错误 267 (目录无效) |
-| dnsapi / nsiproxy 编译错误 | 跳过 | mingw 交叉编译 musl 不兼容 |
-| Explorer 启动的程序 conhost 崩溃 | console 程序无法从桌面启动 | Box64 Signal 3 (SIGTRAP) |
-| WINE_MONO=never 未设置 | wineboot 初始化时 Mono 安装尝试崩溃 | mscoree.dll 触发 install_mono → DialogBoxW |
+| Explorer 启动的 conhost 崩溃 | console 程序无法从桌面启动 | Box64 Signal 3 (SIGTRAP)；可从文件选择器启动 |
+| Box64 dlopen 原生 .so 受限 | 部分依赖 | libfreetype/xkbcommon/xml2 在 Box64 下查找问题（原 U16），非致命，多数游戏已验证可用 |
+| 60 分钟 DXVK 长稳门禁暂停 | 未完成 | Phase 2 剩余工作之一（07-30 起由用户指示暂停） |
 
 ---
 
@@ -97,12 +121,14 @@ make NATIVE_ARCH=arm64-v8a
 make NATIVE_ARCH=x86_64
 ```
 
+完整命令与增量构建说明见 [BUILD_GUIDE.md](BUILD_GUIDE.md) 与 `.claude/rules/build-and-log.md`。
+
 ---
 
 ## 相关文档
 
-- [BUILD_GUIDE.md](./BUILD_GUIDE.md) — 构建指南
+- [README.md](./README.md) — 文档索引
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — 架构设计
-- [OPENGL_VIRGL_DESIGN.md](./OPENGL_VIRGL_DESIGN.md) — VirGL/OpenGL 设计
-- [AUDIO_ARCHITECTURE.md](./AUDIO_ARCHITECTURE.md) — 音频架构
+- [PHASE2_DXVK_STATUS_MEMO.md](./PHASE2_DXVK_STATUS_MEMO.md) — DXVK 活文档
+- [BUILD_GUIDE.md](./BUILD_GUIDE.md) — 构建指南
 - [.claude/rules/submodule-workflow.md](../.claude/rules/submodule-workflow.md) — Submodule 管理方案

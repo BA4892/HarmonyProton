@@ -1,11 +1,16 @@
 # OHOS mmap 权限调研报告
 
+> 更新: 2026-07-04（2026-07-31 标注后续状态）
+> 状态: 核心结论（mmap 权限矩阵）仍是平台硬约束的权威记录；fork 深度问题已解决（见 §5）
+
 ## 测试环境
 
 - **设备**: HAD-W32 (ARM64)
 - **内核**: Linux 39-bit 地址空间
 - **终端测试**: hdc shell, 无 app 沙箱
-- **应用测试**: WineHua app, 带 `ALLOW_WRITABLE_CODE_MEMORY` + `DISABLE_CODE_MEMORY_PROTECTION`
+- **应用测试**: WineHua app, 带 `ALLOW_WRITABLE_CODE_MEMORY`
+  （`ohos.permission.kernel.ALLOW_WRITABLE_CODE_MEMORY` 仍在 module.json5 中；
+  `DISABLE_CODE_MEMORY_PROTECTION` 已不存在于仓库，当时的调研项已废弃）
 
 ## 对比结果
 
@@ -71,4 +76,8 @@ mmap 限制是 **OHOS 内核层面的通用约束**，与 app 沙箱无关。
 | Box64 main fork 子进程 | 2 | **FAIL EINVAL** |
 | wineserver (spawn + execve) | 2 | **FAIL EINVAL** |
 
-原生进程深度不影响 RWX，但 Box64 进程的 fork 子进程完全不能创建 RWX 内存。wineserver 使用 NAPI 原生 fork 绕过此限制。
+原生进程深度不影响 RWX，但 Box64 进程的 fork 子进程完全不能创建 RWX 内存。
+
+> ✅ **该问题已解决**（原 UNCERTAINTIES U15）：改用 NCP appspawn + .so dlopen 替代
+> fork——wine/wineserver 全部走 `OH_Ability_StartNativeChildProcess` + broker 中继，
+> 不再是"NAPI 原生 fork 绕过"。

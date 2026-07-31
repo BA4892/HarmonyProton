@@ -77,7 +77,9 @@ ARM64 下，Box64 编译为共享库 (box64.so)，由 NCP 子进程 `wine_child.
 `box64_hmos_main()` 在同一进程内模拟执行 x86_64 Wine ELF。
 x86_64 下 Wine 原生 .so 直接由系统 linker 加载，无需 Box64。
 
-wine、wineserver、virgl_test_server 全部通过 `OH_Ability_StartNativeChildProcess` (NCP) 创建子进程。
+wine、wineserver 通过 `OH_Ability_StartNativeChildProcess` (NCP) 创建子进程；
+virgl 运行时支持三种启动方式：NCP 子进程、OH_IPC 远程代理（`OHIPCRemoteProxy`）、
+进程内 host（`StartVirglInProcessHostLocked`，phone 模式）。
 Broker (`broker.cpp`) 中继 Wine 内部 `CreateProcess` → NCP 的转换，支持命名多 fd 和环境变量转发。
 
 ### 关键组件
@@ -87,7 +89,8 @@ Broker (`broker.cpp`) 中继 Wine 内部 `CreateProcess` → NCP 的转换，支
 | Box64 | x86_64 → ARM64 指令翻译，Dynarec 模式 |
 | Broker | 中继 Wine CreateProcess → NCP，转发 env + fd |
 | Wayland compositor | 嵌入式 compositor，在 HAP ARM64 进程中运行 |
-| VirGL | guest Mesa virpipe → vtest socket → virglrenderer → host EGL |
+| VirGL (fallback) | guest Mesa virpipe → vtest socket → virglrenderer → host EGL，zero-copy surface-queue present |
+| DXVK/Venus (D3D11) | guest DXVK 1.10.3 → Wine Vulkan → Mesa Venus (vtest) → virglrenderer Venus → host Vulkan，`venus_surface_presenter` 上屏 |
 | XKB 键盘 | xkeyboard-config 打包到 rawfile，XKB_CONFIG_ROOT 指向 |
 | noexec 文件系统 | 可执行段用匿名 mmap + pread 替代文件映射 |
 | dosdevices | symlink 不可用，四条代码路径硬编码 fallback |
@@ -114,16 +117,20 @@ Broker (`broker.cpp`) 中继 Wine 内部 `CreateProcess` → NCP 的转换，支
   - `compositor_constants.h` / `compositor_utils.{h,cpp}` — 命名常量与启发式
   - `debug_assert.h` — MW_ASSERT 不变式断言（默认编译为空）
 - `input_manager.cpp` / `seat.cpp` — 输入事件注入与 wl_seat
-- `egl_renderer.cpp` / `graphics_broker.cpp` — EGL/GLES 上屏与 zero-copy 桥
+- `graphics_broker.cpp` — 图形后端管理（Virgl/Venus 选择、IPC 配置、`WINEHUA_*` 环境注入）
+- `virgl_surface_presenter.cpp` — VirGL zero-copy 呈现（OH_NativeBuffer + external OES）
+- `venus_surface_presenter.cpp` — Vulkan/DXVK 帧呈现（`venus-presenter` TAG）
+- `egl_renderer.cpp` — CPU fallback 上屏（`TakeFrame` → glTexSubImage2D）
 
 #### 日志纪律
 
-- 单一 hilog TAG `WL_Server`（刻意不分多 TAG）：hilog 过滤粒度过粗，
-  模块区分靠消息前缀（`[MW]` `[MW-POPUP]` `[MW-SUBSURF]` `[XDG]` `[Input]`
-  `[VIRGL-ZC]` 等）；采集统一 `hilog | grep 'app.hackeris.winehua/WL_Server'`
+- 协议层统一 TAG `WL_Server`（hilog 过滤粒度过粗，compositor 内部子模块靠消息前缀
+  `[MW]` `[MW-POPUP]` `[MW-SUBSURF]` `[XDG]` 区分）；各独立模块有专属 TAG：
+  `WL_Seat` `WL_Input` `WL_Xdg` `WL_EGL` `WL_GFX` `virgl-child` `venus-presenter`
+  （TAG 速查见 `.claude/rules/build-and-log.md`）
 - 每帧级日志必须降采样（serial % N 或仅状态变化时），禁止逐帧 INFO
 - 诊断插桩随用随删，或单独 chore 提交，不留长期桩
-- 重构原则与执行记录见 [CPP_REFACTOR_PLAN.md](CPP_REFACTOR_PLAN.md)
+- 重构原则与执行记录见 [archive/CPP_REFACTOR_PLAN.md](archive/CPP_REFACTOR_PLAN.md)
 
 ---
 

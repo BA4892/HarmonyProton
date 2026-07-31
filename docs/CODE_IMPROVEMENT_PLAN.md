@@ -1,10 +1,10 @@
 # 代码改进实施计划（CODE IMPROVEMENT PLAN）
 
 > 日期：2026-07-31
-> 分支：`feature/d3d8-virtual-display-compat`
+> 分支：立项时基于 `feature/d3d8-virtual-display-compat`，该分支已合入 master（PR #47），改进项面向 master 有效
 > 目的：落实 [SUBMODULE_MAINTAINABILITY.md](SUBMODULE_MAINTAINABILITY.md) 中识别的代码类改进（A/E/F/G/H/I），分阶段实施，每阶段有独立验收门禁。
 > 前提文档：SUBMODULE_MAINTAINABILITY.md（风险分析 + 证据索引）。本计划是它的执行篇，风险依据、证据索引、改进项编号均以它为准。
-> 关联文档：[PHASE2_DXVK_MERGE_REPORT.md](PHASE2_DXVK_MERGE_REPORT.md)（合并门禁）/ [PHASE2_DXVK_STATUS_MEMO.md](PHASE2_DXVK_STATUS_MEMO.md)（KNOWN_GOOD 分类系统）
+> 关联文档：[PHASE2_DXVK_STATUS_MEMO.md](PHASE2_DXVK_STATUS_MEMO.md)（KNOWN_GOOD 分类系统）
 
 ---
 
@@ -50,8 +50,8 @@
 .github/workflows/build.yml 新增 job: submodule-check（与 build 并行）
   ├─ ./scripts/check-submodules.sh          （已有脚本，直接入 CI）
   ├─ 分支约定检查：每个 submodule 指针在 .gitmodules 声明分支的历史中
-  │   （wine=master, box64=main, virglrenderer=master, mesa=main,
-  │    libdrm=OpenHarmony-6.0-Beta1, dxvk=dxvk-legacy-1.10.3）
+  │   （wine=master, box64=main, virglrenderer=master, libepoxy=master,
+  │    mesa=main, libdrm=OpenHarmony-6.0-Beta1, dxvk=dxvk-legacy-1.10.3）
   └─ 工作树干净检查：submodule 无未提交改动
 ```
 

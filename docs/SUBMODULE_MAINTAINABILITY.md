@@ -1,9 +1,9 @@
 # Submodule 可维护性专项报告
 
 > 日期：2026-07-31
-> 分支：`feature/render-element-completeness`
+> 分支：评审时基于 `feature/render-element-completeness`，该分支已合入 master（PR #47）
 > 目的：作为分支评审（长期可维护性维度）的依据文档。记录各 submodule 与上游的合并风险现状、改进路线图与验收标准。
-> 关联文档：[PHASE2_DXVK_MERGE_REPORT.md](PHASE2_DXVK_MERGE_REPORT.md) / [PHASE2_DXVK_STATUS_MEMO.md](PHASE2_DXVK_STATUS_MEMO.md) / [DXVK_MODERN_UPGRADE_READINESS.md](DXVK_MODERN_UPGRADE_READINESS.md)
+> 关联文档：[PHASE2_DXVK_STATUS_MEMO.md](PHASE2_DXVK_STATUS_MEMO.md) / [DXVK_MODERN_UPGRADE_READINESS.md](DXVK_MODERN_UPGRADE_READINESS.md) / [CODE_IMPROVEMENT_PLAN.md](CODE_IMPROVEMENT_PLAN.md)
 
 ---
 
@@ -90,7 +90,7 @@ docs/submodule-patches/<submodule>.md
 - 当前 v1.10.3 是上游死线，fork 稳定但停滞；`DXVK_MODERN_UPGRADE_READINESS.md` 已评估 920 可试点 2.x，但 2.x 与 1.10.3 结构差异巨大，**现有改动是重写不是迁移**。
 - 正式化两条通道：
   - `dxvk-legacy-1.10.3`（产品分支）：只收 cherry-pick 的上游 bugfix，每次记录来源 commit
-  - `feature/dxvk-modern`（2.x 重写试点）：独立 manifest profile（如 `DXVK_MODERN`），走 MERGE_REPORT 已有的 `DXVK_MODERN → DXVK_LEGACY → WineD3D` fallback 链
+  - `feature/dxvk-modern`（2.x 重写试点）：独立 manifest profile（如 `DXVK_MODERN`），走 `DXVK_MODERN → DXVK_LEGACY → WineD3D` fallback 链（合并决策记录见 [archive/PHASE2_DXVK_MERGE_REPORT.md](archive/PHASE2_DXVK_MERGE_REPORT.md)）
 - **禁止两条通道在同一分支共存**——那会把一次升级变成两次迁移。
 
 ---
@@ -162,7 +162,8 @@ jobs:
       - ./scripts/check-submodules.sh            # gitlink 可达性 + 指针一致性
       - 分支约定检查：每个 submodule 当前指针在
         .gitmodules 声明分支（wine=master, box64=main, virglrenderer=master,
-        mesa=main, dxvk=dxvk-legacy-1.10.3）的远程历史中
+        libepoxy=master, mesa=main, libdrm=OpenHarmony-6.0-Beta1,
+        dxvk=dxvk-legacy-1.10.3）的远程历史中
       - submodule 工作树干净检查（无未提交改动）
 ```
 
@@ -213,7 +214,7 @@ scripts/qa/known-regressions.sh
 - `thirdparty/mesa` `f1447e05` — +1619 行 / 16 文件（见 1.2）
 - `thirdparty/dxvk` `abe71bc0` — +5567 行 / 60 文件，基线 `v1.10.3`（merge-base e4fd5e9）；`WINEHUA_FORK.md` 已记录 fork 策略
 - `thirdparty/wine` `3a69dcad` — +8411 行 / 24 文件
-- `.gitmodules` — branch 约定：wine=master, box64=main, virglrenderer=master, mesa=main, libdrm=OpenHarmony-6.0-Beta1, dxvk=dxvk-legacy-1.10.3
+- `.gitmodules` — branch 约定：wine=master, box64=main, virglrenderer=master, libepoxy=master, mesa=main, libdrm=OpenHarmony-6.0-Beta1, dxvk=dxvk-legacy-1.10.3
 - `.github/workflows/build.yml` — 已含 PR 触发
 - `scripts/check-submodules.sh` — gitlink 可达性 + 指针一致性（本地脚本，未入 CI）
 - `docs/DXVK_MODERN_UPGRADE_READINESS.md` — 设备能力矩阵（920 phone Vulkan 1.3.309 vs 910 tablet 1.2.275）

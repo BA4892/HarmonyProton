@@ -1,7 +1,9 @@
 # Wine mmap + PROT_EXEC + fd 深度分析
 
-> 更新: 2026-06-12
+> 更新: 2026-06-12（2026-07-31 标注落地状态）
 > 主题: 在 noexec 文件系统上 mmap(MAP_PRIVATE, fd) + mprotect(PROT_EXEC) 失败的根本原因
+> 状态: ✅ **已解决**（CURRENT_STATUS 已修复问题 #2）——以下"修复方案"为当时设计，
+> 现行代码已演进为 `ohos_map_exec_section()` / `ohos_mprotect_exec()`（见文末更新）
 
 ---
 
@@ -41,7 +43,7 @@ virtual_map_builtin_module()
 
 ---
 
-## 三、修复方案
+## 三、修复方案（当时设计，已被现行实现取代）
 
 在 `map_image_into_view()` 中，可执行段 (`IMAGE_SCN_MEM_EXECUTE`) 直接用匿名 mmap + pread：
 
@@ -60,7 +62,7 @@ if (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)
 
 `prctl(0x6a6974)` 对匿名页面有效，但对**文件支持**页面（有 backing store），内核仍然拒绝 PROT_EXEC。必须先让页面匿名化。
 
-### `mprotect_exec()` 辅助
+### `mprotect_exec()` 辅助（当时方案）
 
 ```c
 static inline int mprotect_exec(void *base, size_t size, int unix_prot)
@@ -75,6 +77,16 @@ static inline int mprotect_exec(void *base, size_t size, int unix_prot)
     return mprotect(base, size, unix_prot);
 }
 ```
+
+> ⚠️ prctl(0x6a6974) 方案已废弃：该 prctl 本身在 Box64 下会 SIGSEGV（CURRENT_STATUS
+> 已修复问题 #3），且 2026-07-28 恢复了 executable PE section protection（c31c2a3）。
+
+### 现行实现（2026-07）
+
+- `dlls/ntdll/unix/ohos_virtual.c` — `ohos_map_exec_section()`（替代内嵌的匿名 mmap + pread
+  逻辑，内部 `ohos_jit_enable()` 配对）与 `ohos_mprotect_exec()`（委托 JIT enable + mprotect）
+- `dlls/ntdll/unix/virtual.c:1950` 附近 — `IMAGE_SCN_MEM_EXECUTE` 分支调用 `ohos_map_exec_section()`
+- 核心结论不变：noexec 下文件映射 + PROT_EXEC 必须匿名化，这是现行代码的设计依据
 
 ---
 
@@ -94,7 +106,7 @@ static inline int mprotect_exec(void *base, size_t size, int unix_prot)
 
 | 文件 | 关键函数 |
 |------|---------|
+| `dlls/ntdll/unix/ohos_virtual.c` | `ohos_map_exec_section` / `ohos_mprotect_exec` / `ohos_jit_enable` (现行) |
 | `dlls/ntdll/unix/virtual.c` | `map_image_into_view` (OHOS 匿名 mmap fix) |
-| `dlls/ntdll/unix/virtual.c` | `mprotect_exec` (prctl 绕过) |
 | `dlls/ntdll/unix/virtual.c` | `map_view`, `map_file_into_view`, `map_pe_header` |
 | `server/mapping.c` | `check_current_dir_for_exec` |
