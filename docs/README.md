@@ -14,6 +14,7 @@
 - **[PHASE2_DXVK_STATUS_MEMO.md](PHASE2_DXVK_STATUS_MEMO.md)** — DXVK 调查活文档（handoff，改 DXVK/Venus/present 前必读）
 
 ### 架构与设计
+- **[ARCHITECTURE_OVERVIEW.md](ARCHITECTURE_OVERVIEW.md)** — 总架构图（四域：wine / compositor / 音频 / 图形 + 进程拓扑 + 模块索引），**首次接触项目从这里读**
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — Wine 内部架构、Wayland compositor 设计
 - **[OPENGL_VIRGL_DESIGN.md](OPENGL_VIRGL_DESIGN.md)** — VirGL/OpenGL 设计与 zero-copy/Vulkan 演进
 - **[AUDIO_ARCHITECTURE.md](AUDIO_ARCHITECTURE.md)** — 音频架构

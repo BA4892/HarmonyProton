@@ -1,5 +1,8 @@
 # Wine on HarmonyOS — 架构设计
 
+> **总览入口**：[ARCHITECTURE_OVERVIEW.md](ARCHITECTURE_OVERVIEW.md)（四域总架构图 + 进程拓扑 + 模块索引）。
+> 本文聚焦 Wine 内部架构与 Wayland compositor 模块结构。
+
 ## 1. Wine 内部架构
 
 ```
