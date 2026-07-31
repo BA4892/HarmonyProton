@@ -7,7 +7,7 @@ RUN sed -i 's|http://archive.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu
 RUN apt-get update && apt-get install -y \
     # 编译工具链
     build-essential cmake ninja-build meson \
-    bison flex autoconf automake libtool \
+    bison flex autoconf automake libtool libltdl-dev \
     pkgconf zip git file python3 python3-pip glslang-tools \
     # wayland-scanner 原生构建 (生成 Wayland 协议代码)
     libexpat1-dev libxml2-dev libffi-dev \
@@ -19,6 +19,13 @@ RUN apt-get update && apt-get install -y \
     # HAP 签名
     default-jdk \
  && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# 注意: libltdl-dev 必须显式列出.
+# 它本是 libtool 的 Recommends 依赖, 但 Ubuntu 官方 docker base image 默认
+# 关闭 Recommends 安装, 不显式声明就不会被拉入, 导致 aclocal 找不到
+# ltdl.m4 里的 LT_SYS_SYMBOL_USCORE 宏, 让 libffi autogen.sh 失败.
+# (与 ci/Dockerfile.buildenv 保持一致; CI 的 Ensure CI build dependencies
+# step 也有 ltdl.m4 兜底检查)
 
 # Python 包 (virglrenderer + Mesa guest_gfx 构建)
 RUN pip3 install --break-system-packages pyyaml mako markupsafe \
@@ -39,6 +46,6 @@ WORKDIR /data/src/winehua
 #   -v /mnt/c/path/to/signature_dir:/mnt/user-signature     (含 .cer / .p7b / .p12 的目录)
 # 两者需同时挂载才生效; 缺失任一则回退到项目内置 build-profile.json5.
 #
-# 构建:
+# 构建 (NATIVE_ARCH 取值: x86_64 | arm64-v8a | all):
 #   docker run --rm -v $(pwd):/data/src/winehua -v ~/huawei/command-line-tools:/apps/harmony \
-#     wineohos-build make NATIVE_ARCH=arm64-v8a DEVICE_TYPE=pad
+#     wineohos-build make NATIVE_ARCH=arm64-v8a
