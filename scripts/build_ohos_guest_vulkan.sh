@@ -13,14 +13,6 @@ LOADER_TAG="v1.3.290"
 LOADER_COMMIT="f8616928ee19f6c7fd648c1cf1f456cba3771855"
 HEADERS_TAG="v1.3.290"
 HEADERS_COMMIT="b379292b2ab6df5771ba9870d53cf8b2c9295daf"
-# The WSL development proxy is not reachable from GitHub-hosted runners.
-# Keep it as the local default, but require an explicit opt-in in CI. Setting
-# WINEHUA_GIT_PROXY to an empty value also forces a direct connection.
-if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
-    GIT_PROXY="${WINEHUA_GIT_PROXY-}"
-else
-    GIT_PROXY="${WINEHUA_GIT_PROXY:-http://172.28.112.1:8080}"
-fi
 
 LOADER_SOURCE="$ROOT/tmp/Vulkan-Loader-$LOADER_TAG"
 HEADERS_SOURCE="$ROOT/tmp/Vulkan-Headers-$HEADERS_TAG"
@@ -35,15 +27,7 @@ fetch_pinned_source() {
     local url="$1" tag="$2" commit="$3" destination="$4"
     if [ ! -d "$destination/.git" ]; then
         [ ! -e "$destination" ] || err "incomplete managed source exists: $destination"
-        if [ -n "$GIT_PROXY" ]; then
-            git -c http.proxy="$GIT_PROXY" -c http.version=HTTP/1.1 \
-                clone --depth 1 --branch "$tag" "$url" "$destination"
-        else
-            env -u http_proxy -u https_proxy -u all_proxy \
-                -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
-                git -c http.proxy= -c https.proxy= -c http.version=HTTP/1.1 \
-                clone --depth 1 --branch "$tag" "$url" "$destination"
-        fi
+        git clone --depth 1 --branch "$tag" "$url" "$destination"
     fi
     local actual
     actual="$(git -C "$destination" rev-parse HEAD)"
