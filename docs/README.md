@@ -32,6 +32,7 @@
 - **[SUBMODULE_MAINTAINABILITY.md](SUBMODULE_MAINTAINABILITY.md)** — submodule 合并风险现状与改进路线图（评审依据）
 - **[CODE_IMPROVEMENT_PLAN.md](CODE_IMPROVEMENT_PLAN.md)** — 代码改进实施计划（SUBMODULE_MAINTAINABILITY 的执行篇，阶段 0-4）
 - **[REMOTE_HDC.md](REMOTE_HDC.md)** — hdc 远程共享配置
+- **automation/** — WSL 回归测试套件运行器（`automation/README.md`，纯 WSL，不写死环境路径）
 
 ### 归档（一次性报告/历史记录，不再维护）
 - [virgl_display_optimization_guide.md](archive/virgl_display_optimization_guide.md) — 显示链路优化方案（已被 surface-queue zero-copy 实现超越）

@@ -1,6 +1,6 @@
 # WineHua Phase 2 DXVK Status Memo
 
-> Last updated: 2026-07-31
+> Last updated: 2026-08-01
 >
 > Purpose: this is the durable handoff for resuming the DXVK investigation.
 > Read this file before changing DXVK, Venus present, SmokeRunner, or game launch
@@ -178,41 +178,37 @@ to keep this file as the durable handoff summary. Consult the archive for histor
 
 First read this memo and inspect changes:
 
-    wsl -d Ubuntu -- bash -lc "cd /home/maple/Work/WineHua-build &&
-      git status --short --branch &&
-      git submodule status &&
-      git -C thirdparty/dxvk status --short --branch"
+    git status --short --branch &&
+    git submodule status &&
+    git -C thirdparty/dxvk status --short --branch
 
-Run the known DXVK automation suite:
+Run the known DXVK regression suite (pure WSL, no Windows PowerShell;
+see automation/README.md for prerequisites):
 
-    powershell -ExecutionPolicy Bypass -File
-      \\wsl.localhost\Ubuntu\home\maple\Work\WineHua-build\
-      automation\Invoke-WineHuaAutomation.ps1
-      -Suite dxvk -Prefix reuse
+    python3 automation/run_regression.py --suite dxvk --prefix reuse
 
-Launch the packaged visible D3D11 cube through normal game mode:
+Run the Phase-2 entry gate (three reuse-prefix core runs and one clean-prefix
+core run):
 
-    powershell -ExecutionPolicy Bypass -File
-      \\wsl.localhost\Ubuntu\home\maple\Work\WineHua-build\
-      automation\Start-WineHuaGameTest.ps1
-      -D3DBackend dxvk_legacy
-      -GamePath C:\smoke\x64\winehua_d3d_switch_cube.exe
+    python3 automation/run_regression.py --gate
 
-Launch ComputeMark after the visible cube passes:
+Run the capability matrix (Host Vulkan vs Venus):
 
-    powershell -ExecutionPolicy Bypass -File
-      \\wsl.localhost\Ubuntu\home\maple\Work\WineHua-build\
-      automation\Start-WineHuaGameTest.ps1
-      -D3DBackend dxvk_legacy
-      -GamePath C:\ComputeMark_1.1\ComputeMark.exe
+    python3 automation/run_regression.py --suite capabilities
+
+Launch the packaged visible D3D11 cube through normal game mode (manual
+visual check after the suite passes):
+
+    hdc shell aa start -a EntryAbility -b app.hackeris.winehua
+    # 桌面 Explorer 中运行 C:\smoke\x64\winehua_d3d_switch_cube.exe
 
 Before trusting a rebuilt package:
 
-1. Inspect Docker mounts.
-2. Build only in winehua-master-ext4.
-3. Verify build exit code and signed HAP timestamp.
-4. Verify HAP SHA-256 and embedded wine-data payload.
-5. Verify guest Vulkan/DRI binaries are x86-64 and host libraries are AArch64.
-6. Install through Windows HDC and require install bundle successfully.
-7. Capture a physical device screenshot and archive logs.
+1. Build with the local Makefile (`make NATIVE_ARCH=arm64-v8a`) and verify the
+   build exit code and signed HAP timestamp.
+2. Verify HAP SHA-256 and embedded wine-data payload (run_regression.py does
+   this as part of every run; check `<archive>/artifact.json`).
+3. Verify guest Vulkan/DRI binaries are x86-64 and host libraries are AArch64.
+4. Install through the Linux hdc and require install bundle successfully.
+5. Capture a physical device screenshot and archive logs.
 
