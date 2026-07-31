@@ -319,6 +319,10 @@ static pid_t SpawnWineProgram(const ProgramOptions& options)
     UpsertEnv(&envStrs, "WINEHUA_D3D_BACKEND=" + options.d3dBackend);
     UpsertEnv(&envStrs, "WINEHUA_PRESENT_BACKEND=" + options.presentBackend);
     UpsertEnv(&envStrs, std::string("WINEHUA_AUTOMATION=") + (options.automationMode ? "1" : "0"));
+    /* desktop 模式: 将进程接入 explorer 创建的 shell desktop, 使其窗口
+     * 出现在任务栏 (与 RunWineExe 路径对称, 重构 runWineProgram 时遗漏). */
+    if (WaylandServer::GetInstance()->IsDesktopMode())
+        UpsertEnv(&envStrs, "WINEHUA_DESKTOP=shell");
     /* DXVK is a managed WineHua runtime overlay, never a game-provided DLL. */
     if (options.d3dBackend.rfind("dxvk_", 0) == 0)
         OH_LOG_INFO(LOG_APP, "[WineProgram] managed D3D backend=%{public}s",
