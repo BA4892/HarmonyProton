@@ -30,14 +30,22 @@
 
 ### 1.1 上游识别与基线锁定（改进 C，P1）
 
-| Submodule | 上游仓库/分支 | 基线记录 | 合并节奏建议 |
-|-----------|--------------|---------|-------------|
-| virglrenderer | freedesktop/virglrenderer `main` | tag/commit + 日期 | **每季度尝试一次**，落后超两个大版本不可收拾 |
-| mesa | OpenHarmony mesa（OH 分支） | OH 版本号 | 跟随 OH 发布节奏，记录 OH 的升级周期 |
-| wine | wine `master` | commit + 日期 | 每次合 wine 时**先合 WineHua 侧新文件**（与上游无冲突，先落地减少 diff 堆积），再处理修改文件 |
-| dxvk | doitsujin/dxvk `v1.10.3` | tag `v1.10.3`（merge-base e4fd5e9） | 无需节奏；但每次 backport 上游 2.x bugfix 记录来源 commit |
+| Submodule | 上游仓库/分支 | 基线记录（当前快照） | 合并节奏建议 |
+|-----------|--------------|---------------------|-------------|
+| virglrenderer | freedesktop/virglrenderer `main` | merge-base `8cb58e478`（2026-06-10） | **每季度尝试一次**，落后超两个大版本不可收拾 |
+| mesa | OpenHarmony mesa（OH 分支） | tag `OpenHarmony-v6.0-Beta1`（merge-base e5d8c3f2，2025-06-13） | 跟随 OH 发布节奏，记录 OH 的升级周期 |
+| wine | wine `master` | merge-base `13289668fd1`（2026-06-07，winehua 独有 89 commit） | 每次合 wine 时**先合 WineHua 侧新文件**（与上游无冲突，先落地减少 diff 堆积），再处理修改文件 |
+| dxvk | doitsujin/dxvk `v1.10.3` | tag `v1.10.3`（merge-base e4fd5e9，2022-08-02） | 无需节奏；但每次 backport 上游 2.x bugfix 记录来源 commit |
 
-**落地**：新建 `docs/SUBMODULE_BASELINES.md` 记录各 submodule 基线（tag/commit+日期），每次升级同步更新。升级本身是项目级事件（涉及构建 + 回归验证），不是 git 操作。
+**基线为派生数据（merge-base 可随时重算），本表只记录当前快照**：每次合并/升级后更新。升级本身是项目级事件（涉及构建 + 回归验证），不是 git 操作。重算命令：
+
+```bash
+MB=$(git -C thirdparty/<name> merge-base HEAD upstream/<branch>)
+git -C thirdparty/<name> log -1 --format="%h %ad %s" --date=short $MB
+git -C thirdparty/<name> rev-list --count $MB..HEAD   # winehua 独有 commit 数
+```
+
+上游 remote 用 `./scripts/setup-upstream-remotes.sh` 配置（新 clone 环境必跑，URL 与本表一致）。
 
 ### 1.2 侵入度量化（评审依据）
 
