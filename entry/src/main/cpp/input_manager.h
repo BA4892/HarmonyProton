@@ -175,7 +175,12 @@ private:
      * compositor 侧状态, 输入设备只产生 delta); 我们的触屏/鼠标都经 ArkTS
      * 以绝对坐标送达, 所以 warp 后必须自己把绝对流拆成增量。
      * desktop 模式锚点/输入都在桌面坐标空间; PC 模式在窗口局部坐标空间。
-     * 仅 ZC 游戏激活 (OnPointerWarp 里门控): SHM 游戏读绝对坐标, 激活反破坏映射。
+     * 激活判据 = 游戏发回中请求 (wp_pointer_warp, 见 OnPointerWarp), 与渲染
+     * 路径 (ZC/SHM) 无关: 回中即 dinput 相对模式, 必须补偿; 读绝对坐标的
+     * 游戏 (RTS 等) 不回中, 不会误激活 (PAL2 实测为 SHM readback, ZC 门控
+     * 会把它的回中全部误拒)。回中时逻辑锚点必须重置到回中位置:
+     * SetCursorPos 会把 wineserver 光标移到回中点, 游戏读差值的基准随之
+     * 重置; 锚点不重置会让游戏每周期多读一份历史累积位移 → 漂移贴边。
      */
     std::mutex warpMutex_;
     bool warpActive_ = false;

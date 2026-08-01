@@ -153,14 +153,12 @@ wl_fixed_t InputManager::CoordTransform(double px, double py, uint32_t tl,
 
 void InputManager::OnPointerWarp(wl_resource* surface, double sx, double sy) {
     auto* ws = WaylandServer::GetInstance();
-    // warp 补偿仅对 ZC 游戏 (PAL2 等 dinput 相对模式) 生效:
-    // ZC 游戏 warp_check ~10ms 回中 + dinput 读差值 → 必须补偿;
-    // SHM 游戏 (红警2 等) 读绝对坐标 — 激活会破坏绝对映射, 必须放过。
-    if (!ws->IsSurfaceFromZcGame(surface)) {
-        OH_LOG_INFO(LOG_APP, "[Input] WARP skip: surf=%{public}p not ZC game (SHM)",
-                    static_cast<void*>(surface));
-        return;
-    }
+    // 补偿判据 = 游戏发回中请求 (wp_pointer_warp), 而非渲染路径 (ZC/SHM):
+    // 回中请求说明游戏用 dinput 相对模式 (warp_check ~10ms SetCursorPos 回
+    // 中心 + 读差值), 必须补偿; 读绝对坐标的游戏 (红警2 等 RTS) 不回中,
+    // 不会发此请求 → 不会误激活。此前按 ZC 门控把 PAL2 (D3D8 → VirGL →
+    // SHM readback, 非 zero-copy) 的回中全部拒绝, 增量 = 位置-中心,
+    // 游戏光标被甩到边缘 (实测: 屏幕中间一小块映射为游戏全屏幕)
     double lx = sx, ly = sy;
     if (ws->IsDesktopMode()) {
         // 锚点换到桌面坐标空间, 与 SendPointerEvent 桌面分支的输入空间一致
@@ -172,6 +170,13 @@ void InputManager::OnPointerWarp(wl_resource* surface, double sx, double sy) {
     }
     {
         std::lock_guard<std::mutex> lk(warpMutex_);
+        // 锚点必须重置到回中位置: SetCursorPos(C) 在 wineserver 侧即刻把
+        // 光标移到 C, dinput 每周期读 (我们送出的位置 - C) 当相对位移;
+        // 不重置则第 n 周期游戏读到 d1+..+dn (历史全部累积), 总位移按
+        // 累加和二次方增长, 迅速甩到边缘贴死, 换向被旧累积项顶住而滞后
+        // (master 实测复现)。回中后发 motion 会把光标再拽走, 故只记锚点。
+        // "静止点击落 C 与游戏光标脱节" 的顾虑不成立: dinput 相对模式按钮
+        // 事件不带坐标, 游戏用自己的软光标命中, feature 分支实测点击正常。
         warpLogicalX_ = lx;
         warpLogicalY_ = ly;
         warpActive_ = true;
