@@ -17,6 +17,7 @@
 - **[ARCHITECTURE_OVERVIEW.md](ARCHITECTURE_OVERVIEW.md)** — 总架构图（四域：wine / compositor / 音频 / 图形 + 进程拓扑 + 模块索引），**首次接触项目从这里读**
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — Wine 内部架构、Wayland compositor 设计
 - **[OPENGL_VIRGL_DESIGN.md](OPENGL_VIRGL_DESIGN.md)** — VirGL/OpenGL 设计与 zero-copy/Vulkan 演进
+- **[CROSS_FORK_CONTRACTS.md](CROSS_FORK_CONTRACTS.md)** — 跨仓库私有契约（OpenGL 链路：shm 页 / present 协议 / 环境变量 / ready 标记 / 回调 / IPC；Vulkan 链路：surface tag / vn_winehua_present / VK_PRESENT 协议 / 设备释放回调；各含两端代码索引与失效表现）
 - **[AUDIO_ARCHITECTURE.md](AUDIO_ARCHITECTURE.md)** — 音频架构
 - **[DXVK_MODERN_UPGRADE_READINESS.md](DXVK_MODERN_UPGRADE_READINESS.md)** — DXVK 2.x/VKD3D 升级能力矩阵、迁移清单与准入门禁
 
