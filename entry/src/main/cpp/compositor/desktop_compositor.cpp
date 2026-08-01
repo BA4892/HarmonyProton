@@ -113,6 +113,64 @@ bool DesktopCompositor::HasZeroCopyLayerForToplevelLocked(uint32_t id) const
     return false;
 }
 
+std::vector<DesktopCompositor::CompositorLayer> DesktopCompositor::BuildLayerListLocked(int rootW, int rootH)
+{
+    std::vector<CompositorLayer> layers;
+    const uint32_t rootId = desktopRootToplevelId_;
+    size_t zIndex = 0;
+
+    {
+        CompositorLayer rootLayer;
+        rootLayer.type = CompositorLayer::Type::Root;
+        rootLayer.zIndex = zIndex++;
+        rootLayer.visible = true;
+        rootLayer.w = rootW;
+        rootLayer.h = rootH;
+        layers.push_back(std::move(rootLayer));
+    }
+
+    // toplevel 层 (z-order 升序): root 由 Root 层表示, 不在 z-order 里重复。
+    // 可见性判定与原合成/输入循环同源 (IsToplevelVisibleLocked)。
+    for (uint32_t childId : tmgr_.toplevelZOrder()) {
+        if (childId == rootId) continue;
+        const auto* cst = tmgr_.FindToplevelLocked(childId);
+        if (!cst) continue;
+        CompositorLayer layer;
+        layer.type = CompositorLayer::Type::Toplevel;
+        layer.zIndex = zIndex++;
+        layer.visible = tmgr_.IsToplevelVisibleLocked(childId, rootId);
+        layer.toplevelId = childId;
+        layer.x = cst->x;
+        layer.y = cst->y;
+        layer.w = cst->w;
+        layer.h = cst->h;
+        layer.fullscreen = cst->fullscreen;
+        layers.push_back(std::move(layer));
+    }
+
+    // subsurface 层 (原顺序, 全部在 toplevel 之后): 与旧合成双循环
+    // (toplevel 段先、subsurface 段后) 顺序等价。位置已 Resolve 为桌面
+    // 坐标; zcLayer 由 zeroCopySurfaceKeys_ 派生 (阶段 1 仍由合成/输入跳过)。
+    for (const auto& sl : subsurfaceLayers_) {
+        int lx = 0, ly = 0;
+        ResolveSubsurfaceLayerPositionLocked(sl, lx, ly);
+        CompositorLayer layer;
+        layer.type = CompositorLayer::Type::Subsurface;
+        layer.zIndex = zIndex++;
+        layer.visible = (sl.parentToplevel == rootId) ||
+                        tmgr_.IsToplevelVisibleLocked(sl.parentToplevel, rootId);
+        layer.zcLayer = zeroCopySurfaceKeys_.count(sl.surfaceKey) > 0;
+        layer.toplevelId = sl.parentToplevel;
+        layer.x = lx;
+        layer.y = ly;
+        layer.w = sl.w;
+        layer.h = sl.h;
+        layer.sub = &sl;
+        layers.push_back(std::move(layer));
+    }
+    return layers;
+}
+
 void DesktopCompositor::ResolveSubsurfaceLayerPositionLocked(
     const SubsurfaceLayer& layer, int& x, int& y) const
 {
@@ -380,6 +438,11 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
             return true;
         }
 
+        // 层序单一数据源 (阶段 1): 一帧全部内容来源的层列表, 构建一次,
+        // fs-pick / 覆盖判定 / 签名 / 合成共用。zIndex: root < toplevel <
+        // subsurface — 顺序与旧双循环等价 (见 CompositorLayer 注释)。
+        const auto layers = BuildLayerListLocked(rootW, rootH);
+
         uint32_t fullscreenId = 0;
         FitRect transform;
         bool hasFullscreen = false;
@@ -391,10 +454,11 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
         // 会把足够大的旧窗口连带标记, 请求到达顺序不定), 规则原因/局限见
         // ToplevelState::fsPriority 注释
         const ToplevelManager::ToplevelState* fsWin = nullptr;
-        for (uint32_t childId : tmgr_.toplevelZOrder()) {
-            const auto* zst = tmgr_.FindToplevelLocked(childId);
-            if (!zst || !zst->fullscreen || !tmgr_.IsToplevelVisibleLocked(childId, desktopRootToplevelId_)) continue;
-            if (!fsWin || zst->fsPriority > fsWin->fsPriority) { fsWin = zst; fullscreenId = childId; }
+        for (const auto& layer : layers) {
+            if (layer.type != CompositorLayer::Type::Toplevel || !layer.visible || !layer.fullscreen) continue;
+            const auto* zst = tmgr_.FindToplevelLocked(layer.toplevelId);
+            if (!zst) continue;
+            if (!fsWin || zst->fsPriority > fsWin->fsPriority) { fsWin = zst; fullscreenId = layer.toplevelId; }
         }
         if (fsWin) {
             fullscreenX = fsWin->x;
@@ -408,17 +472,17 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
             const auto* fst = tmgr_.FindToplevelLocked(fullscreenId);
             const int winW = fst ? fst->w : 0;
             const int winH = fst ? fst->h : 0;
-            for (const auto& layer : subsurfaceLayers_) {
-                if (layer.parentToplevel != fullscreenId) continue;
-                if (zeroCopySurfaceKeys_.count(layer.surfaceKey)) continue;
-                if (layer.w <= 0 || layer.h <= 0) continue;
-                if (layer.shmFormat == 0 && !layer.opaque) continue;
-                int layerX = 0, layerY = 0;
-                ResolveSubsurfaceLayerPositionLocked(layer, layerX, layerY);
-                const int dispW = layer.vpDstW > 0 ? std::min(layer.vpDstW, layer.w) : layer.w;
-                const int dispH = layer.vpDstH > 0 ? std::min(layer.vpDstH, layer.h) : layer.h;
-                const int relX = layerX - fullscreenX;
-                const int relY = layerY - fullscreenY;
+            for (const auto& layer : layers) {
+                if (layer.type != CompositorLayer::Type::Subsurface) continue;
+                if (layer.toplevelId != fullscreenId) continue;
+                if (layer.zcLayer) continue;
+                const auto& sl = *layer.sub;
+                if (sl.w <= 0 || sl.h <= 0) continue;
+                if (sl.shmFormat == 0 && !sl.opaque) continue;
+                const int dispW = sl.vpDstW > 0 ? std::min(sl.vpDstW, sl.w) : sl.w;
+                const int dispH = sl.vpDstH > 0 ? std::min(sl.vpDstH, sl.h) : sl.h;
+                const int relX = layer.x - fullscreenX;
+                const int relY = layer.y - fullscreenY;
                 if (relX <= 0 && relY <= 0 &&
                     relX + dispW >= winW && relY + dispH >= winH) {
                     fullscreenContentCovered = true;
@@ -435,32 +499,32 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
         mixSignature(id);
         mixSignature(static_cast<uint32_t>(rootW));
         mixSignature(static_cast<uint32_t>(rootH));
-        for (uint32_t childId : tmgr_.toplevelZOrder()) {
-            mixSignature(childId);
-            const bool visible = tmgr_.IsToplevelVisibleLocked(childId, desktopRootToplevelId_);
-            mixSignature(visible ? 1 : 0);
-            if (!visible) continue;
-            const auto* cst = tmgr_.FindToplevelLocked(childId);
-            if (!cst) continue;
-            mixSignature(static_cast<uint32_t>(cst->x));
-            mixSignature(static_cast<uint32_t>(cst->y));
-            mixSignature(static_cast<uint32_t>(cst->w));
-            mixSignature(static_cast<uint32_t>(cst->h));
-            mixSignature(cst->fullscreen ? 1 : 0);
-        }
-        for (const auto& layer : subsurfaceLayers_) {
-            int layerX = 0, layerY = 0;
-            ResolveSubsurfaceLayerPositionLocked(layer, layerX, layerY);
-            mixSignature(reinterpret_cast<uintptr_t>(layer.surface));
-            mixSignature(zeroCopySurfaceKeys_.count(layer.surfaceKey) ? 1 : 0);
-            mixSignature(layer.parentToplevel);
-            mixSignature(layer.parentToplevel == id || tmgr_.IsToplevelVisibleLocked(layer.parentToplevel, desktopRootToplevelId_));
-            mixSignature(static_cast<uint32_t>(layerX));
-            mixSignature(static_cast<uint32_t>(layerY));
-            mixSignature(static_cast<uint32_t>(layer.w));
-            mixSignature(static_cast<uint32_t>(layer.h));
-            mixSignature(static_cast<uint32_t>(layer.vpDstW));
-            mixSignature(static_cast<uint32_t>(layer.vpDstH));
+        // 签名遍历 Layer 列表: 每个可见 toplevel/subsurface 的几何与标记
+        // (与旧两个循环 mix 序列等价; 不可见 toplevel 的 (id,0) 不再混入,
+        // 仅影响 rebuildBase 触发时机, 不影响输出像素 — 不可见窗口不参与
+        // 合成, root 像素变化仍由 desktopRootFrameSerial_ 兜底)。
+        for (const auto& layer : layers) {
+            if (layer.type == CompositorLayer::Type::Toplevel) {
+                mixSignature(layer.toplevelId);
+                mixSignature(layer.visible ? 1 : 0);
+                if (!layer.visible) continue;
+                mixSignature(static_cast<uint32_t>(layer.x));
+                mixSignature(static_cast<uint32_t>(layer.y));
+                mixSignature(static_cast<uint32_t>(layer.w));
+                mixSignature(static_cast<uint32_t>(layer.h));
+                mixSignature(layer.fullscreen ? 1 : 0);
+            } else if (layer.type == CompositorLayer::Type::Subsurface) {
+                mixSignature(reinterpret_cast<uintptr_t>(layer.sub->surface));
+                mixSignature(layer.zcLayer ? 1 : 0);
+                mixSignature(layer.toplevelId);
+                mixSignature(layer.visible ? 1 : 0);
+                mixSignature(static_cast<uint32_t>(layer.x));
+                mixSignature(static_cast<uint32_t>(layer.y));
+                mixSignature(static_cast<uint32_t>(layer.w));
+                mixSignature(static_cast<uint32_t>(layer.h));
+                mixSignature(static_cast<uint32_t>(layer.sub->vpDstW));
+                mixSignature(static_cast<uint32_t>(layer.sub->vpDstH));
+            }
         }
 
         const size_t rootBytes = static_cast<size_t>(rootW) * rootH * 4;
@@ -477,26 +541,28 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
         auto& composited = out;
         const auto rootCopied = TakeClock::now();
 
-        for (uint32_t childId : tmgr_.toplevelZOrder()) {
-            if (!tmgr_.IsToplevelVisibleLocked(childId, desktopRootToplevelId_)) continue;
+        // 合成单循环 (阶段 1): 按 zIndex 升序遍历 Layer 列表 — 等价旧
+        // toplevel 循环 + subsurface 循环的两段顺序 (Layer zIndex 分配保证)。
+        // 全屏独占/跳过特判原样保留 (等价形式), 行为不变。
+        auto blitToplevel = [&](const CompositorLayer& layer) {
+            if (!layer.visible) return;
             // 跳过非主全屏的 toplevel: ZC 游戏独占输出 (其它 toplevel 的
             // SHM 内容不是游戏画面, 画上会在黑边区残留杂色); SHM 游戏只跳过
             // 被连带标 fullscreen 的旧窗口 (notepad/explorer 等, 显示模式
             // 切换时 winewayland 批量标记, fsPriority 选了游戏但它仍在
             // z-order 高位, 普通 blit 会盖在游戏上面), 非全屏弹窗/对话框保留
-            if (hasFullscreen && childId != fullscreenId) {
-                if (isZcGame) continue;
-                auto* cst = tmgr_.FindToplevelLocked(childId);
-                if (cst && cst->fullscreen) continue;
+            if (hasFullscreen && layer.toplevelId != fullscreenId) {
+                if (isZcGame) return;
+                if (layer.fullscreen) return;
             }
-            auto* cst = tmgr_.FindToplevelLocked(childId);
-            if (!cst) continue;
+            auto* cst = tmgr_.FindToplevelLocked(layer.toplevelId);
+            if (!cst) return;
             auto& childPx = cst->pixels;
             int childW = cst->w;
             int childH = cst->h;
             int posX = cst->x;
             int posY = cst->y;
-            if (childId == fullscreenId && hasFullscreen) {
+            if (layer.toplevelId == fullscreenId && hasFullscreen) {
                 if (isZcGame) {
                     // ZC 游戏: 整幅填黑, 跳过 SHM BlitScaled — 其 SHM 内容是
                     // explorer 桌面而非游戏画面, 实际画面由 GL ZC 层渲染
@@ -506,7 +572,7 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
                     // 隐式依赖 — 一旦以后给桌面纹理开混合, 黑边就会变透明
                     std::fill_n(reinterpret_cast<uint32_t*>(composited.data()),
                                 composited.size() / 4, 0xFF000000u);
-                    continue;
+                    return;
                 }
                 auto fillBlackRect = [&](int fx, int fy, int fw, int fh) {
                     if (fw <= 0 || fh <= 0) return;
@@ -532,7 +598,7 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
                                transform.offX, transform.offY, transform.dstW, transform.dstH,
                                cst->shmFormat == 0);
                 }
-                continue;
+                return;
             }
             int dstX = (posX > 0) ? posX : 0;
             int dstY = (posY > 0) ? posY : 0;
@@ -542,7 +608,7 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
             int copyH = childH - srcY;
             if (dstX + copyW > rootW) copyW = rootW - dstX;
             if (dstY + copyH > rootH) copyH = rootH - dstY;
-            if (copyW <= 0 || copyH <= 0) continue;
+            if (copyW <= 0 || copyH <= 0) return;
             const bool childArgb = (cst->shmFormat == 0);
             for (int y = 0; y < copyH; y++) {
                 auto* srcRow = &childPx[(srcY + y) * childW * 4];
@@ -570,55 +636,54 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
                     }
                 }
             }
-        }
-        const auto childrenComposited = TakeClock::now();
-
-        for (auto& layer : subsurfaceLayers_) {
-            if (zeroCopySurfaceKeys_.count(layer.surfaceKey)) continue;
-            if (layer.parentToplevel != id && !tmgr_.IsToplevelVisibleLocked(layer.parentToplevel, desktopRootToplevelId_)) continue;
-            if (layer.w <= 0 || layer.h <= 0) continue;
-            if (hasFullscreen && layer.parentToplevel != fullscreenId) continue;
-            int layerX = 0, layerY = 0;
-            ResolveSubsurfaceLayerPositionLocked(layer, layerX, layerY);
-            size_t expectSz = (size_t)layer.w * layer.h * 4;
-            if (layer.pixels.size() < expectSz) {
+        };
+        auto blitSubsurface = [&](const CompositorLayer& layer) {
+            if (layer.zcLayer) return;
+            if (!layer.visible) return;
+            if (layer.w <= 0 || layer.h <= 0) return;
+            if (hasFullscreen && layer.toplevelId != fullscreenId) return;
+            const auto& sl = *layer.sub;
+            int layerX = layer.x;
+            int layerY = layer.y;
+            size_t expectSz = (size_t)sl.w * sl.h * 4;
+            if (sl.pixels.size() < expectSz) {
                 OH_LOG_WARN(LOG_APP, "[MW-SUBSURF] layer size mismatch: w=%{public}d h=%{public}d px=%{public}zu expected=%{public}zu",
-                            layer.w, layer.h, layer.pixels.size(), expectSz);
-                continue;
+                            sl.w, sl.h, sl.pixels.size(), expectSz);
+                return;
             }
-            if (hasFullscreen && layer.parentToplevel == fullscreenId) {
-                const int layerDispW = layer.vpDstW > 0 ? std::min(layer.vpDstW, layer.w) : layer.w;
-                const int layerDispH = layer.vpDstH > 0 ? std::min(layer.vpDstH, layer.h) : layer.h;
+            if (hasFullscreen && layer.toplevelId == fullscreenId) {
+                const int layerDispW = sl.vpDstW > 0 ? std::min(sl.vpDstW, sl.w) : sl.w;
+                const int layerDispH = sl.vpDstH > 0 ? std::min(sl.vpDstH, sl.h) : sl.h;
                 const int layerDstX = transform.offX + static_cast<int>(lround((layerX - fullscreenX) * transform.scale));
                 const int layerDstY = transform.offY + static_cast<int>(lround((layerY - fullscreenY) * transform.scale));
                 const int layerDstW = std::max(1, static_cast<int>(lround(layerDispW * transform.scale)));
                 const int layerDstH = std::max(1, static_cast<int>(lround(layerDispH * transform.scale)));
                 BlitScaled(composited.data(), rootW, rootH,
-                           layer.pixels.data(), layer.w, layerDispW, layerDispH,
+                           sl.pixels.data(), sl.w, layerDispW, layerDispH,
                            layerDstX, layerDstY, layerDstW, layerDstH,
-                           layer.shmFormat == 0 && !layer.opaque);
-                continue;
+                           sl.shmFormat == 0 && !sl.opaque);
+                return;
             }
             int srcX = (layerX < 0) ? -layerX : 0;
             int srcY = (layerY < 0) ? -layerY : 0;
             int dstX = (layerX > 0) ? layerX : 0;
             int dstY = (layerY > 0) ? layerY : 0;
-            int copyW = layer.w - srcX;
-            int copyH = layer.h - srcY;
+            int copyW = sl.w - srcX;
+            int copyH = sl.h - srcY;
             if (dstX + copyW > rootW) copyW = rootW - dstX;
             if (dstY + copyH > rootH) copyH = rootH - dstY;
-            if (copyW <= 0 || copyH <= 0) continue;
+            if (copyW <= 0 || copyH <= 0) return;
             int renderW = copyW, renderH = copyH;
             int renderSrcX = srcX, renderSrcY = srcY;
             int renderDstX = dstX, renderDstY = dstY;
-            if (layer.vpDstW > 0 && layer.vpDstW < copyW) renderW = layer.vpDstW;
-            if (layer.vpDstH > 0 && layer.vpDstH < copyH) renderH = layer.vpDstH;
-            if (layer.dmgW > 0 && layer.dmgH > 0) {
-                const int damageLeft = std::max(renderSrcX, layer.dmgX);
-                const int damageTop = std::max(renderSrcY, layer.dmgY);
-                const int damageRight = std::min(renderSrcX + renderW, layer.dmgX + layer.dmgW);
-                const int damageBottom = std::min(renderSrcY + renderH, layer.dmgY + layer.dmgH);
-                if (damageRight <= damageLeft || damageBottom <= damageTop) continue;
+            if (sl.vpDstW > 0 && sl.vpDstW < copyW) renderW = sl.vpDstW;
+            if (sl.vpDstH > 0 && sl.vpDstH < copyH) renderH = sl.vpDstH;
+            if (sl.dmgW > 0 && sl.dmgH > 0) {
+                const int damageLeft = std::max(renderSrcX, sl.dmgX);
+                const int damageTop = std::max(renderSrcY, sl.dmgY);
+                const int damageRight = std::min(renderSrcX + renderW, sl.dmgX + sl.dmgW);
+                const int damageBottom = std::min(renderSrcY + renderH, sl.dmgY + sl.dmgH);
+                if (damageRight <= damageLeft || damageBottom <= damageTop) return;
                 renderDstX += damageLeft - renderSrcX;
                 renderDstY += damageTop - renderSrcY;
                 renderSrcX = damageLeft;
@@ -626,10 +691,10 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
                 renderW = damageRight - damageLeft;
                 renderH = damageBottom - damageTop;
             }
-            const bool needsAlphaBlend = layer.shmFormat == 0 && !layer.opaque;
+            const bool needsAlphaBlend = sl.shmFormat == 0 && !sl.opaque;
             for (int y = 0; y < renderH; y++) {
-                const uint8_t* srcRow = layer.pixels.data() +
-                    ((renderSrcY + y) * layer.w + renderSrcX) * 4;
+                const uint8_t* srcRow = sl.pixels.data() +
+                    ((renderSrcY + y) * sl.w + renderSrcX) * 4;
                 uint8_t* dstRow = composited.data() +
                     ((renderDstY + y) * rootW + renderDstX) * 4;
                 if (!needsAlphaBlend) {
@@ -651,8 +716,22 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
                     }
                 }
             }
+        };
+        for (const auto& layer : layers) {
+            switch (layer.type) {
+                case CompositorLayer::Type::Root:
+                    break;  // 基底已在 rebuildBase 时拷贝
+                case CompositorLayer::Type::Toplevel:
+                    blitToplevel(layer);
+                    break;
+                case CompositorLayer::Type::Subsurface:
+                    blitSubsurface(layer);
+                    break;
+            }
         }
-        const auto subsurfacesComposited = TakeClock::now();
+        const auto childrenComposited = TakeClock::now();
+        // 旧双循环有两个分段时间点; 单循环后合并为一个
+        const auto subsurfacesComposited = childrenComposited;
 
         const auto outputMoved = TakeClock::now();
         auto elapsedUs = [](TakeClock::time_point begin, TakeClock::time_point end) {

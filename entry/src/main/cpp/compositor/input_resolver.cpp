@@ -36,6 +36,13 @@ bool InputResolver::FindInputTargetAt(int x, int y, InputTarget& out)
     auto lk = tmgr_.Lock();
     uint32_t rootId = desktopRootToplevelId_;
 
+    // 层序单一数据源 (阶段 1): 与渲染侧 (TakeToplevelFrame) 遍历同一个按
+    // zIndex 升序的 Layer 列表; fs-pick 提前命中保留 (性能优化, 语义不变)
+    const auto* rootSt = tmgr_.FindToplevelLocked(rootId);
+    const int rootW = (rootSt && rootSt->w > 0) ? rootSt->w : outputW_;
+    const int rootH = (rootSt && rootSt->h > 0) ? rootSt->h : outputH_;
+    const auto layers = compositor_.BuildLayerListLocked(rootW, rootH);
+
     /*
      * 全屏窗口独占输入: 命中判定走与渲染相同的保比例缩放几何
      * (ComputeFitRect, 见 TakeToplevelFrame), 只有该窗口及其
@@ -43,9 +50,6 @@ bool InputResolver::FindInputTargetAt(int x, int y, InputTarget& out)
      * (调用方只吞 PRESS, MOVE/RELEASE 照常透传)
      */
     {
-        const auto* rootSt = tmgr_.FindToplevelLocked(rootId);
-        const int rootW = (rootSt && rootSt->w > 0) ? rootSt->w : outputW_;
-        const int rootH = (rootSt && rootSt->h > 0) ? rootSt->h : outputH_;
         // 全屏目标选取与渲染侧 (TakeToplevelFrame) 同规则: 可见全屏窗口中取
         // fsPriority 最大者。多窗口可同时 fullscreen (显示模式切换时 Wine 会
         // 把足够大的旧窗口连带标记, 且请求到达顺序不定 — 2026-07 实测 notepad
@@ -53,10 +57,12 @@ bool InputResolver::FindInputTargetAt(int x, int y, InputTarget& out)
         // 规则原因/局限见 ToplevelState::fsPriority 注释
         const ToplevelManager::ToplevelState* zst = nullptr;
         uint32_t fullscreenId = 0;
-        for (uint32_t id : tmgr_.toplevelZOrder()) {
-            const auto* cand = tmgr_.FindToplevelLocked(id);
-            if (!cand || !cand->fullscreen || !tmgr_.IsToplevelVisibleLocked(id, desktopRootToplevelId_)) continue;
-            if (!zst || cand->fsPriority > zst->fsPriority) { zst = cand; fullscreenId = id; }
+        for (const auto& layer : layers) {
+            if (layer.type != DesktopCompositor::CompositorLayer::Type::Toplevel ||
+                !layer.visible || !layer.fullscreen) continue;
+            const auto* cand = tmgr_.FindToplevelLocked(layer.toplevelId);
+            if (!cand) continue;
+            if (!zst || cand->fsPriority > zst->fsPriority) { zst = cand; fullscreenId = layer.toplevelId; }
         }
         // 逆变换尺寸必须与渲染一致: ZC 游戏用全屏前尺寸 (游戏分辨率),
         // SHM 游戏用实际 buffer 尺寸 (geometry.h SelectFullscreenContentSize)
@@ -83,20 +89,20 @@ bool InputResolver::FindInputTargetAt(int x, int y, InputTarget& out)
                     zst->preFsW, zst->preFsH, zst->w, zst->h, contentW, contentH);
             }
             // 该窗口的 subsurface 层绘制在窗口内容之上, 先命中 (同一变换)
-            for (auto it = compositor_.subsurfaceLayers().rbegin(); it != compositor_.subsurfaceLayers().rend(); ++it) {
-                if (compositor_.zeroCopySurfaceKeys().count(it->surfaceKey)) continue;
-                if (it->parentToplevel != fullscreenId || it->w <= 0 || it->h <= 0) continue;
-                int layerX = 0, layerY = 0;
-                compositor_.ResolveSubsurfaceLayerPositionLocked(*it, layerX, layerY);
-                const int layerDispW = it->vpDstW > 0 ? std::min(it->vpDstW, it->w) : it->w;
-                const int layerDispH = it->vpDstH > 0 ? std::min(it->vpDstH, it->h) : it->h;
-                const int layerScrX = static_cast<int>(lround(FitMapX(transform, layerX - zst->x)));
-                const int layerScrY = static_cast<int>(lround(FitMapY(transform, layerY - zst->y)));
+            for (auto it = layers.rbegin(); it != layers.rend(); ++it) {
+                if (it->type != DesktopCompositor::CompositorLayer::Type::Subsurface) continue;
+                if (it->zcLayer) continue;
+                if (it->toplevelId != fullscreenId || it->w <= 0 || it->h <= 0) continue;
+                const auto& sl = *it->sub;
+                const int layerDispW = sl.vpDstW > 0 ? std::min(sl.vpDstW, sl.w) : sl.w;
+                const int layerDispH = sl.vpDstH > 0 ? std::min(sl.vpDstH, sl.h) : sl.h;
+                const int layerScrX = static_cast<int>(lround(FitMapX(transform, it->x - zst->x)));
+                const int layerScrY = static_cast<int>(lround(FitMapY(transform, it->y - zst->y)));
                 const int layerScrW = std::max(1, static_cast<int>(lround(layerDispW * transform.scale)));
                 const int layerScrH = std::max(1, static_cast<int>(lround(layerDispH * transform.scale)));
                 if (x >= layerScrX && x < layerScrX + layerScrW && y >= layerScrY && y < layerScrY + layerScrH) {
                     out.toplevelId = fullscreenId;
-                    out.surface = it->surface;
+                    out.surface = sl.surface;
                     out.originX = layerScrX;
                     out.originY = layerScrY;
                     out.scale = static_cast<float>(transform.scale);
@@ -128,7 +134,7 @@ bool InputResolver::FindInputTargetAt(int x, int y, InputTarget& out)
     }
 
     /*
-     * subsurface 命中优先于 toplevel (渲染在上层):
+     * subsurface 命中优先于 toplevel (渲染在上层, Layer zIndex 保证顺序):
      * - 内部菜单: enter 层自己的 wl_surface, 坐标以层原点为基。
      *   层可伸出父窗口边界 — 若改走父窗口 surface, 伸出部分产生越界的
      *   窗口相对坐标, 会被 winewayland 的 motion clamp
@@ -137,49 +143,45 @@ bool InputResolver::FindInputTargetAt(int x, int y, InputTarget& out)
      * - 外部菜单 (isExternal): 任务栏弹出等, subsurface offset 是 Wine
      *   虚拟屏幕坐标 → 走 root, Wine explorer 内部处理点击分发
      */
-    for (auto it = compositor_.subsurfaceLayers().rbegin(); it != compositor_.subsurfaceLayers().rend(); ++it) {
-        // zero-copy GL 层不参与置顶命中: 渲染时它按窗口 z 位被遮挡重绘压回
-        // (egl_renderer occluder redraw), 命中同样交给下方 toplevel z-order 循环,
-        // 否则被挡住的 GL 窗口仍会收到点击。
-        // 查的是实时集合: GPU→CPU fallback 时 key 被移出 zeroCopySurfaceKeys_,
-        // 该层自动恢复为普通 subsurface (CPU 合成置顶, 命中也置顶), 无需特判
-        if (compositor_.zeroCopySurfaceKeys().count(it->surfaceKey)) continue;
-        if (it->parentToplevel != rootId && !tmgr_.IsToplevelVisibleLocked(it->parentToplevel, desktopRootToplevelId_)) continue;
-        if (it->w <= 0 || it->h <= 0) continue;
-        int layerX = 0, layerY = 0;
-        compositor_.ResolveSubsurfaceLayerPositionLocked(*it, layerX, layerY);
-        if (x >= layerX && x < layerX + it->w && y >= layerY && y < layerY + it->h) {
-            if (it->isExternal) {
-                out.toplevelId = rootId;
-                out.surface = tmgr_.GetSurfaceForToplevel(rootId);
-                out.originX = 0;
-                out.originY = 0;
-            } else {
-                out.toplevelId = it->parentToplevel;
-                out.surface = it->surface;
-                out.originX = layerX;
-                out.originY = layerY;
+    for (auto it = layers.rbegin(); it != layers.rend(); ++it) {
+        if (it->type == DesktopCompositor::CompositorLayer::Type::Subsurface) {
+            // zero-copy GL 层不参与置顶命中: 渲染时它按窗口 z 位被遮挡重绘压回
+            // (egl_renderer occluder redraw), 命中同样交给下方 toplevel z-order,
+            // 否则被挡住的 GL 窗口仍会收到点击。zcLayer 由实时集合
+            // zeroCopySurfaceKeys_ 派生: GPU→CPU fallback 时 key 被移出,
+            // 该层自动恢复为普通 subsurface (CPU 合成置顶, 命中也置顶), 无需特判
+            if (it->zcLayer) continue;
+            if (!it->visible) continue;
+            if (it->w <= 0 || it->h <= 0) continue;
+            const auto& sl = *it->sub;
+            if (x >= it->x && x < it->x + it->w && y >= it->y && y < it->y + it->h) {
+                if (sl.isExternal) {
+                    out.toplevelId = rootId;
+                    out.surface = tmgr_.GetSurfaceForToplevel(rootId);
+                    out.originX = 0;
+                    out.originY = 0;
+                } else {
+                    out.toplevelId = it->toplevelId;
+                    out.surface = sl.surface;
+                    out.originX = it->x;
+                    out.originY = it->y;
+                }
+                return out.surface != nullptr;
             }
-            return out.surface != nullptr;
-        }
-    }
-
-    for (auto it = tmgr_.toplevelZOrder().rbegin(); it != tmgr_.toplevelZOrder().rend(); ++it) {
-        uint32_t id = *it;
-        if (!tmgr_.IsToplevelVisibleLocked(id, desktopRootToplevelId_)) continue;
-        const auto* st = tmgr_.FindToplevelLocked(id);
-        if (!st) continue;
-        if (x >= st->x && x < st->x + st->w && y >= st->y && y < st->y + st->h) {
-            wl_resource* surf = tmgr_.GetSurfaceForToplevel(id);
-            if (surf) {
-                auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(surf));
-                if (sd && sd->inputRegionEmpty) continue;
+        } else if (it->type == DesktopCompositor::CompositorLayer::Type::Toplevel) {
+            if (!it->visible) continue;
+            if (x >= it->x && x < it->x + it->w && y >= it->y && y < it->y + it->h) {
+                wl_resource* surf = tmgr_.GetSurfaceForToplevel(it->toplevelId);
+                if (surf) {
+                    auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(surf));
+                    if (sd && sd->inputRegionEmpty) continue;
+                }
+                out.toplevelId = it->toplevelId;
+                out.surface = surf;
+                out.originX = it->x;
+                out.originY = it->y;
+                return out.surface != nullptr;
             }
-            out.toplevelId = id;
-            out.surface = surf;
-            out.originX = st->x;
-            out.originY = st->y;
-            return out.surface != nullptr;
         }
     }
 

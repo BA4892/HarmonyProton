@@ -41,6 +41,10 @@ struct ZeroCopyOccluderRect {
 //   redraw); GPU→CPU fallback 时 key 移出 zeroCopySurfaceKeys_, 该层
 //   自动回归普通 CPU 合成与置顶命中, 无需特判。
 // - desktop root 不参与可见性判定 (契约在 ToplevelManager::IsToplevelVisibleLocked)。
+// - 层序单一数据源 (阶段 1, 行为等价): 一帧桌面的内容来源统一为
+//   CompositorLayer 列表 (BuildLayerListLocked), 合成与输入遍历同一个
+//   按 zIndex 升序的列表; 各层的合成/命中特判逻辑原样保留 (等价形式),
+//   阶段 2 起 ZC 层入列参与层序。
 
 class DesktopCompositor {
 public:
@@ -60,6 +64,25 @@ public:
         bool isExternal = false;  // 外部菜单 (任务栏等), 输入坐标需用 Wine 基底
     };
 
+    // -- 层序单一数据源 (阶段 1: 行为等价重构) --
+    // 一帧桌面的所有内容来源统一为 Layer; 合成与输入遍历同一按 zIndex 升序
+    // 的 Layer 列表 (BuildLayerListLocked)。zIndex 分配: root=0 < toplevel
+    // (按 toplevelZOrder_ 顺序) < subsurface (原顺序) — 与旧双循环顺序等价。
+    // 阶段 1 仅收敛遍历源, 各层合成/命中的特判逻辑保留等价形式 (不动行为);
+    // ZC 层 (zcLayer) 阶段 1 仍由合成/输入跳过, 阶段 2 起入列参与层序。
+    // sub/st 指针指向调用方持有的容器, 必须在 ToplevelManager 锁内使用。
+    struct CompositorLayer {
+        enum class Type { Root, Toplevel, Subsurface };
+        Type type = Type::Root;
+        size_t zIndex = 0;
+        bool visible = false;    // 可见性判定结果 (Root 恒 true, 不参与命中)
+        bool zcLayer = false;    // zero-copy GL 层 (阶段 1: 合成/输入跳过)
+        uint32_t toplevelId = 0; // 归属窗口 (Root 为 0; Subsurface 为 parentToplevel)
+        int x = 0, y = 0, w = 0, h = 0;  // 桌面坐标 (Subsurface 已 Resolve 位置)
+        bool fullscreen = false; // Toplevel: 全屏标记
+        const SubsurfaceLayer* sub = nullptr;  // Type==Subsurface 时引用原层
+    };
+
     // 构造: 注入 ToplevelManager + 桌面合成配置 (由 WaylandServer 持有,
     // policy 为引用 — SetDesktopMode 后随动)
     DesktopCompositor(ToplevelManager& tmgr,
@@ -71,6 +94,12 @@ public:
     // -- 帧输出 --
     // 取指定 toplevel 的最新帧 (桌面模式合成到 root framebuffer)
     bool TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, int& w, int& h);
+
+    // -- 层序单一数据源 --
+    // 构建按 zIndex 升序的 Layer 列表 (调用方须已持有 tmgr mutex)。
+    // 合成 (TakeToplevelFrame) 与输入 (InputResolver) 遍历同一列表;
+    // rootW/rootH 用于 Root 层几何 (输入侧仅作占位, 不参与命中)。
+    std::vector<CompositorLayer> BuildLayerListLocked(int rootW, int rootH);
 
     // -- Zero-copy layer 管理 --
     bool GetZeroCopyLayerInfo(uint64_t surfaceKey, uint32_t rendererToplevelId,
