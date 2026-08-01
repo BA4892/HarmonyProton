@@ -205,9 +205,10 @@ public:
 
     // 交互式窗口移动 (xdg_toplevel.move) — 由 xdg_shell 和 InputManager 调用
     bool IsMoveGrabActive() const { return moveGrab_.IsActive(); }
+    uint32_t GetMoveGrabToplevelId() const { return moveGrab_.GetToplevelId(); }
     void StartMoveGrab(uint32_t toplevelId, uint32_t serial);
     void EndMoveGrab();
-    bool ProcessMoveGrabMotion(wl_fixed_t wx, wl_fixed_t wy);
+    bool ProcessMoveGrabMotion(int32_t gx, int32_t gy);
 
 private:
     WaylandServer() = default;

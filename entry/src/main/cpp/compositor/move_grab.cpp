@@ -8,14 +8,25 @@
 #define LOG_DOMAIN 0x0000
 #define LOG_TAG "WL_Server"
 
-void MoveGrabHandler::StartMoveGrab(ToplevelManager& tmgr, uint32_t toplevelId, uint32_t serial) {
+void MoveGrabHandler::StartMoveGrab(ToplevelManager& tmgr, uint32_t toplevelId, uint32_t serial,
+                                    int32_t grabGlobalX, int32_t grabGlobalY) {
     auto lk = tmgr.Lock();
     toplevelId_ = toplevelId;
     serial_ = serial;
-    lastWineX_ = 0;
-    lastWineY_ = 0;
-    OH_LOG_INFO(LOG_APP, "[MW-MOVE] start interactive move tl=%{public}u serial=%{public}u",
-                toplevelId, serial);
+    // 固定 grab 偏移 = 按下时指针全局位置 − 窗口位置, 后续 motion 绝对定位
+    auto* st = tmgr.FindToplevelLocked(toplevelId);
+    if (st && st->hasPosition) {
+        grabOffX_ = grabGlobalX - st->x;
+        grabOffY_ = grabGlobalY - st->y;
+    } else {
+        // 窗口状态异常 (grab 建立瞬间窗口还没位置): 记录当前全局位置,
+        // 第一个 motion 会落到错误位置, 但绝对定位下一帧即自收敛
+        grabOffX_ = grabGlobalX;
+        grabOffY_ = grabGlobalY;
+    }
+    OH_LOG_INFO(LOG_APP, "[MW-MOVE] start interactive move tl=%{public}u serial=%{public}u"
+                " grabOff=(%{public}d,%{public}d)",
+                toplevelId, serial, grabOffX_, grabOffY_);
 }
 
 void MoveGrabHandler::EndMoveGrab(ToplevelManager& tmgr) {
@@ -24,35 +35,27 @@ void MoveGrabHandler::EndMoveGrab(ToplevelManager& tmgr) {
         auto lk = tmgr.Lock();
         toplevelId_ = 0;
         serial_ = 0;
-        lastWineX_ = 0;
-        lastWineY_ = 0;
+        grabOffX_ = 0;
+        grabOffY_ = 0;
     }
 }
 
-bool MoveGrabHandler::ProcessMoveGrabMotion(ToplevelManager& tmgr, wl_fixed_t wx, wl_fixed_t wy) {
+bool MoveGrabHandler::ProcessMoveGrabMotion(ToplevelManager& tmgr, int32_t gx, int32_t gy) {
     auto lk = tmgr.Lock();
     if (toplevelId_ == 0) return false;
     auto* st = tmgr.FindToplevelLocked(toplevelId_);
     if (!st || !st->hasPosition) return false;
 
-    int32_t rx = wl_fixed_to_int(wx) + st->x;
-    int32_t ry = wl_fixed_to_int(wy) + st->y;
-
-    if (lastWineX_ == 0 && lastWineY_ == 0) {
-        lastWineX_ = rx;
-        lastWineY_ = ry;
-        return true;
-    }
-
-    int32_t dx = rx - lastWineX_;
-    int32_t dy = ry - lastWineY_;
-    if (dx != 0 || dy != 0) {
-        st->x += dx;
-        st->y += dy;
-        lastWineX_ = rx;
-        lastWineY_ = ry;
-        OH_LOG_INFO(LOG_APP, "[MW-MOVE] grab move tl=%{public}u dx=%{public}d dy=%{public}d newPos=(%{public}d,%{public}d)",
-                    toplevelId_, dx, dy, st->x, st->y);
+    // 绝对定位, 无累积。增量式 (每帧 st->x += 指针增量) 在双线程下会把
+    // 上帧自身位移叠进下一帧位移 — InputManager 注入局部坐标与消费侧
+    // 读 st->x 还原的基准漂移, 快速拖动时窗口位移按帧累积放大直至飞出屏幕
+    const int32_t nx = gx - grabOffX_;
+    const int32_t ny = gy - grabOffY_;
+    if (nx != st->x || ny != st->y) {
+        st->x = nx;
+        st->y = ny;
+        OH_LOG_INFO(LOG_APP, "[MW-MOVE] grab move tl=%{public}u ptr=(%{public}d,%{public}d) newPos=(%{public}d,%{public}d)",
+                    toplevelId_, gx, gy, st->x, st->y);
     }
     return true;
 }

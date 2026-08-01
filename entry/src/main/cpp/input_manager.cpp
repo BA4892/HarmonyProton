@@ -358,6 +358,19 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
     wl_resource* targetSurf = nullptr;
     if (ws->Policy().CompositorRoutesInput() && tl != ws->GetDesktopRootToplevelId()) {
         CoordTransform(px, py, ws->GetDesktopRootToplevelId(), &wx, &wy);
+        // 记录最近一次注入的桌面全局指针位置 (grab 建立时算固定偏移用)
+        lastGlobalPtrX_.store(wx);
+        lastGlobalPtrY_.store(wy);
+        // move grab 期间 (xdg_toplevel.move): compositor 用桌面全局坐标绝对定位
+        // 被拖窗口, motion 必须注入全局坐标。局部坐标往返 (enqueue 时
+        // local = logical - st->x, 消费时再 + st->x 还原) 在两个线程间基准
+        // 漂移: 消费时刻的 st->x 已变, rx 多出"窗口自身刚移动的量"并叠进
+        // 下一帧位移 → 快速拖动时窗口位移逐帧累积放大, 窗口瞬间飞出屏幕
+        if (action == ACT_MOVE && ws->IsMoveGrabActive() &&
+            ws->GetMoveGrabToplevelId() == tl) {
+            Enqueue(InputEvent::PTR_MOTION, 0, nullptr, wx, wy, 0, 0);
+            return;
+        }
         // warp/增量模式 (dinput 游戏 SetCursorPos 回中, 见 input_manager.h 尾部):
         // warpActive_ 时用户输入只提供 delta, 逻辑位置 = warp 锚点 + 增量累加。
         // 补偿在桌面坐标空间做, 与 OnPointerWarp 的锚点空间一致
@@ -394,6 +407,20 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
         }
     } else {
         CoordTransform(px, py, tl, &wx, &wy);
+        // PC 空间全局指针位置 = 窗口局部坐标 + 窗口位置 (grab 偏移基准)
+        lastGlobalPtrX_.store(wl_fixed_from_double(wl_fixed_to_double(wx) + ws->GetToplevelX(tl)));
+        lastGlobalPtrY_.store(wl_fixed_from_double(wl_fixed_to_double(wy) + ws->GetToplevelY(tl)));
+        // move grab 降级路径 (PC 模式 startMoving 失败时): wx 是窗口局部坐标,
+        // 补上窗口位置还原为绝对坐标, 供 compositor 绝对定位 (不在此做
+        // 局部→全局往返, 消费侧不再二次读 st->x, 避免双线程基准漂移)
+        if (action == ACT_MOVE && ws->IsMoveGrabActive() &&
+            ws->GetMoveGrabToplevelId() == tl) {
+            Enqueue(InputEvent::PTR_MOTION, 0, nullptr,
+                    wl_fixed_from_double(wl_fixed_to_double(wx) + ws->GetToplevelX(tl)),
+                    wl_fixed_from_double(wl_fixed_to_double(wy) + ws->GetToplevelY(tl)),
+                    0, 0);
+            return;
+        }
         // PC 模式: warp 补偿在窗口局部坐标空间 (锚点 = wine 的 surface 局部坐标)
         double logicalX = wl_fixed_to_double(wx);
         double logicalY = wl_fixed_to_double(wy);

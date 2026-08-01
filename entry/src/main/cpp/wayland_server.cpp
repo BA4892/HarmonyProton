@@ -161,7 +161,11 @@ void WaylandServer::RaiseToplevel(uint32_t id, bool userInitiated) {
 
 // -- 交互式窗口移动 (xdg_toplevel.move) --
 void WaylandServer::StartMoveGrab(uint32_t toplevelId, uint32_t serial) {
-    moveGrab_.StartMoveGrab(toplevelMgr_, toplevelId, serial);
+    // 用最近一次注入的全局指针位置立即算固定 grab 偏移:
+    // 绝对定位后窗口每帧由 全局坐标−偏移 决定, 不依赖消费时刻的 st->x
+    moveGrab_.StartMoveGrab(toplevelMgr_, toplevelId, serial,
+                            wl_fixed_to_int(InputManager::GetInstance()->GetLastGlobalPointerX()),
+                            wl_fixed_to_int(InputManager::GetInstance()->GetLastGlobalPointerY()));
     if (Policy().OhosWindowPerToplevel()) {
         FireToplevelEvent(toplevelId, "move_start");
     }
@@ -176,7 +180,10 @@ void WaylandServer::EndMoveGrab() {
 }
 
 bool WaylandServer::ProcessMoveGrabMotion(wl_fixed_t wx, wl_fixed_t wy) {
-    if (!moveGrab_.ProcessMoveGrabMotion(toplevelMgr_, wx, wy)) return false;
+    // 注意: InputManager 在 grab 激活时注入的是桌面全局坐标 (wl_fixed_t),
+    // 这里截断为整数全局坐标交 MoveGrabHandler 绝对定位
+    if (!moveGrab_.ProcessMoveGrabMotion(toplevelMgr_, wl_fixed_to_int(wx),
+                                         wl_fixed_to_int(wy))) return false;
     MarkDesktopRootDirtyLocked();
     return true;
 }

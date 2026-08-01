@@ -80,6 +80,13 @@ public:
     // -- 辅助: 物理像素 → Wine 逻辑坐标映射 (供 FindToplevelAt 等使用) --
     wl_fixed_t CoordTransform(double px, double py, uint32_t tl, wl_fixed_t* outX, wl_fixed_t* outY);
 
+    // 最近一次注入的全局指针位置 (NAPI 线程写, Wayland 线程读)。
+    // 语义 = move_grab 输入空间的绝对坐标: desktop 为桌面逻辑坐标,
+    // PC 为 窗口局部坐标 + 窗口位置 还原值。xdg_toplevel.move 建立 grab
+    // 时据此立即算固定 grab 偏移 (绝对定位, 无累积)
+    wl_fixed_t GetLastGlobalPointerX() const { return lastGlobalPtrX_.load(); }
+    wl_fixed_t GetLastGlobalPointerY() const { return lastGlobalPtrY_.load(); }
+
     // 指针 warp 锚点 (wp_pointer_warp_v1 请求 / lock hint → PointerExtras 调入,
     // Wayland 线程)。sx/sy 是 wine 的 surface 局部坐标。
     void OnPointerWarp(wl_resource* surface, double sx, double sy);
@@ -132,6 +139,10 @@ private:
     uint32_t modifiers_group_ = 0;
     void UpdateModifiers(int evdevCode, bool pressed);
     bool IsModifierKey(int evdevCode);
+
+    // 最近一次注入的全局指针位置 (跨线程, 供 move grab 建立时算偏移)
+    std::atomic<wl_fixed_t> lastGlobalPtrX_{0};
+    std::atomic<wl_fixed_t> lastGlobalPtrY_{0};
 
     // pointer focus
     std::atomic<uint32_t> pointerFocusedToplevel_{0};
