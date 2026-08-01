@@ -18,12 +18,12 @@ graph TB
         APP --> DXVK["DXVK 1.10.3<br/>D3D11→Vulkan"]
         APP -->|OpenGL| WGL["opengl32 + wgl"]
         DXVK --> WINEVK["winevulkan.dll"]
-        WINEVK --> VULKANC["win32u/vulkan.c<br/>私有 swapchain"]
+        WINEVK --> VULKANC["win32u/vulkan.c<br/>私有 swapchain（0x574853 tag）"]
         WGL --> WLD["winewayland.drv"]
-        VULKANC --> WVK["winewayland.drv<br/>vulkan surface"]
         APP -->|音频| MMA["mmdevapi / mciqtz32"]
         MMA --> OHDRV["wineohos.drv<br/>ohos_audio_client.c"]
         WLD --> MESA["guest Mesa<br/>virpipe / venus"]
+        VULKANC --> MESA
     end
 
     subgraph transport["传输域 — Unix socket / Wayland 协议"]
@@ -113,7 +113,7 @@ flowchart LR
     F --> G["OH_NativeWindow"]
 ```
 
-- guest 侧 DXVK 的 present 走 `win32u/vulkan.c` 的**私有 swapchain**（`0x574853` tag），再经 guest Mesa venus 编码为 vtest 命令。
+- guest 侧 DXVK 的 present 走 `win32u/vulkan.c` 的**私有 swapchain**（`0x574853` tag），再经 guest Mesa venus 编码为 vtest 命令：`win32u` dlopen `libvulkan_virtio.so` 取 `vn_winehua_present` 入口，发私有命令 `VCMD_WINEHUA_VK_PRESENT`（0x57485650）；host 端 `vkr_renderer_winehua_present` 按 Venus 对象 ID 查表后 `vkQueuePresentKHR`。这三处（win32u swapchain / mesa vn_winehua_present / virglrenderer vkr_winehua_present）是**跨 fork 成对演进的私有接口**（见 `docs/submodule-patches/wine.md`、`mesa.md`、`virglrenderer.md`）。
 - host 侧 `venus_surface_presenter.cpp` 把 virglrenderer 渲染的 Vulkan 图像经 OH_NativeWindow 上屏。
 - **shadow 内存路径**：Maleoon 等设备无 dma-buf 导出，走匿名文件 shadow + memcpy 同步（flush/invalidate/GPU upload），profile 契约见 STATUS_MEMO。
 
