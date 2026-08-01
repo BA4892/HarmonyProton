@@ -68,7 +68,10 @@ fi
 # Wine Mono (.NET 运行时) — 预编译 MSI, 默认跳过
 # 设置 BUILD_WINE_MONO=1 启用 (增加 ~80MB)
 if [ "${BUILD_WINE_MONO:-0}" = "1" ]; then
-    WINE_MONO_VER="10.0.0"
+    # 必须与 mscoree 侧期望一致: appwiz.cpl addons.c MONO_VERSION /
+    # mscoree_private.h WINE_MONO_VERSION 均为 11.1.0. install_addon
+    # 按 addon->file_name 精确匹配, 版本不一致 → 找不到 msi → 弹框卡死
+    WINE_MONO_VER="11.1.0"
     WINE_MONO_MSI="wine-mono-${WINE_MONO_VER}-x86.msi"
     WINE_MONO_URL="https://dl.winehq.org/wine/wine-mono/${WINE_MONO_VER}/${WINE_MONO_MSI}"
     WINE_MONO_DIR="$BUILD_DIR/wine-ohos/share/wine/mono"
