@@ -1,7 +1,7 @@
 # 合成管线统一抽象方案（Compositor Layer Unification）
 
-> 状态: 设计提案（未实施）
-> 日期: 2026-08-01
+> 状态: 阶段 1 已实施（feature/compositor-layers @76a2cd4），阶段 2+ 未实施
+> 日期: 2026-08-01（更新: 2026-08-02）
 > 范围: desktop（Pad）与 PC（模拟器）两种模式
 > 关联: `ARCHITECTURE_OVERVIEW.md`、`OPENGL_VIRGL_DESIGN.md`、`CROSS_FORK_CONTRACTS.md`
 
@@ -138,7 +138,9 @@ fs-pick、subsurface 命中、toplevel 命中合并为一个循环；S3 的"两�
 
 ## 5. 实施阶段（渐进式，不推倒重来）
 
-### 阶段 1：层序单一数据源（行为等价重构）
+### 阶段 1：层序单一数据源（行为等价重构）✅ 已实施
+
+> 提交: `feature/compositor-layers` @76a2cd4（仅代码，未 push）
 
 - 建立 Layer 容器（vector 按 zIndex 排序），`subsurfaceLayers_` +
   `zeroCopySurfaceKeys_` + toplevel 合成输入全部映射为 Layer。
@@ -146,6 +148,12 @@ fs-pick、subsurface 命中、toplevel 命中合并为一个循环；S3 的"两�
 - 输入侧 `FindInputTargetAt` 同样映射到 Layer 遍历（保留 fs-pick 提前命中
   作为性能优化，语义不变）。
 - 验收：双平台回归，合成输出逐像素等价（可复用 `automation/validate_frame.py`）。
+
+实施要点:
+- Layer 构建不过滤不可见 toplevel（`visible` 仅作标记, 合成/输入循环按标记
+  跳过）— 合成签名仍对不可见 toplevel 混入 (id,0), 与旧行为完全一致。
+- 全屏独占（isZcGame 填黑 / SHM 黑边 / fs-pick）与遮挡相关判定原样保留,
+  仅遍历源统一为 Layer 列表。
 
 ### 阶段 2：ZC 入层（修复双 GL 实例 bug）
 
