@@ -197,22 +197,15 @@ void InputManager::OnPointerWarp(wl_resource* surface, double sx, double sy) {
 // MOVE/PRESS 一致走 warp 补偿: 输出构造位置 (锚点+增量), wineserver 光标
 // 不再被设备绝对位置拽走 → dinput 差分 = 真实位移, 点击命中也正确。
 // PRESS 不重置 warp 状态 — 点击后 MOVE 继续补偿。
-// outMoved (可空): 报告本次事件是否因用户真实位移改变了输出。静止点击
-// 时输出与上次相同, wine 侧无位置变化、不产生 dinput 轴数据, PAL2 等
-// 老游戏只在有轴数据时才处理按键 → PRESS/RELEASE 分支据此注入 nudge。
 void InputManager::ApplyWarpLogicLocked(wl_resource* surface, double userX,
                                         double userY, bool isPress,
-                                        double& outX, double& outY,
-                                        bool* outMoved) {
+                                        double& outX, double& outY) {
     bool warpForThisSurface = warpActive_ && warpSurface_ &&
                               (warpSurface_ == surface);
-    if (outMoved) *outMoved = false;
     if (warpForThisSurface && hasLastUser_) {
         // 增量模式: 用户输入只提供 delta, 锚点在 warp 位置
         outX = warpLogicalX_ + (userX - lastUserX_);
         outY = warpLogicalY_ + (userY - lastUserY_);
-        if (outMoved)
-            *outMoved = (userX != lastUserX_ || userY != lastUserY_);
     } else {
         outX = userX;
         outY = userY;
@@ -223,12 +216,6 @@ void InputManager::ApplyWarpLogicLocked(wl_resource* surface, double userX,
     lastUserX_ = userX;
     lastUserY_ = userY;
     hasLastUser_ = true;
-}
-
-// warp 补偿当前是否作用于该 surface (PRESS/RELEASE 的 nudge 门控用)
-bool InputManager::WarpActiveFor(wl_resource* surface) {
-    std::lock_guard<std::mutex> lk(warpMutex_);
-    return warpActive_ && warpSurface_ && warpSurface_ == surface;
 }
 
 // ========================================================================
@@ -379,10 +366,8 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
     // wl_surface, 必须 enter 它并用层相对坐标 — 经父窗口 surface 的越界
     // 坐标会被 winewayland 的 motion clamp 夹回窗口内, 菜单伸出部分点不中)
     wl_resource* targetSurf = nullptr;
-    // 本次事件是否因真实位移改变了补偿输出 (静止点击=false → 触发 nudge)
-    bool warpMoved = false;
-    // 本事件 toplevel 的真实 surface (warp 归属判定与 nudge 门控共用,
-    // 与补偿用同一份, 避免 targetSurf 为其它层时 nudge 门控失配)
+    // 本事件 toplevel 的真实 surface (warp 归属判定用, 与补偿用同一份,
+    // 避免 targetSurf 为其它层时 warp 归属失配)
     wl_resource* warpTestSurface = nullptr;
     if (ws->Policy().CompositorRoutesInput() && tl != ws->GetDesktopRootToplevelId()) {
         CoordTransform(px, py, ws->GetDesktopRootToplevelId(), &wx, &wy);
@@ -410,8 +395,7 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
             warpTestSurface = ws->GetSurfaceForToplevel(tl);
             std::lock_guard<std::mutex> lk(warpMutex_);
             ApplyWarpLogicLocked(warpTestSurface, logicalX, logicalY,
-                                 action == ACT_PRESS, logicalX, logicalY,
-                                 &warpMoved);
+                                 action == ACT_PRESS, logicalX, logicalY);
         }
         WaylandServer::InputTarget target;
         if (ws->FindInputTargetAt(static_cast<int>(lround(logicalX)),
@@ -457,8 +441,7 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
             warpTestSurface = ws->GetSurfaceForToplevel(tl);
             std::lock_guard<std::mutex> lk(warpMutex_);
             ApplyWarpLogicLocked(warpTestSurface, logicalX, logicalY,
-                                 action == ACT_PRESS, logicalX, logicalY,
-                                 &warpMoved);
+                                 action == ACT_PRESS, logicalX, logicalY);
         }
         wx = wl_fixed_from_double(logicalX);
         wy = wl_fixed_from_double(logicalY);
@@ -498,29 +481,7 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
                     Enqueue(InputEvent::PTR_ENTER, tl, surf, wx, wy, 0, 0);
                 }
             }
-            // PAL2 等老 dinput 游戏按帧轮询 GetDeviceState, 只在 lX/lY 非零
-            // 的轮询里处理按键 (实测: 静止点击/长按均被忽略, 移动中点击有效;
-            // ±1px 同帧往返 nudge 在一次轮询内累加净零仍被忽略 — GetDeviceState
-            // 的 lX 是自上次轮询以来的累加值, 见 wine dlls/dinput/mouse.c)。
-            // 对策: 静止按下时注入单向 1px motion (该轮 lX=±1, 按键在同一份
-            // DIMOUSESTATE 里可见), 静止抬手时反向 1px 冲销; nudgeBalance_
-            // 记录未冲销位移, 方向自动平衡, 总位移恒为零。仅 warp 激活时启用。
-            // 门控用与补偿相同的 warpTestSurface (toplevel 真实 surface):
-            // 此前误用 targetSurf, 层解析结果与 warpSurface_ 失配时 nudge
-            // 永远静默不触发 (诊断: dinput 日志中按钮前无任何 nudge motion)
-            const bool warpFor = WarpActiveFor(warpTestSurface);
-            const bool nudge = !warpMoved && warpFor;
-            OH_LOG_INFO(LOG_APP, "[Input] NUDGE press fired=%{public}d moved=%{public}d warpFor=%{public}d bal=%{public}d",
-                        nudge ? 1 : 0, warpMoved ? 1 : 0, warpFor ? 1 : 0, nudgeBalance_.load());
-            if (nudge) {
-                const int step = (nudgeBalance_.load() > 0) ? -1 : 1;
-                nudgeBalance_ += step;
-                nudgePressMs_ = NowMs();
-                Enqueue(InputEvent::PTR_MOTION, 0, nullptr,
-                        wl_fixed_from_double(wl_fixed_to_double(wx) + step), wy, 0, 0);
-            } else {
-                Enqueue(InputEvent::PTR_MOTION, 0, nullptr, wx, wy, 0, 0);
-            }
+            Enqueue(InputEvent::PTR_MOTION, 0, nullptr, wx, wy, 0, 0);
             if (button) {
                 unsigned bit = ButtonToBit(button);
                 if (bit < 32) {
@@ -528,6 +489,7 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
                     OH_LOG_INFO(LOG_APP, "[Input] BTN_PRESS btn=0x%{public}x bit=%{public}u pressedBits=0x%{public}x",
                                 button, bit, pressedButtons_);
                 }
+                lastPressMs_ = NowMs();  // 脉冲拉伸计时基准 (见 ACT_RELEASE)
                 Enqueue(InputEvent::PTR_BUTTON, 0, nullptr, 0, 0, button, WL_POINTER_BUTTON_STATE_PRESSED);
             }
 
@@ -568,37 +530,31 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
             }
             OH_LOG_INFO(LOG_APP, "[Input] BTN_RELEASE btn=0x%{public}x→0x%{public}x pressedBits=0x%{public}x",
                         button, releaseBtn, pressedButtons_);
-            // 静止抬手同样注入反向 1px (冲销按下时的 nudge, 原理见 PRESS 注释)。
-            // 快速 tap (<kMinPressDurationMs) 的抬手延迟到下一个轮询窗口再发:
-            // down/up 挤在同一次 GetDeviceState 轮询内会相互净零, 游戏看不见
-            // 这次点击。延迟用短生命周期线程, 不阻塞 ArkTS 输入线程; 极限
-            // 快速连点 (<100ms 间隔) 事件可能乱序, 对老游戏可接受。
-            const bool warpForRel = WarpActiveFor(warpTestSurface);
-            const bool nudgeRel = !warpMoved && warpForRel;
-            OH_LOG_INFO(LOG_APP, "[Input] NUDGE release fired=%{public}d moved=%{public}d warpFor=%{public}d bal=%{public}d",
-                        nudgeRel ? 1 : 0, warpMoved ? 1 : 0, warpForRel ? 1 : 0, nudgeBalance_.load());
-            int relStep = 0;
-            if (nudgeRel) {
-                relStep = (nudgeBalance_.load() > 0) ? -1 : 1;
-                nudgeBalance_ += relStep;
-            }
-            const uint32_t quick = NowMs() - nudgePressMs_.load();
-            if (nudgeRel && releaseBtn && quick < kMinPressDurationMs) {
+            // 脉冲拉伸: 按下-抬起间隔 <kMinPressDurationMs 的点击, 抬手延迟
+            // 补足再发。根因: ArkTS 触控手势状态机把静止 tap 合成为
+            // Press+Release 同刻脉冲 (DesktopWindow.ets onTouch 的"等 Up 再
+            // 补发"手势语义); down/up 挤在同一次 GetDeviceState 轮询 (~8ms)
+            // 内相互净零, PAL2 类按帧轮询 dinput 的游戏永远看不见这次点击
+            // (探针实证: smoke/dinput_click_probe.c; 真机 Windows / winlator
+            // 的真实时序输入无此问题)。物理鼠标自 ArkTS .onMouse 直通修复后
+            // 为真实时序, 本延迟主要对残余的触屏 tap 脉冲生效。
+            // 延迟用短生命周期线程, 不阻塞 ArkTS 输入线程; 极限快速连点
+            // (<100ms 间隔) 事件可能乱序, 对老游戏可接受。
+            const uint32_t quick = NowMs() - lastPressMs_.load();
+            if (releaseBtn && quick < kMinPressDurationMs) {
                 const uint32_t delayMs = kMinPressDurationMs - quick;
-                const wl_fixed_t rx = wl_fixed_from_double(wl_fixed_to_double(wx) + relStep);
-                std::thread([this, delayMs, rx, wy, releaseBtn] {
+                // 可观测性: 触屏 tap 之外的使用 (如物理鼠标) 不应触发本延迟;
+                // 触发 = 某条输入路径在产塌缩脉冲, 是 bug 信号而非正常事件
+                OH_LOG_INFO(LOG_APP, "[Input] STRETCH delay release btn=0x%{public}x quick=%{public}ums delay=%{public}ums",
+                            releaseBtn, quick, delayMs);
+                std::thread([this, delayMs, releaseBtn] {
                     std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
-                    Enqueue(InputEvent::PTR_MOTION, 0, nullptr, rx, wy, 0, 0);
                     Enqueue(InputEvent::PTR_BUTTON, 0, nullptr, 0, 0, releaseBtn,
                             WL_POINTER_BUTTON_STATE_RELEASED);
                 }).detach();
-            } else {
-                if (nudgeRel)
-                    Enqueue(InputEvent::PTR_MOTION, 0, nullptr,
-                            wl_fixed_from_double(wl_fixed_to_double(wx) + relStep), wy, 0, 0);
-                if (releaseBtn)
-                    Enqueue(InputEvent::PTR_BUTTON, 0, nullptr, 0, 0, releaseBtn,
-                            WL_POINTER_BUTTON_STATE_RELEASED);
+            } else if (releaseBtn) {
+                Enqueue(InputEvent::PTR_BUTTON, 0, nullptr, 0, 0, releaseBtn,
+                        WL_POINTER_BUTTON_STATE_RELEASED);
             }
             break;
         }

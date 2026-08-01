@@ -190,15 +190,9 @@ private:
     bool hasLastUser_ = false;
     // warp 共用的坐标处理 (warpMutex_ 已持有): 输入用户坐标, 输出逻辑坐标
     // (并更新增量基准)。warpSurface_ 非 NULL 时仅对该 surface 生效。
-    // outMoved (可空) 报告本次事件是否因真实位移改变了输出 (nudge 门控用)
     void ApplyWarpLogicLocked(wl_resource* surface, double userX, double userY,
-                              bool isPress, double& outX, double& outY,
-                              bool* outMoved = nullptr);
-    // warp 补偿当前是否作用于该 surface (PRESS/RELEASE 的 nudge 门控用)
-    bool WarpActiveFor(wl_resource* surface);
+                              bool isPress, double& outX, double& outY);
 
-    // 静止点击 nudge 状态 (PAL2 类按帧轮询 GetDeviceState 的老游戏兼容,
-    // 原理见 input_manager.cpp ACT_PRESS 注释)
-    std::atomic<int> nudgeBalance_{0};        // 未冲销的 nudge 位移 (+1/-1)
-    std::atomic<uint32_t> nudgePressMs_{0};   // 最近一次 nudge 按下时刻
+    // 最近一次按下时刻 (ACT_RELEASE 的脉冲拉伸计时, 见 input_manager.cpp)
+    std::atomic<uint32_t> lastPressMs_{0};
 };

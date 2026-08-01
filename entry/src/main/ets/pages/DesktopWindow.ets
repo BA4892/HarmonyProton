@@ -71,6 +71,12 @@ struct DesktopPage {
   private static readonly SCROLL_STEP_PX: number = 40; // 物理像素/滚动步, winewayland.drv 只处理 discrete
   // 物理鼠标右键: Press 时捕获目标 tl, Release 发给同一 tl (按下捕获语义)
   private rightBtnTl: number = 0;
+  // 物理鼠标左键: 同右键的按下捕获; mouseLeftActive 用于抑制 OHOS 为左键
+  // 合成派发的 touch 事件 (见 onTouch 注释 — 合成 touch 会把手势状态机的
+  // "等 Up 再补发 Press+Release" 作用到鼠标上, 静止点击被压成 0ms 脉冲,
+  // dinput 轮询类游戏 (PAL2) 看不见这次点击)
+  private leftBtnTl: number = 0;
+  private mouseLeftActive: boolean = false;
   // hover 移动抽样日志计数
   private hoverLogCounter: number = 0;
 
@@ -155,6 +161,10 @@ struct DesktopPage {
 
           const t = ev.changedTouches[0];
           if (!t) return;
+          // 物理鼠标左键的合成 touch: 已由 .onMouse 以真实时序直通, 此处忽略。
+          // 若让它进手势状态机, 静止点击会被压成 Press+Release 同刻脉冲
+          // (dinput 轮询不可见), 长按还会被误判成右键 — 鼠标有自己的右键。
+          if (this.mouseLeftActive) return;
           const px = Math.round(vp2px(t.x));
           const py = Math.round(vp2px(t.y));
 
@@ -274,10 +284,12 @@ struct DesktopPage {
         }
       })
 
-      // ── 物理鼠标: hover 移动 + 右键直通 ──
-      // 左键不在此处理: OHOS 把鼠标左键合成 touch 事件, 由 onTouch 手势状态机
-      // 处理 (此处再处理会双发); 右键不合成 touch 事件, 没有本处理器则物理
-      // 鼠标右键完全丢失 (触屏长按合成右键不受影响)。
+      // ── 物理鼠标: hover 移动 + 左右键真实时序直通 ──
+      // 左键: OHOS 会同时派发 mouse 事件和合成 touch 事件 — 本处理器直通
+      // mouse 事件, 合成 touch 由 onTouch 里的 mouseLeftActive 守卫丢弃
+      // (手势状态机的"等 Up 再补发"只服务于手指, 作用于鼠标会把静止点击
+      // 压成 0ms 脉冲)。右键不合成 touch 事件, 没有本处理器则完全丢失
+      // (触屏长按合成右键不受影响)。
       .onMouse((ev: MouseEvent) => {
         try {
           // ── hover 移动直通 (指针跟随/高亮/tooltip/光标形状依赖 WM_MOUSEMOVE) ──
@@ -289,7 +301,7 @@ struct DesktopPage {
             const py = Math.round(vp2px(ev.y));
             // 右键按住拖动: 发给按下捕获的 tl; 否则按当前位置找目标
             // (跨窗口 enter/leave 由注入层 ACT_MOVE 的焦点判定处理)
-            let tl = this.rightBtnTl;
+            let tl = this.leftBtnTl || this.rightBtnTl;
             if (tl <= 0) {
               tl = testNapi.findToplevelAt(px, py) as number;
               if (tl <= 0) return;
@@ -301,10 +313,45 @@ struct DesktopPage {
             testNapi.sendPointerEvent(tl, MouseAction.Move, px, py, 0);
             return;
           }
-          if (ev.button !== MouseButton.Right) return;
           if (ev.action !== MouseAction.Press && ev.action !== MouseAction.Release) return;
           const px = Math.round(vp2px(ev.x));
           const py = Math.round(vp2px(ev.y));
+          // ── 物理鼠标左键: 真实时序直通 (按下即转发, 不等手势判定) ──
+          // OHOS 对左键同时派发 mouse 事件和合成 touch 事件; 合成 touch 走
+          // onTouch 手势状态机会把静止点击压成 Press+Release 同刻脉冲
+          // (dinput 轮询类游戏 PAL2 因此看不见静止点击), 长按还会被误判为
+          // 右键。这里直通真实时序, 并用 mouseLeftActive 抑制合成 touch。
+          if (ev.button === MouseButton.Left) {
+            const btnLeft = mapMouseButton(1);
+            if (ev.action === MouseAction.Press) {
+              this.mouseLeftActive = true;
+              // 竞态: 合成 touch 可能先一步进入 PENDING/DRAG, 静默清除
+              // (其后续 Move/Up 会被 mouseLeftActive 拦截, 不会双发)
+              this.touchPending = false;
+              this.isDragging = false;
+              const tl: number = testNapi.findToplevelAt(px, py) as number;
+              if (tl <= 0) {
+                this.leftBtnTl = 0;
+                hilog.info(DOMAIN, 'CLICK-PIPE', '[ArkTS] MOUSE-LEFT skipped (no toplevel at %{public}d,%{public}d)', px, py);
+                return;
+              }
+              this.leftBtnTl = tl;
+              testNapi.raiseToplevel(tl);
+              hilog.info(DOMAIN, 'CLICK-PIPE', '[ArkTS] MOUSE-LEFT press tl=%{public}d px=(%{public}d,%{public}d)', tl, px, py);
+              testNapi.sendPointerEvent(tl, MouseAction.Press, px, py, btnLeft);
+            } else {
+              if (this.leftBtnTl <= 0) {
+                this.mouseLeftActive = false;
+                return;
+              }
+              hilog.info(DOMAIN, 'CLICK-PIPE', '[ArkTS] MOUSE-LEFT release tl=%{public}d px=(%{public}d,%{public}d)', this.leftBtnTl, px, py);
+              testNapi.sendPointerEvent(this.leftBtnTl, MouseAction.Release, px, py, btnLeft);
+              this.leftBtnTl = 0;
+              this.mouseLeftActive = false;
+            }
+            return;
+          }
+          if (ev.button !== MouseButton.Right) return;
           const btnRight = mapMouseButton(2);
           if (ev.action === MouseAction.Press) {
             const tl: number = testNapi.findToplevelAt(px, py) as number;

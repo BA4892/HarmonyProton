@@ -409,7 +409,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
     }
 
     // -- wineserver via NCP --
-    // wineserver 走 WineserverMain 入口, 不解析 __env__, 不需要环境变量
+    // wineserver 走 WineserverMain 入口 (wine_child.cpp), __env= 覆盖会被解析
     {
         std::string wsEntryParams = p->homeDir + "|" + p->winehuaBin + "|wineserver|-f|-p";
         OH_LOG_INFO(LOG_APP, "[Launch-Async] wineserver args=%{public}s", wsEntryParams.c_str());

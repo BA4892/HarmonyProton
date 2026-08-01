@@ -695,12 +695,26 @@ extern "C" void WineserverMain(NativeChildProcess_Args args)
     OH_LOG_INFO(LOG_APP, "[WineChild] ws step3: chdir(%{public}s)...", binDir);
     chdir(binDir);
 
-    // stderr → pipe → hilog (appspawn 子进程中 stdio 不可用)
+    // stderr → pipe → hilog + 文件 (与普通 wine child 相同的落盘通道,
+    // hilog 转发实际不可靠, wineserver 排障依赖文件)
     int errPipe[2];
     pipe(errPipe);
     dup2(errPipe[1], STDERR_FILENO);
     close(errPipe[1]);
-    auto* ctx = new stderr_ctx{errPipe[0], -1};  // 只写 hilog，不写文件
+    mkdir(WINE_LOG_DIR, 0755);
+    time_t now = time(nullptr);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    char logPath[128];
+    snprintf(logPath, sizeof(logPath),
+             WINE_LOG_DIR "/wine_stderr_%04d%02d%02d.log",
+             tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+    int errFile = open(logPath, O_WRONLY | O_CREAT | O_APPEND, 0666);
+    if (errFile >= 0) {
+        dprintf(errFile, "\n=== PID=%d entryParams=%s ===\n", getpid(),
+                args.entryParams ? args.entryParams : "(null)");
+    }
+    auto* ctx = new stderr_ctx{errPipe[0], errFile};
     pthread_t tid;
     pthread_create(&tid, nullptr, stderr_reader_thread, ctx);
     pthread_detach(tid);
