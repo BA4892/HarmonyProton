@@ -46,6 +46,19 @@ private:
     void ReleaseZeroCopyBinding();
     void ShutdownZeroCopyConsumer();
 
+    // -- ZC 状态发布点收敛 (阶段 3) --
+    // 三处状态 (compositor zeroCopySurfaceKeys_ / broker ready marker /
+    // renderer 内部 zeroCopyReadyPublished_) 的全部更新收敛到这三个方法,
+    // 每个幂等 (发布过才撤销)。时序设计: 发布时先 compositor key 后 ready
+    // (先让合成跳过, 再通知 guest 走 ZC); fallback 分两步 — 先撤 ready
+    // (guest 立即切 SHM), 等 shmCommitSerial 越过基线 (新 SHM 帧已到) 再
+    // 撤 compositor key (恢复合成), 避免合成到 ZC 前的旧 SHM 帧。broker 的
+    // attached 集合 (IPC 簿记) 由 Attach/DetachZeroCopyTarget 独立维护,
+    // 不参与合成判定 (CompositorLayer::zcActive 是唯一消费字段)。
+    void PublishZeroCopyActive(uint32_t rendererToplevelId);
+    void UnpublishZeroCopyReady(uint32_t rendererToplevelId);
+    void ClearZeroCopyCompositorKey();
+
     OHNativeWindow* window_ = nullptr;
     EGLDisplay display_ = EGL_NO_DISPLAY;
     EGLContext context_ = EGL_NO_CONTEXT;

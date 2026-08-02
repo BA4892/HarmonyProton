@@ -91,7 +91,7 @@ bool InputResolver::FindInputTargetAt(int x, int y, InputTarget& out)
             // 该窗口的 subsurface 层绘制在窗口内容之上, 先命中 (同一变换)
             for (auto it = layers.rbegin(); it != layers.rend(); ++it) {
                 if (it->type != DesktopCompositor::CompositorLayer::Type::Subsurface) continue;
-                if (it->zcLayer) continue;
+                if (it->zcActive) continue;
                 if (it->toplevelId != fullscreenId || it->w <= 0 || it->h <= 0) continue;
                 const auto& sl = *it->sub;
                 const int layerDispW = sl.vpDstW > 0 ? std::min(sl.vpDstW, sl.w) : sl.w;
@@ -147,10 +147,10 @@ bool InputResolver::FindInputTargetAt(int x, int y, InputTarget& out)
         if (it->type == DesktopCompositor::CompositorLayer::Type::Subsurface) {
             // zero-copy GL 层不参与置顶命中: 渲染时它按窗口 z 位被遮挡重绘压回
             // (egl_renderer occluder redraw), 命中同样交给下方 toplevel z-order,
-            // 否则被挡住的 GL 窗口仍会收到点击。zcLayer 由实时集合
+            // 否则被挡住的 GL 窗口仍会收到点击。zcActive 由实时集合
             // zeroCopySurfaceKeys_ 派生: GPU→CPU fallback 时 key 被移出,
             // 该层自动恢复为普通 subsurface (CPU 合成置顶, 命中也置顶), 无需特判
-            if (it->zcLayer) continue;
+            if (it->zcActive) continue;
             if (!it->visible) continue;
             if (it->w <= 0 || it->h <= 0) continue;
             const auto& sl = *it->sub;
