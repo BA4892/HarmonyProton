@@ -1,10 +1,38 @@
 #include "toplevel_manager.h"
+#include "debug_assert.h"
 #include <hilog/log.h>
 
 #undef LOG_DOMAIN
 #undef LOG_TAG
 #define LOG_DOMAIN 0x0000
 #define LOG_TAG "WL_Server"
+
+// -- ToplevelState 语义方法 --
+
+void ToplevelManager::ToplevelState::ApplyFullscreen(bool on) {
+    fullscreen_ = on;
+    // 全屏窗口锚定桌面原点: 合成按保比例缩放铺满, 不再使用浮动位置
+    if (on && hasPosition_) AnchorToOrigin();
+    if (on) {
+        // 快照全屏前内容尺寸: Wine 回 configure 后 buffer 可能扩为输出尺寸,
+        // 但 ZC 游戏内部分辨率不变, 输入逆映射须用全屏前尺寸
+        // (input_resolver 全屏分支, 选择逻辑见 geometry.h)
+        if (preFsW_ == 0 && w_ > 0) preFsW_ = w_;
+        if (preFsH_ == 0 && h_ > 0) preFsH_ = h_;
+    }
+    // 不变式守卫 (类注释): 全屏 toplevel 锚定 (0,0)
+    MW_ASSERT(!on || !hasPosition_ || (x_ == 0 && y_ == 0),
+              "fullscreen toplevel must be anchored at (0,0)");
+}
+
+bool ToplevelManager::ToplevelState::TakeMask(WindowMask& out) {
+    if (mask_.w == 0 || !mask_.dirty) return false;
+    out.w = mask_.w;
+    out.h = mask_.h;
+    out.bits = std::move(mask_.bits);
+    mask_.dirty = false;
+    return true;
+}
 
 // -- 渲染/输入共用的 toplevel 可见性检查 --
 
@@ -18,7 +46,7 @@ bool ToplevelManager::IsToplevelVisibleLocked(uint32_t id, uint32_t desktopRootI
     if (it == toplevels_.end()) return false;
     const auto& st = it->second;
     // 被切换掉的旧 root (isBackground) 对渲染和输入都不可见
-    return !st.isBackground && HasFrame(st) && !st.minimized;
+    return !st.IsBackground() && st.HasFrame() && !st.IsMinimized();
 }
 
 // -- popup 数据清理 --
@@ -62,13 +90,13 @@ uint32_t ToplevelManager::RemovePopupBySurfaceKeyLocked(uint64_t surfaceKey, uin
 bool ToplevelManager::IsToplevelMinimized(uint32_t id) {
     auto lk = Lock();
     auto it = toplevels_.find(id);
-    return it != toplevels_.end() && it->second.minimized;
+    return it != toplevels_.end() && it->second.IsMinimized();
 }
 
 bool ToplevelManager::IsToplevelFullscreen(uint32_t id) {
     auto lk = Lock();
     auto it = toplevels_.find(id);
-    return it != toplevels_.end() && it->second.fullscreen;
+    return it != toplevels_.end() && it->second.IsFullscreen();
 }
 
 // -- resource 映射 --
@@ -117,12 +145,11 @@ bool ToplevelManager::TakeWindowMask(uint32_t id, int& w, int& h, std::vector<ui
     auto lk = Lock();
     auto it = toplevels_.find(id);
     if (it == toplevels_.end()) return false;
-    auto& m = it->second.mask;
-    if (m.w == 0 || !m.dirty) return false;
+    WindowMask m;
+    if (!it->second.TakeMask(m)) return false;
     w = m.w;
     h = m.h;
     out = std::move(m.bits);
-    m.dirty = false;
     return true;
 }
 
@@ -131,35 +158,35 @@ bool ToplevelManager::TakeWindowMask(uint32_t id, int& w, int& h, std::vector<ui
 void ToplevelManager::MarkToplevelDirtyLocked(uint32_t id) {
     if (id == 0) return;
     auto it = toplevels_.find(id);
-    if (it != toplevels_.end()) it->second.dirty = true;
+    if (it != toplevels_.end()) it->second.MarkDirty();
 }
 
 int ToplevelManager::GetToplevelX(uint32_t id) {
     auto lk = Lock();
     auto it = toplevels_.find(id);
-    return it != toplevels_.end() ? it->second.x : 0;
+    return it != toplevels_.end() ? it->second.X() : 0;
 }
 
 int ToplevelManager::GetToplevelY(uint32_t id) {
     auto lk = Lock();
     auto it = toplevels_.find(id);
-    return it != toplevels_.end() ? it->second.y : 0;
+    return it != toplevels_.end() ? it->second.Y() : 0;
 }
 
 int ToplevelManager::GetToplevelW(uint32_t id) {
     auto lk = Lock();
     auto it = toplevels_.find(id);
-    return it != toplevels_.end() ? it->second.w : 0;
+    return it != toplevels_.end() ? it->second.Width() : 0;
 }
 
 int ToplevelManager::GetToplevelH(uint32_t id) {
     auto lk = Lock();
     auto it = toplevels_.find(id);
-    return it != toplevels_.end() ? it->second.h : 0;
+    return it != toplevels_.end() ? it->second.Height() : 0;
 }
 
 uint32_t ToplevelManager::GetToplevelShmFormat(uint32_t id) {
     auto lk = Lock();
     auto it = toplevels_.find(id);
-    return it != toplevels_.end() ? it->second.shmFormat : 1;
+    return it != toplevels_.end() ? it->second.ShmFormat() : 1;
 }

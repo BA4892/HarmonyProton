@@ -1,5 +1,7 @@
 #pragma once
 #include <wayland-server-core.h>
+#include <algorithm>
+#include <atomic>
 #include <string>
 #include <mutex>
 #include <vector>
@@ -31,51 +33,116 @@ public:
         bool dirty = false;
     };
 
-    struct ToplevelState {
+    // toplevel/popup 聚合状态。字段全部私有: 读走 getter, 写走语义方法,
+    // 编译器强制外部只能通过方法访问 — 变更纪律 (minimized/fullscreen 唯一
+    // 权威 + 只经 WaylandServer::SetToplevel*) 由此落实。
+    //
+    // -- 全屏优先级序号 (FsPriority) 取号规则与局限 --
+    // 多窗口可同时处于 fullscreen: 游戏 ChangeDisplaySettings 缩虚拟屏后,
+    // Wine 按"窗口矩形覆盖整个屏幕即全屏"把所有足够大的旧窗口 (notepad、
+    // explorer 伴随窗口等) 连带标成 fullscreen, 且 set_fullscreen 请求
+    // 到达顺序不定 — 靠 z-order/到达顺序选"全屏前台"都会被旧窗口压顶,
+    // 第一下点击路由错 → Wine 前台切换 → 游戏掉出全屏 (2026-07 实测,
+    // 曾用 app_id 前缀 "explorer.exe" 特判, 但 notepad 等非 explorer
+    // 窗口同样触发, 特判只是 mask 最常见实例, 故改一般规则)。
+    // 取号规则 (渲染/输入两侧全屏扫描统一取序号最大者):
+    // - 首次入 z-order 时按先后取号 (AddToZOrder 内部完成): 游戏窗口
+    //   必定最晚入列 (map 或 set_fullscreen 的 raise, 以先到者为准),
+    //   天然最大, 连带标记的旧窗口都比它旧;
+    // - 用户显式 raise 一个已 fullscreen 的窗口时重新取号
+    //   (RaiseToplevel 用户路径): 两个全屏窗口经任务栏互相切换靠它。
+    //   tl_set_fullscreen 批处理里的 raise 不重新取号 (否则退回到达
+    //   顺序); 窗口化窗口不重新取号 (点过 notepad 不该让它日后盖过游戏)。
+    // 已知局限:
+    // - 游戏窗口 map 之后、模式切换之前新建的其他窗口 (launcher 弹窗
+    //   等) 会盖过游戏 — 概率低, 发生时 fs-pick 日志可诊断;
+    // - 本字段是容错锚点, 根因在 Wine 连带标记; 根治需 wine 侧只对
+    //   前台窗口发 xdg set_fullscreen。
+    class ToplevelState {
+    public:
         // -- 帧数据 (toplevel 与 PC popup 共用) --
-        std::vector<uint8_t> pixels;   // empty() = 尚无帧
-        int w = 0, h = 0;              // content 尺寸 (popup 为显示尺寸)
-        bool dirty = false;
-        uint32_t shmFormat = 1;        // wl_shm format (0=ARGB8888, 1=XRGB8888)
+        bool HasFrame() const { return !pixels_.empty(); }  // empty() = 尚无帧
+        bool IsDirty() const { return dirty_; }
+        const std::vector<uint8_t>& Pixels() const { return pixels_; }
+        int Width() const { return w_; }       // content 尺寸 (popup 为显示尺寸)
+        int Height() const { return h_; }
+        uint32_t ShmFormat() const { return shmFormat_; }  // 0=ARGB8888, 1=XRGB8888
+
+        // 帧数据写 (wl_core commit 路径)。FrameData 仅两处写点使用:
+        // CopyShmContentTight / popup 像素双缓冲轮换
+        std::vector<uint8_t>& FrameData() { return pixels_; }
+        void SetContentSize(int w, int h) { w_ = w; h_ = h; }
+        void SetShmFormat(uint32_t fmt) { shmFormat_ = fmt; }
+        void MarkDirty() { dirty_ = true; }
+        void ClearDirty() { dirty_ = false; }
+
         // -- 桌面坐标 (仅 toplevel) --
-        bool hasPosition = false;      // 首次 commit 置位 (isFirstCommit 判定 / 移动守卫)
-        int x = 0, y = 0;              // compositor 桌面位置 (含 move grab 偏移)
-        int wineX = 0, wineY = 0;      // Wine 坐标系位置 (首次 commit, 不变)
-        // -- 尺寸上报去重 --
-        int lastReportedW = 0, lastReportedH = 0;
+        bool HasPosition() const { return hasPosition_; }  // 首次 commit 置位
+        int X() const { return x_; }       // compositor 桌面位置 (含 move grab 偏移)
+        int Y() const { return y_; }
+        int WineX() const { return wineX_; }  // Wine 坐标系位置 (首次 commit, 不变)
+        int WineY() const { return wineY_; }
+        // 首帧 commit: 置位 hasPosition + 桌面位置 + Wine 坐标快照 (写一次)
+        void MarkFirstCommit(int sx, int sy) {
+            hasPosition_ = true; x_ = sx; y_ = sy; wineX_ = sx; wineY_ = sy;
+        }
+        // 桌面位置更新 (ARGB move: Wine 坐标权威 / move_grab: 绝对定位)
+        void SetPosition(int sx, int sy) { x_ = sx; y_ = sy; }
+        // 锚定桌面原点 (全屏/最大化: 合成按保比例缩放铺满, 不用浮动位置)
+        void AnchorToOrigin() { x_ = 0; y_ = 0; }
+
         // -- 状态标记 --
-        bool minimized = false;        // 桌面合成时跳过最小化窗口
-        bool isBackground = false;     // 渲染层, 不接收输入 (被切换掉的旧 root)
-        bool fullscreen = false;
+        bool IsMinimized() const { return minimized_; }
+        bool IsBackground() const { return isBackground_; }  // 被切换掉的旧 root
+        bool IsFullscreen() const { return fullscreen_; }
+        void SetMinimized(bool v) { minimized_ = v; }
+        void SetBackground(bool v) { isBackground_ = v; }
+        // 全屏状态转换: 置位/清除 + 锚定 (0,0) + preFs 快照 + 不变式断言。
+        // 实现 in toplevel_manager.cpp (断言依赖 debug_assert.h)
+        void ApplyFullscreen(bool on);
+
         // -- 全屏辅助 --
         // ZC 游戏 (画面在 zero-copy GL 层) 全屏后 buffer 被 Wine 扩到输出尺寸,
         // 但游戏内部分辨率不变, 输入逆映射须用全屏前尺寸; SHM 游戏 buffer 即
         // 画面, 直接用 w/h。选择逻辑是 geometry.h 的纯函数, 两侧共用。
-        int32_t preFsW = 0, preFsH = 0;  // 全屏前内容尺寸, SetToplevelFullscreen 快照
-        // -- 全屏优先级序号 --
-        // 多窗口可同时处于 fullscreen: 游戏 ChangeDisplaySettings 缩虚拟屏后,
-        // Wine 按"窗口矩形覆盖整个屏幕即全屏"把所有足够大的旧窗口 (notepad、
-        // explorer 伴随窗口等) 连带标成 fullscreen, 且 set_fullscreen 请求
-        // 到达顺序不定 — 靠 z-order/到达顺序选"全屏前台"都会被旧窗口压顶,
-        // 第一下点击路由错 → Wine 前台切换 → 游戏掉出全屏 (2026-07 实测,
-        // 曾用 app_id 前缀 "explorer.exe" 特判, 但 notepad 等非 explorer
-        // 窗口同样触发, 特判只是 mask 最常见实例, 故改一般规则)。
-        // 取号规则 (渲染/输入两侧全屏扫描统一取序号最大者):
-        // - 首次入 z-order 时按先后取号 (AddToZOrder 内部完成): 游戏窗口
-        //   必定最晚入列 (map 或 set_fullscreen 的 raise, 以先到者为准),
-        //   天然最大, 连带标记的旧窗口都比它旧;
-        // - 用户显式 raise 一个已 fullscreen 的窗口时重新取号
-        //   (RaiseToplevel 用户路径): 两个全屏窗口经任务栏互相切换靠它。
-        //   tl_set_fullscreen 批处理里的 raise 不重新取号 (否则退回到达
-        //   顺序); 窗口化窗口不重新取号 (点过 notepad 不该让它日后盖过游戏)。
-        // 已知局限:
-        // - 游戏窗口 map 之后、模式切换之前新建的其他窗口 (launcher 弹窗
-        //   等) 会盖过游戏 — 概率低, 发生时 fs-pick 日志可诊断;
-        // - 本字段是容错锚点, 根因在 Wine 连带标记; 根治需 wine 侧只对
-        //   前台窗口发 xdg set_fullscreen。
-        uint64_t fsPriority = 0;
+        int32_t PreFsW() const { return preFsW_; }  // 全屏前内容尺寸快照
+        int32_t PreFsH() const { return preFsH_; }
+
+        // -- 全屏优先级序号 (取号规则与局限见 4.3 上方注释) --
+        uint64_t FsPriority() const { return fsPriority_; }
+        // 取号: 仅 AddToZOrder (首次入列) / BumpFsPriorityLocked (显式 raise)
+        // 调用, 规则见类外注释
+        void SetFsPriority(uint64_t v) { fsPriority_ = v; }
+
+        // -- 尺寸上报去重 (仅 wl_core commit 用) --
+        // 返回是否变化 (调用方据此发 resize 事件)
+        bool CheckAndUpdateLastReportedSize(int w, int h) {
+            if (lastReportedW_ == w && lastReportedH_ == h) return false;
+            lastReportedW_ = w; lastReportedH_ = h; return true;
+        }
+
         // -- ARGB 窗口剪影掩码 --
-        WindowMask mask;               // mask.w==0 = 从未生成
+        WindowMask& MutableMask() { return mask_; }  // 仅 wl_core 掩码生成用
+        const WindowMask& Mask() const { return mask_; }
+        // 消耗型取出 (move bits + 清 dirty; mask.w==0 = 从未生成)。
+        // 两个 TakeWindowMask 实现收敛后的唯一消费入口
+        bool TakeMask(WindowMask& out);
+
+    private:
+        std::vector<uint8_t> pixels_;   // empty() = 尚无帧
+        int w_ = 0, h_ = 0;             // content 尺寸 (popup 为显示尺寸)
+        bool dirty_ = false;
+        uint32_t shmFormat_ = 1;        // wl_shm format (0=ARGB8888, 1=XRGB8888)
+        bool hasPosition_ = false;      // 首次 commit 置位 (isFirstCommit 判定 / 移动守卫)
+        int x_ = 0, y_ = 0;             // compositor 桌面位置 (含 move grab 偏移)
+        int wineX_ = 0, wineY_ = 0;     // Wine 坐标系位置 (首次 commit, 不变)
+        int lastReportedW_ = 0, lastReportedH_ = 0;  // 尺寸上报去重
+        bool minimized_ = false;        // 桌面合成时跳过最小化窗口
+        bool isBackground_ = false;     // 渲染层, 不接收输入 (被切换掉的旧 root)
+        bool fullscreen_ = false;
+        int32_t preFsW_ = 0, preFsH_ = 0;  // 全屏前内容尺寸快照
+        uint64_t fsPriority_ = 0;       // 全屏优先级序号 (规则见 fsPriority 注释)
+        WindowMask mask_;               // mask.w==0 = 从未生成
     };
 
     struct PopupRecord {
@@ -101,8 +168,6 @@ public:
     // 写路径显式建档 (首次 commit / 状态转换等合法创建点)
     ToplevelState& EnsureToplevelLocked(uint32_t id) { return toplevels_[id]; }
 
-    static bool HasFrame(const ToplevelState& st) { return !st.pixels.empty(); }
-
     void EraseToplevelLocked(uint32_t id) { toplevels_.erase(id); }
 
     // -- Z-order 管理 --
@@ -116,7 +181,7 @@ public:
         // map 点的"不在列才取号"判定被绕过, 窗口永远拿不到号 → 全屏扫描
         // 输给任何旧窗口
         auto& st = EnsureToplevelLocked(id);
-        if (st.fsPriority == 0) st.fsPriority = nextFsPriority_++;
+        if (st.FsPriority() == 0) st.SetFsPriority(nextFsPriority_++);
     }
     void RemoveFromZOrder(uint32_t id) {
         auto it = std::find(toplevelZOrder_.begin(), toplevelZOrder_.end(), id);
@@ -129,7 +194,7 @@ public:
     // -- 全屏优先级取号 (调用方须已持有 mutex; 规则与局限见 ToplevelState::fsPriority) --
     // 首次入 z-order 的取号在 AddToZOrder 内部完成; 此处仅"用户显式 raise
     // 已 fullscreen 窗口"的重新取号 (RaiseToplevel 用户路径)
-    void BumpFsPriorityLocked(uint32_t id) { EnsureToplevelLocked(id).fsPriority = nextFsPriority_++; }
+    void BumpFsPriorityLocked(uint32_t id) { EnsureToplevelLocked(id).SetFsPriority(nextFsPriority_++); }
 
     // -- 只读遍历 --
     const std::unordered_map<uint32_t, ToplevelState>& toplevels() const { return toplevels_; }
@@ -138,8 +203,8 @@ public:
 
     // toplevel 可见性: 隐藏/显示 toplevel, 控制渲染和输入是否包含该窗口。
     // 调用方须已持有 mutex。
-    void HideToplevelLocked(uint32_t id) { EnsureToplevelLocked(id).isBackground = true; }
-    void ShowToplevelLocked(uint32_t id) { EnsureToplevelLocked(id).isBackground = false; }
+    void HideToplevelLocked(uint32_t id) { EnsureToplevelLocked(id).SetBackground(true); }
+    void ShowToplevelLocked(uint32_t id) { EnsureToplevelLocked(id).SetBackground(false); }
 
     // 查询隐藏/可见状态 (桌面合成时会排除已隐藏 and 未 hidden 的窗口)。
     bool IsToplevelVisibleLocked(uint32_t id, uint32_t desktopRootId);

@@ -45,7 +45,7 @@ uint32_t DesktopRootManager::PromotePending()
         auto lk = tmgr_.Lock();
         id = pendingDesktopRootToplevelId_;
         auto* pst = id ? tmgr_.FindToplevelLocked(id) : nullptr;
-        if (id == 0 || !pst || !ToplevelManager::HasFrame(*pst)) {
+        if (id == 0 || !pst || !pst->HasFrame()) {
             if (id != 0) {
                 OH_LOG_WARN(LOG_APP, "[MW] pending desktop root #%{public}u has no pixels, skip", id);
                 pendingDesktopRootToplevelId_ = 0;
@@ -62,7 +62,7 @@ uint32_t DesktopRootManager::PromotePending()
         tmgr_.ShowToplevelLocked(id);
         desktopRootToplevelId_ = id;
         pendingDesktopRootToplevelId_ = 0;
-        pst->dirty = true;
+        pst->MarkDirty();
     }
 
     OH_LOG_INFO(LOG_APP, "[MW] pending desktop root promoted: #%{public}u", id);

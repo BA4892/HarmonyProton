@@ -39,8 +39,8 @@ bool InputResolver::FindInputTargetAt(int x, int y, InputTarget& out)
     // 层序单一数据源 (阶段 1): 与渲染侧 (TakeToplevelFrame) 遍历同一个按
     // zIndex 升序的 Layer 列表; fs-pick 提前命中保留 (性能优化, 语义不变)
     const auto* rootSt = tmgr_.FindToplevelLocked(rootId);
-    const int rootW = (rootSt && rootSt->w > 0) ? rootSt->w : outputW_;
-    const int rootH = (rootSt && rootSt->h > 0) ? rootSt->h : outputH_;
+    const int rootW = (rootSt && rootSt->Width() > 0) ? rootSt->Width() : outputW_;
+    const int rootH = (rootSt && rootSt->Height() > 0) ? rootSt->Height() : outputH_;
     const auto layers = compositor_.BuildLayerListLocked(rootW, rootH);
 
     /*
@@ -72,9 +72,9 @@ bool InputResolver::FindInputTargetAt(int x, int y, InputTarget& out)
                 OH_LOG_INFO(LOG_APP,
                     "[Input] fs-pick tl=#%{public}u pri=%{public}llu zc=%{public}d"
                     " preFs=%{public}dx%{public}d buf=%{public}dx%{public}d → content=%{public}dx%{public}d",
-                    fullscreenId, static_cast<unsigned long long>(zst->fsPriority),
+                    fullscreenId, static_cast<unsigned long long>(zst->FsPriority()),
                     compositor_.HasZeroCopyLayerForToplevelLocked(fullscreenId) ? 1 : 0,
-                    zst->preFsW, zst->preFsH, zst->w, zst->h,
+                    zst->PreFsW(), zst->PreFsH(), zst->Width(), zst->Height(),
                     transform.srcW, transform.srcH);
             }
             // 该窗口的 subsurface 层绘制在窗口内容之上, 先命中 (同一变换)
@@ -85,8 +85,8 @@ bool InputResolver::FindInputTargetAt(int x, int y, InputTarget& out)
                 const auto& sl = *it->sub;
                 const int layerDispW = sl.vpDstW > 0 ? std::min(sl.vpDstW, sl.w) : sl.w;
                 const int layerDispH = sl.vpDstH > 0 ? std::min(sl.vpDstH, sl.h) : sl.h;
-                const int layerScrX = static_cast<int>(lround(FitMapX(transform, it->x - zst->x)));
-                const int layerScrY = static_cast<int>(lround(FitMapY(transform, it->y - zst->y)));
+                const int layerScrX = static_cast<int>(lround(FitMapX(transform, it->x - zst->X())));
+                const int layerScrY = static_cast<int>(lround(FitMapY(transform, it->y - zst->Y())));
                 const int layerScrW = std::max(1, static_cast<int>(lround(layerDispW * transform.scale)));
                 const int layerScrH = std::max(1, static_cast<int>(lround(layerDispH * transform.scale)));
                 if (x >= layerScrX && x < layerScrX + layerScrW && y >= layerScrY && y < layerScrY + layerScrH) {
@@ -203,19 +203,19 @@ bool InputResolver::SurfaceLocalToDesktop(wl_resource* surface, double lx, doubl
     auto lk = tmgr_.Lock();
     const auto* st = tmgr_.FindToplevelLocked(tl);
     if (!st) return false;
-    if (st->fullscreen) {
+    if (st->IsFullscreen()) {
         // 与 FindInputTargetAt 全屏分支同一几何 (ComputeFullscreenFitLocked),
         // 保证 warp 锚点与输入逆映射互为正反变换
         const auto* rootSt = tmgr_.FindToplevelLocked(desktopRootToplevelId_);
-        const int rootW = (rootSt && rootSt->w > 0) ? rootSt->w : outputW_;
-        const int rootH = (rootSt && rootSt->h > 0) ? rootSt->h : outputH_;
+        const int rootW = (rootSt && rootSt->Width() > 0) ? rootSt->Width() : outputW_;
+        const int rootH = (rootSt && rootSt->Height() > 0) ? rootSt->Height() : outputH_;
         FitRect transform;
         if (!compositor_.ComputeFullscreenFitLocked(tl, rootW, rootH, transform)) return false;
         dx = transform.offX + lx * transform.scale;
         dy = transform.offY + ly * transform.scale;
         return true;
     }
-    dx = st->x + lx;
-    dy = st->y + ly;
+    dx = st->X() + lx;
+    dy = st->Y() + ly;
     return true;
 }

@@ -15,9 +15,9 @@ void MoveGrabHandler::StartMoveGrab(ToplevelManager& tmgr, uint32_t toplevelId, 
     serial_ = serial;
     // 固定 grab 偏移 = 按下时指针全局位置 − 窗口位置, 后续 motion 绝对定位
     auto* st = tmgr.FindToplevelLocked(toplevelId);
-    if (st && st->hasPosition) {
-        grabOffX_ = grabGlobalX - st->x;
-        grabOffY_ = grabGlobalY - st->y;
+    if (st && st->HasPosition()) {
+        grabOffX_ = grabGlobalX - st->X();
+        grabOffY_ = grabGlobalY - st->Y();
     } else {
         // 窗口状态异常 (grab 建立瞬间窗口还没位置): 记录当前全局位置,
         // 第一个 motion 会落到错误位置, 但绝对定位下一帧即自收敛
@@ -44,18 +44,17 @@ bool MoveGrabHandler::ProcessMoveGrabMotion(ToplevelManager& tmgr, int32_t gx, i
     auto lk = tmgr.Lock();
     if (toplevelId_ == 0) return false;
     auto* st = tmgr.FindToplevelLocked(toplevelId_);
-    if (!st || !st->hasPosition) return false;
+    if (!st || !st->HasPosition()) return false;
 
     // 绝对定位, 无累积。增量式 (每帧 st->x += 指针增量) 在双线程下会把
     // 上帧自身位移叠进下一帧位移 — InputManager 注入局部坐标与消费侧
     // 读 st->x 还原的基准漂移, 快速拖动时窗口位移按帧累积放大直至飞出屏幕
     const int32_t nx = gx - grabOffX_;
     const int32_t ny = gy - grabOffY_;
-    if (nx != st->x || ny != st->y) {
-        st->x = nx;
-        st->y = ny;
+    if (nx != st->X() || ny != st->Y()) {
+        st->SetPosition(nx, ny);
         OH_LOG_INFO(LOG_APP, "[MW-MOVE] grab move tl=%{public}u ptr=(%{public}d,%{public}d) newPos=(%{public}d,%{public}d)",
-                    toplevelId_, gx, gy, st->x, st->y);
+                    toplevelId_, gx, gy, st->X(), st->Y());
     }
     return true;
 }

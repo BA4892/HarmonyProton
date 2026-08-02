@@ -145,13 +145,13 @@ void WaylandServer::RaiseToplevel(uint32_t id, bool userInitiated) {
     // 先于首帧 commit 时经此路径取号), 与"不重新取号"不冲突。
     // 见 ToplevelState::fsPriority
     if (userInitiated) {
-        if (const auto* rst = toplevelMgr_.FindToplevelLocked(id); rst && rst->fullscreen)
+        if (const auto* rst = toplevelMgr_.FindToplevelLocked(id); rst && rst->IsFullscreen())
             toplevelMgr_.BumpFsPriorityLocked(id);
     }
     // 任务栏始终在顶层 (app_id == "explorer.exe.taskbar");
     // 全屏窗口例外 — 游戏全屏必须压过任务栏
     bool raisedFullscreen = false;
-    if (const auto* rst = toplevelMgr_.FindToplevelLocked(id)) raisedFullscreen = rst->fullscreen;
+    if (const auto* rst = toplevelMgr_.FindToplevelLocked(id)) raisedFullscreen = rst->IsFullscreen();
     if (taskbarId_ > 0 && taskbarId_ != id && !raisedFullscreen) {
         toplevelMgr_.RemoveFromZOrder(taskbarId_);
         toplevelMgr_.AddToZOrder(taskbarId_);
@@ -256,14 +256,9 @@ void WaylandServer::OnToplevelDestroyed(uint32_t toplevelId) {
 // RemovePopupBySurfaceKeyLocked 已移至 ToplevelManager (compositor/toplevel_manager.cpp)
 
 bool WaylandServer::TakeWindowMask(uint32_t id, int& w, int& h, std::vector<uint8_t>& out) {
-    auto lk = toplevelMgr_.Lock();
-    auto* st = toplevelMgr_.FindToplevelLocked(id);
-    if (!st || !st->mask.dirty) return false;
-    w = st->mask.w;
-    h = st->mask.h;
-    out = st->mask.bits;
-    st->mask.dirty = false;
-    return true;
+    // 收敛: 掩码消费唯一入口在 ToplevelManager::TakeWindowMask
+    // (ToplevelState::TakeMask), 此处转发 (napi_init 唯一调用方)
+    return toplevelMgr_.TakeWindowMask(id, w, h, out);
 }
 
 void WaylandServer::SendToplevelClose(uint32_t toplevelId) {
@@ -284,13 +279,13 @@ int32_t WaylandServer::GetWorkAreaHeight() {
     if (taskbarId_ == 0) return outputH_;
     const auto* st = toplevelMgr_.FindToplevelLocked(taskbarId_);
     if (!st) return outputH_;
-    return st->y;  // 工作区 = 任务栏上方空间
+    return st->Y();  // 工作区 = 任务栏上方空间
 }
 
 void WaylandServer::SetToplevelMinimized(uint32_t id) {
     auto lk = toplevelMgr_.Lock();
     // 保留 operator[] 建档语义: pre-commit 最小化同样记录状态
-    toplevelMgr_.EnsureToplevelLocked(id).minimized = true;
+    toplevelMgr_.EnsureToplevelLocked(id).SetMinimized(true);
     MarkDesktopRootDirtyLocked();
 }
 
@@ -298,7 +293,7 @@ void WaylandServer::SetToplevelRestored(uint32_t id) {
     // 清除 minimized 状态
     {
         auto lk = toplevelMgr_.Lock();
-        if (auto* st = toplevelMgr_.FindToplevelLocked(id)) st->minimized = false;
+        if (auto* st = toplevelMgr_.FindToplevelLocked(id)) st->SetMinimized(false);
         MarkDesktopRootDirtyLocked();
     }
     // 发 configure 通知 Wine (如果 toplevel resource 存在)
@@ -328,9 +323,8 @@ void WaylandServer::SetToplevelMaximized(uint32_t id) {
     OH_LOG_INFO(LOG_APP, "[MW] SetToplevelMaximized id=%{public}u desktop=%{public}s",
                 id, IsDesktopMode() ? "yes" : "no");
     auto lk = toplevelMgr_.Lock();
-    if (auto* st = toplevelMgr_.FindToplevelLocked(id); st && st->hasPosition) {
-        st->x = 0;
-        st->y = 0;
+    if (auto* st = toplevelMgr_.FindToplevelLocked(id); st && st->HasPosition()) {
+        st->AnchorToOrigin();
     }
     MarkDesktopRootDirtyLocked();
 }
@@ -339,30 +333,17 @@ void WaylandServer::SetToplevelFullscreen(uint32_t id, bool on) {
     OH_LOG_INFO(LOG_APP, "[MW] SetToplevelFullscreen id=%{public}u on=%{public}s",
                 id, on ? "yes" : "no");
     auto lk = toplevelMgr_.Lock();
-    // Ensure 建档语义同 SetToplevelMinimized: pre-commit 全屏同样记录状态
+    // Ensure 建档语义同 SetToplevelMinimized: pre-commit 全屏同样记录状态。
+    // 状态转换 (置位 + 锚定 + preFs 快照 + 不变式断言) 收在
+    // ToplevelState::ApplyFullscreen
     auto& st = toplevelMgr_.EnsureToplevelLocked(id);
-    st.fullscreen = on;
-    // 全屏窗口锚定桌面原点: 合成按保比例缩放铺满, 不再使用浮动位置
-    if (on && st.hasPosition) {
-        st.x = 0;
-        st.y = 0;
-    }
-    if (on) {
-        // 快照全屏前内容尺寸: Wine 回 configure 后 buffer 可能扩为输出尺寸,
-        // 但 ZC 游戏内部分辨率不变, 输入逆映射须用全屏前尺寸
-        // (input_resolver 全屏分支, 选择逻辑见 geometry.h)
-        if (st.preFsW == 0 && st.w > 0) st.preFsW = st.w;
-        if (st.preFsH == 0 && st.h > 0) st.preFsH = st.h;
-    }
-    // 不变式守卫 (ToplevelManager 头注释): 全屏 toplevel 锚定 (0,0)
-    MW_ASSERT(!on || !st.hasPosition || (st.x == 0 && st.y == 0),
-              "fullscreen toplevel must be anchored at (0,0)");
+    st.ApplyFullscreen(on);
     MarkDesktopRootDirtyLocked();
 }
 
 void WaylandServer::ForceToplevelRedraw(uint32_t id) {
     auto lk = toplevelMgr_.Lock();
-    if (auto* st = toplevelMgr_.FindToplevelLocked(id)) st->dirty = true;
+    if (auto* st = toplevelMgr_.FindToplevelLocked(id)) st->MarkDirty();
 }
 
 void WaylandServer::NotifyToplevelResize(uint32_t toplevelId, int32_t w, int32_t h) {

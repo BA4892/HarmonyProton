@@ -577,9 +577,8 @@ void WaylandServer::UpdateToplevelFrameOnCommit(SurfaceData* sd, wl_resource* su
     toplevelMgr_.MapToplevelSurface(sd->toplevelId, surfRes);
     auto lk = toplevelMgr_.Lock();
     auto& st = toplevelMgr_.EnsureToplevelLocked(sd->toplevelId);  // 首次 commit 在此建档
-    CopyShmContentTight(fi, st.pixels);
-    st.w = fi.contentW;
-    st.h = fi.contentH;
+    CopyShmContentTight(fi, st.FrameData());
+    st.SetContentSize(fi.contentW, fi.contentH);
     if (sd->toplevelId == desktopRootToplevelId_) {
         desktopCompositor_.IncrementDesktopRootFrameSerial();
     }
@@ -587,20 +586,16 @@ void WaylandServer::UpdateToplevelFrameOnCommit(SurfaceData* sd, wl_resource* su
      * 自动恢复最小化窗口: 判定逻辑见 IsRestoreSizeCommit (compositor_utils.h)。
      * 注意: 此处已持有 toplevelMutex_, 不能调 SetToplevelRestored。
      */
-    if (IsRestoreSizeCommit(st.minimized, fi.contentW, fi.contentH)) {
-        st.minimized = false;
+    if (IsRestoreSizeCommit(st.IsMinimized(), fi.contentW, fi.contentH)) {
+        st.SetMinimized(false);
         OH_LOG_INFO(LOG_APP, "[MW] auto-restore tl=%{public}u size=%{public}dx%{public}d",
                     sd->toplevelId, fi.contentW, fi.contentH);
     }
     // 首帧判定只认 hasPosition, 不认条目存在
     // (pre-commit 的 SetToplevelMinimized 等路径可能已建档)
-    outFirstCommit = !st.hasPosition;
+    outFirstCommit = !st.HasPosition();
     if (outFirstCommit) {
-        st.x = fi.screenX;
-        st.y = fi.screenY;
-        st.wineX = fi.screenX;
-        st.wineY = fi.screenY;
-        st.hasPosition = true;
+        st.MarkFirstCommit(fi.screenX, fi.screenY);
         OH_LOG_INFO(LOG_APP, "[MW-MOVE] initial pos tl=%{public}u (%{public}d,%{public}d)",
                     sd->toplevelId, fi.screenX, fi.screenY);
     }
@@ -629,21 +624,20 @@ void WaylandServer::UpdateToplevelFrameOnCommit(SurfaceData* sd, wl_resource* su
      * ARGB 窗口相反: geo 变化 → 通知 ArkTS 移动子窗口。
      */
     if (Policy().OhosWindowPerToplevel() && fi.shmFormat == 0 && !outFirstCommit &&
-        (st.x != fi.screenX || st.y != fi.screenY)) {
-        st.x = fi.screenX;
-        st.y = fi.screenY;
+        (st.X() != fi.screenX || st.Y() != fi.screenY)) {
+        st.SetPosition(fi.screenX, fi.screenY);
         char json[96];
         snprintf(json, sizeof(json), "{\"x\":%d,\"y\":%d}", fi.screenX, fi.screenY);
         FireToplevelEvent(sd->toplevelId, "argb_move", json);
     }
     // 后续 commit: 忽略 geoX/geoY, compositor 位置为权威
-    st.dirty = true;
+    st.MarkDirty();
     // 记录 shm 格式 (ARGB8888=layered/shaped 有意义 alpha), 变化时通知
     // ArkTS 切换窗口背景 (PC 模式透明背景才能透过 per-pixel alpha)
     // 注意: 首帧必发 argb 事件 (即使首帧就是默认的 XRGB), 与旧的
     // "format 表无此 id" 判定等价 — 只按值比较会吞掉首帧事件
-    if (outFirstCommit || st.shmFormat != fi.shmFormat) {
-        st.shmFormat = fi.shmFormat;
+    if (outFirstCommit || st.ShmFormat() != fi.shmFormat) {
+        st.SetShmFormat(fi.shmFormat);
         if (Policy().OhosWindowPerToplevel()) {
             char json[32];
             snprintf(json, sizeof(json), "{\"argb\":%d}", fi.shmFormat == 0 ? 1 : 0);
@@ -661,14 +655,14 @@ void WaylandServer::UpdateToplevelFrameOnCommit(SurfaceData* sd, wl_resource* su
      *   窗口物理尺寸, ArkTS 侧按 effectiveScale 最近邻放大
      */
     if (fi.shmFormat == 0 && Policy().OhosWindowPerToplevel()) {
-        const auto& px = st.pixels;
+        const auto& px = st.Pixels();
         const size_t pixCount = static_cast<size_t>(fi.contentW) * fi.contentH;
         uint64_t hash = compositor_consts::kFnv1aOffsetBasis;
         for (size_t i = 3; i < pixCount * 4; i += 4) {
             hash ^= (px[i] >= compositor_consts::kArgbMaskAlphaThreshold) ? 1 : 0;
             hash *= compositor_consts::kFnv1aPrime;
         }
-        auto& m = st.mask;
+        auto& m = st.MutableMask();
         if (hash != m.hash || m.w != fi.contentW || m.h != fi.contentH) {
             m.hash = hash;
             m.w = fi.contentW;
@@ -688,12 +682,10 @@ void WaylandServer::UpdateToplevelFrameOnCommit(SurfaceData* sd, wl_resource* su
         if (zit == toplevelMgr_.toplevelZOrder().end()) toplevelMgr_.AddToZOrder(sd->toplevelId);
     }
     OH_LOG_INFO(LOG_APP, "[MW-COMMIT] toplevel #%{public}u frame %{public}dx%{public}d stride=%{public}d stored=%{public}zu",
-                sd->toplevelId, fi.contentW, fi.contentH, fi.stride, st.pixels.size());
+                sd->toplevelId, fi.contentW, fi.contentH, fi.stride, st.Pixels().size());
 
     // 检测尺寸变化 -> 通知 ArkTS 调整子窗口
-    if (fi.contentW != st.lastReportedW || fi.contentH != st.lastReportedH) {
-        st.lastReportedW = fi.contentW;
-        st.lastReportedH = fi.contentH;
+    if (st.CheckAndUpdateLastReportedSize(fi.contentW, fi.contentH)) {
         char json[64];
         snprintf(json, sizeof(json), "{\"w\":%d,\"h\":%d}", fi.contentW, fi.contentH);
         OH_LOG_INFO(LOG_APP, "[MW] toplevel #%{public}u size changed: %{public}dx%{public}d max=%{public}s -> ArkTS",
@@ -759,7 +751,7 @@ void WaylandServer::UpdateSubsurfaceOnCommit(SurfaceData* sd, wl_resource* surfR
 // 超过 16000 才算偏移是因为正常窗口坐标不会这么大（虚拟桌面极端值约 ±8000）。
 static void CompensateMinimizedSubsurfaceOffset(const ToplevelManager::ToplevelState* pst,
                                                 int32_t& sx, int32_t& sy) {
-    if (pst && pst->minimized) {
+    if (pst && pst->IsMinimized()) {
         if (sx > compositor_consts::kMinimizedCoordThreshold) sx -= compositor_consts::kMinimizedCoordOffset;
         if (sy > compositor_consts::kMinimizedCoordThreshold) sy -= compositor_consts::kMinimizedCoordOffset;
     }
@@ -799,12 +791,12 @@ void WaylandServer::UpdateSubsurfaceLayerOnCommit(SurfaceData* sd, wl_resource* 
      *
      * 判断方法: offset 是否在窗口内容范围内
      */
-    int wineX = pst ? pst->wineX : 0;
-    int wineY = pst ? pst->wineY : 0;
-    int compX = pst ? pst->x : 0;
-    int compY = pst ? pst->y : 0;
-    int compW = pst ? pst->w : 0;
-    int compH = pst ? pst->h : 0;
+    int wineX = pst ? pst->WineX() : 0;
+    int wineY = pst ? pst->WineY() : 0;
+    int compX = pst ? pst->X() : 0;
+    int compY = pst ? pst->Y() : 0;
+    int compW = pst ? pst->Width() : 0;
+    int compH = pst ? pst->Height() : 0;
     bool insideWin = (sx >= 0 && sx < compW && sy >= 0 && sy < compH);
     layer.isExternal = !insideWin;
     layer.localX = sx;
@@ -910,7 +902,7 @@ void WaylandServer::UpdatePopupOnCommit(SurfaceData* sd, wl_resource* surfRes,
         }
         if (popupId > 0) {
             auto& pbuf = toplevelMgr_.EnsureToplevelLocked(popupId);
-            auto& buf = pbuf.pixels;
+            auto& buf = pbuf.FrameData();
             if (cropX == 0 && cropY == 0 && dispW == sd->w && dispH == sd->h) {
                 // 无裁剪: 像素双缓冲轮换 (同 desktop layer 做法)
                 auto reusablePixels = std::move(buf);
@@ -925,10 +917,9 @@ void WaylandServer::UpdatePopupOnCommit(SurfaceData* sd, wl_resource* surfRes,
                                 static_cast<size_t>(dispW) * 4);
                 }
             }
-            pbuf.w = dispW;
-            pbuf.h = dispH;
-            pbuf.dirty = true;
-            pbuf.shmFormat = fi.shmFormat;
+            pbuf.SetContentSize(dispW, dispH);
+            pbuf.MarkDirty();
+            pbuf.SetShmFormat(fi.shmFormat);
         }
     }
     if (popupId == 0) {
