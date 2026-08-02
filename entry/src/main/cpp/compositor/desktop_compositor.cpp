@@ -129,7 +129,10 @@ std::vector<DesktopCompositor::CompositorLayer> DesktopCompositor::BuildLayerLis
         layers.push_back(std::move(rootLayer));
     }
 
-    // toplevel 层 (z-order 升序): root 由 Root 层表示, 不在 z-order 里重复。
+    // toplevel 层 (z-order 升序) + 各窗口的 subsurface 层挂在其父窗口层内
+    // (文档 §4.2): z-order 更高的 toplevel 自然盖住低窗口的 subsurface —
+    // 修复"GL 画面 (subsurface) 永远置顶、无法被其它窗口遮挡"。
+    // root 由 Root 层表示, 不在 z-order 里重复。
     // 可见性判定与原合成/输入循环同源 (IsToplevelVisibleLocked)。
     for (uint32_t childId : tmgr_.toplevelZOrder()) {
         if (childId == rootId) continue;
@@ -146,27 +149,50 @@ std::vector<DesktopCompositor::CompositorLayer> DesktopCompositor::BuildLayerLis
         layer.h = cst->h;
         layer.fullscreen = cst->fullscreen;
         layers.push_back(std::move(layer));
+
+        // 该窗口的 subsurface 层 (按 subsurfaceLayers_ 原顺序, zIndex 紧随
+        // 父窗口)。位置已 Resolve 为桌面坐标; zcLayer 由 zeroCopySurfaceKeys_
+        // 派生 (合成/输入跳过, GPU 内容由 egl_renderer 绘制)。
+        for (const auto& sl : subsurfaceLayers_) {
+            if (sl.parentToplevel != childId) continue;
+            CompositorLayer subLayer;
+            subLayer.type = CompositorLayer::Type::Subsurface;
+            subLayer.zIndex = zIndex++;
+            subLayer.visible = (sl.parentToplevel == rootId) ||
+                               tmgr_.IsToplevelVisibleLocked(sl.parentToplevel, rootId);
+            subLayer.zcLayer = zeroCopySurfaceKeys_.count(sl.surfaceKey) > 0;
+            subLayer.toplevelId = sl.parentToplevel;
+            int lx = 0, ly = 0;
+            ResolveSubsurfaceLayerPositionLocked(sl, lx, ly);
+            subLayer.x = lx;
+            subLayer.y = ly;
+            subLayer.w = sl.w;
+            subLayer.h = sl.h;
+            subLayer.sub = &sl;
+            layers.push_back(std::move(subLayer));
+        }
     }
 
-    // subsurface 层 (原顺序, 全部在 toplevel 之后): 与旧合成双循环
-    // (toplevel 段先、subsurface 段后) 顺序等价。位置已 Resolve 为桌面
-    // 坐标; zcLayer 由 zeroCopySurfaceKeys_ 派生 (阶段 1 仍由合成/输入跳过)。
+    // 未跟随 toplevel 的 subsurface (parent==root / 不在 z-order): 追加尾部,
+    // 保持旧置顶语义 (任务栏等外部层, 避免沉底回归)。
     for (const auto& sl : subsurfaceLayers_) {
-        int lx = 0, ly = 0;
-        ResolveSubsurfaceLayerPositionLocked(sl, lx, ly);
-        CompositorLayer layer;
-        layer.type = CompositorLayer::Type::Subsurface;
-        layer.zIndex = zIndex++;
-        layer.visible = (sl.parentToplevel == rootId) ||
-                        tmgr_.IsToplevelVisibleLocked(sl.parentToplevel, rootId);
-        layer.zcLayer = zeroCopySurfaceKeys_.count(sl.surfaceKey) > 0;
-        layer.toplevelId = sl.parentToplevel;
-        layer.x = lx;
-        layer.y = ly;
-        layer.w = sl.w;
-        layer.h = sl.h;
-        layer.sub = &sl;
-        layers.push_back(std::move(layer));
+        if (sl.parentToplevel == rootId || !tmgr_.IsInZOrder(sl.parentToplevel)) {
+            CompositorLayer subLayer;
+            subLayer.type = CompositorLayer::Type::Subsurface;
+            subLayer.zIndex = zIndex++;
+            subLayer.visible = (sl.parentToplevel == rootId) ||
+                               tmgr_.IsToplevelVisibleLocked(sl.parentToplevel, rootId);
+            subLayer.zcLayer = zeroCopySurfaceKeys_.count(sl.surfaceKey) > 0;
+            subLayer.toplevelId = sl.parentToplevel;
+            int lx = 0, ly = 0;
+            ResolveSubsurfaceLayerPositionLocked(sl, lx, ly);
+            subLayer.x = lx;
+            subLayer.y = ly;
+            subLayer.w = sl.w;
+            subLayer.h = sl.h;
+            subLayer.sub = &sl;
+            layers.push_back(std::move(subLayer));
+        }
     }
     return layers;
 }
@@ -338,10 +364,11 @@ int DesktopCompositor::GetZeroCopyOccluders(uint64_t surfaceKey, uint32_t render
     };
 
     auto zbegin = tmgr_.toplevelZOrder().begin();
+    auto zcIt = tmgr_.toplevelZOrder().end();
     if (info.parentToplevel != desktopRootToplevelId_) {
-        const auto zit = std::find(tmgr_.toplevelZOrder().begin(), tmgr_.toplevelZOrder().end(),
-                                   info.parentToplevel);
-        if (zit != tmgr_.toplevelZOrder().end()) zbegin = std::next(zit);
+        zcIt = std::find(tmgr_.toplevelZOrder().begin(), tmgr_.toplevelZOrder().end(),
+                         info.parentToplevel);
+        if (zcIt != tmgr_.toplevelZOrder().end()) zbegin = std::next(zcIt);
     }
     for (auto zit = zbegin; zit != tmgr_.toplevelZOrder().end() && count < maxOut; ++zit) {
         const uint32_t cid = *zit;
@@ -352,11 +379,21 @@ int DesktopCompositor::GetZeroCopyOccluders(uint64_t surfaceKey, uint32_t render
         else pushRect(cst->x, cst->y, cst->w, cst->h);
     }
 
+    // 新层序 (subsurface 挂父窗口层内, 见 BuildLayerListLocked): 仅父窗口
+    // z-order 不低于 ZC 窗口的层遮挡 ZC (同窗口的菜单等仍在 ZC 层之上);
+    // parent==root / 不在 z-order 的层保持置顶语义, 仍遮挡。
     for (const auto& layer : subsurfaceLayers_) {
         if (count >= maxOut) break;
         if (zeroCopySurfaceKeys_.count(layer.surfaceKey)) continue;
         if (layer.parentToplevel != desktopRootToplevelId_ &&
             !tmgr_.IsToplevelVisibleLocked(layer.parentToplevel, desktopRootToplevelId_)) continue;
+        if (layer.parentToplevel != info.parentToplevel &&
+            layer.parentToplevel != desktopRootToplevelId_) {
+            const auto pit = std::find(tmgr_.toplevelZOrder().begin(),
+                                       tmgr_.toplevelZOrder().end(),
+                                       layer.parentToplevel);
+            if (pit == tmgr_.toplevelZOrder().end() || pit < zcIt) continue;
+        }
         int x = 0, y = 0;
         ResolveSubsurfaceLayerPositionLocked(layer, x, y);
         pushRect(x, y,
@@ -546,13 +583,15 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
         // 全屏独占/跳过特判原样保留 (等价形式), 行为不变。
         auto blitToplevel = [&](const CompositorLayer& layer) {
             if (!layer.visible) return;
-            // 跳过非主全屏的 toplevel: ZC 游戏独占输出 (其它 toplevel 的
-            // SHM 内容不是游戏画面, 画上会在黑边区残留杂色); SHM 游戏只跳过
-            // 被连带标 fullscreen 的旧窗口 (notepad/explorer 等, 显示模式
-            // 切换时 winewayland 批量标记, fsPriority 选了游戏但它仍在
-            // z-order 高位, 普通 blit 会盖在游戏上面), 非全屏弹窗/对话框保留
+            // 跳过非主全屏的 toplevel: SHM 游戏只跳过被连带标 fullscreen 的
+            // 旧窗口 (notepad/explorer 等, 显示模式切换时 winewayland 批量
+            // 标记, fsPriority 选了游戏但它仍在 z-order 高位, 普通 blit 会
+            // 盖在游戏上面), 非全屏弹窗/对话框保留。
+            // 阶段 2: ZC 游戏不再独占跳过其它 toplevel — 它们正常合成进
+            // CPU 帧, 由 egl_renderer 按 zIndex 位置画 ZC 层并贴回上层
+            // (自然覆盖), 双 GL 实例互叠 bug 由此修复
+            // (见 COMPOSITOR_UNIFICATION.md §5 阶段 2)
             if (hasFullscreen && layer.toplevelId != fullscreenId) {
-                if (isZcGame) return;
                 if (layer.fullscreen) return;
             }
             auto* cst = tmgr_.FindToplevelLocked(layer.toplevelId);

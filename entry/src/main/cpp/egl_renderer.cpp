@@ -905,8 +905,11 @@ void EglRenderer::RenderLoop() {
             // 本 context 从不开启 GL_BLEND: 重绘就是不透明覆盖, 无需混合,
             // 也不要加混合 —— 目标就是盖住 overlay, 不是与它融合。
             // PC 模式不需要: GL 内容画在各自窗口内, 层序由系统合成器保证。
-            // ZC 全屏不需要: 层覆盖整幅桌面, 重绘只会盖掉游戏画面
-            if (!zeroCopyFullscreen_ && ws->Policy().RootCompositing() && rendered) {
+            // 阶段 2: 全屏 ZC 也走上层覆盖 — GetZeroCopyOccluders 只返回
+            // z-order 高于本层的窗口区域, 无上层窗口时结果为空 (无遮挡,
+            // 行为不变); 双 GL 实例互叠 (另一窗口被连带标全屏) 时上层窗口
+            // 被贴回, 双实例 bug 由此修复 (见 COMPOSITOR_UNIFICATION §5 阶段 2)
+            if (ws->Policy().RootCompositing() && rendered) {
                 // 32 上限: 遮挡源 = 上层窗口 + popup 层, 真实场景个位数;
                 // 超出的部分不重绘 (该区域 GL 内容会透出), 比动态扩容简单且够用
                 static constexpr int kMaxOccluders = 32;
