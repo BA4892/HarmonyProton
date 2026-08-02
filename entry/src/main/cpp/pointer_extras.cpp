@@ -2,10 +2,12 @@
 
 #include "include/pointer-constraints-unstable-v1-server-protocol.h"
 #include "include/pointer-warp-v1-server-protocol.h"
+#include "include/relative-pointer-unstable-v1-server-protocol.h"
 #include "input_manager.h"
 #include "wayland_server.h"
 
 #include <algorithm>
+#include <chrono>
 
 #undef LOG_TAG
 #define LOG_TAG "WL_PtrExt"
@@ -21,15 +23,17 @@ PointerExtras* PointerExtras::GetInstance() {
 }
 
 void PointerExtras::Register(wl_display* display) {
-    // 只注册 constraints + warp; relative_pointer_manager 故意不注册
-    // (原因见 pointer_extras.h 头注释 — 让 wine 始终走绝对 motion 路径)。
+    // constraints + warp + relative_pointer_manager 一并注册 (职责见头注释)。
     // warp 的发送只依赖 wp_pointer_warp_v1 全局存在
-    // (wayland_pointer.c: pending_warp && wp_pointer_warp_v1 才发出请求)。
+    // (wayland_pointer.c: pending_warp && wp_pointer_warp_v1 才发出请求);
+    // relative_pointer 对象由 wine 按相对模式需要自行创建。
     wl_global_create(display, &zwp_pointer_constraints_v1_interface, 1,
                      this, constraints_bind);
     wl_global_create(display, &wp_pointer_warp_v1_interface, 1,
                      this, warp_bind);
-    OH_LOG_INFO(LOG_APP, "[PtrExt] constraints+warp registered (relative DISABLED)");
+    wl_global_create(display, &zwp_relative_pointer_manager_v1_interface, 1,
+                     this, relmgr_bind);
+    OH_LOG_INFO(LOG_APP, "[PtrExt] constraints+warp+relative registered");
 }
 
 // ========================================================================
@@ -183,6 +187,68 @@ void PointerExtras::warp_warp_pointer(wl_client*, wl_resource*, wl_resource* sur
         OH_LOG_INFO(LOG_APP, "[PtrExt] warp surf=%{public}p → (%{public}.1f,%{public}.1f) serial=%{public}u n=%{public}u",
                     static_cast<void*>(surface), dx, dy, serial, sWarpLogN);
     InputManager::GetInstance()->OnPointerWarp(surface, dx, dy);
+}
+
+// ========================================================================
+//  zwp_relative_pointer_manager_v1
+// ========================================================================
+
+static const struct zwp_relative_pointer_v1_interface kRelativeImpl = {
+    .destroy = PointerExtras::relmgr_destroy,  // 对象本身只有 destroy
+};
+
+void PointerExtras::relmgr_bind(wl_client* client, void* data,
+                                uint32_t version, uint32_t id) {
+    wl_resource* res = wl_resource_create(client, &zwp_relative_pointer_manager_v1_interface,
+                                          std::min(version, 1u), id);
+    static const struct zwp_relative_pointer_manager_v1_interface kRelMgrImpl = {
+        .destroy = PointerExtras::relmgr_destroy,
+        .get_relative_pointer = PointerExtras::relmgr_get_relative_pointer,
+    };
+    wl_resource_set_implementation(res, &kRelMgrImpl, data, nullptr);
+}
+
+void PointerExtras::relmgr_get_relative_pointer(wl_client* client, wl_resource*,
+                                                uint32_t id, wl_resource* pointer) {
+    auto* self = GetInstance();
+    wl_resource* res = wl_resource_create(client, &zwp_relative_pointer_v1_interface, 1, id);
+    wl_resource_set_implementation(res, &kRelativeImpl, nullptr,
+        [](wl_resource* r) { OnRelativePointerDestroyed(r); });
+    {
+        std::lock_guard<std::mutex> lk(self->mutex_);
+        self->relativePointers_.push_back(res);
+    }
+    OH_LOG_INFO(LOG_APP, "[PtrExt] relative_pointer created (bind ptr=%{public}p, total=%{public}zu)",
+                static_cast<void*>(pointer), self->relativePointers_.size());
+}
+
+void PointerExtras::OnRelativePointerDestroyed(wl_resource* r) {
+    auto* self = GetInstance();
+    std::lock_guard<std::mutex> lk(self->mutex_);
+    auto& v = self->relativePointers_;
+    v.erase(std::remove(v.begin(), v.end(), r), v.end());
+    OH_LOG_INFO(LOG_APP, "[PtrExt] relative_pointer destroyed (remaining=%{public}zu)", v.size());
+}
+
+bool PointerExtras::HasRelativePointer() const {
+    std::lock_guard<std::mutex> lk(mutex_);
+    return !relativePointers_.empty();
+}
+
+void PointerExtras::SendRelativeMotion(double dx, double dy) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (relativePointers_.empty()) return;
+    // 无加速输入设备: unaccel = accel 同值; utime 用单调时钟微秒 (wine 侧
+    // 只读增量, 不读时间戳, 发 0 亦可 — 保留时间供诊断)
+    const uint64_t us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    const wl_fixed_t fdx = wl_fixed_from_double(dx);
+    const wl_fixed_t fdy = wl_fixed_from_double(dy);
+    for (auto* res : relativePointers_) {
+        zwp_relative_pointer_v1_send_relative_motion(res,
+            static_cast<uint32_t>(us >> 32), static_cast<uint32_t>(us & 0xffffffffu),
+            fdx, fdy, fdx, fdy);
+    }
 }
 
 // ========================================================================

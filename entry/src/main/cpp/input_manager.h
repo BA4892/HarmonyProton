@@ -50,6 +50,7 @@ public:
     // -- Wayland 线程注入 (由 FlushQueue 调用) --
     void InjectPointerEnter(uint32_t tl, wl_resource* surface, wl_fixed_t sx, wl_fixed_t sy);
     void InjectPointerMotion(wl_fixed_t sx, wl_fixed_t sy);
+    void InjectRelativeMotion(wl_fixed_t dx, wl_fixed_t dy);
     void InjectPointerButton(uint32_t button, uint32_t state);
     void InjectPointerAxis(int axis, wl_fixed_t value);
     void InjectPointerLeave();
@@ -87,8 +88,9 @@ public:
     wl_fixed_t GetLastGlobalPointerX() const { return lastGlobalPtrX_.load(); }
     wl_fixed_t GetLastGlobalPointerY() const { return lastGlobalPtrY_.load(); }
 
-    // 指针 warp 锚点 (wp_pointer_warp_v1 请求 / lock hint → PointerExtras 调入,
-    // Wayland 线程)。sx/sy 是 wine 的 surface 局部坐标。
+    // SetCursorPos 位置同步 (wp_pointer_warp_v1 → PointerExtras 调入,
+    // Wayland 线程)。sx/sy 是 wine 的 surface 局部坐标。wineserver 光标
+    // 已在 wine 侧移动到位, host 只同步 move grab 的偏移基准。
     void OnPointerWarp(wl_resource* surface, double sx, double sy);
 
 private:
@@ -97,6 +99,7 @@ private:
     // -- 事件队列 (NAPI → Wayland 线程) --
     struct InputEvent {
         enum Type { PTR_ENTER, PTR_LEAVE, PTR_MOTION, PTR_BUTTON, PTR_AXIS,
+                    REL_MOTION,
                     KBD_ENTER, KBD_LEAVE, KBD_KEY, KBD_MODIFIERS } type;
         uint32_t tl = 0;
         wl_resource* surface = nullptr;
@@ -163,35 +166,15 @@ private:
     std::unordered_map<uint32_t, bool> toplevelVisible_;
 
     /*
-     * 指针 warp 状态 (DirectInput 类老游戏: wine dinput warp_check 每 ~10ms
-     * SetCursorPos 回窗口中心, 再读两次 GetCursorPos 差值作相对位移 —
-     * dlls/dinput/mouse.c)。没有 warp 通道时回中只在 wineserver 内生效,
-     * 下一个绝对 motion 又把光标拽回设备位置 → dinput 增量 = 位置-中心
-     * → 游戏光标被甩到边缘 (实测: 屏幕中间一小块映射为游戏全屏幕)。
-     *
-     * warpActive_=true 时用户输入不再是绝对定位, 而是增量源:
-     *   逻辑位置 = warp 锚点 + 用户输入增量的累加。
-     * 这正是硬件光标在普通 compositor 里的工作方式 (weston: 光标位置是
-     * compositor 侧状态, 输入设备只产生 delta); 我们的触屏/鼠标都经 ArkTS
-     * 以绝对坐标送达, 所以 warp 后必须自己把绝对流拆成增量。
-     * desktop 模式锚点/输入都在桌面坐标空间; PC 模式在窗口局部坐标空间。
-     * 激活判据 = 游戏发回中请求 (wp_pointer_warp, 见 OnPointerWarp), 与渲染
-     * 路径 (ZC/SHM) 无关: 回中即 dinput 相对模式, 必须补偿; 读绝对坐标的
-     * 游戏 (RTS 等) 不回中, 不会误激活 (PAL2 实测为 SHM readback, ZC 门控
-     * 会把它的回中全部误拒)。回中时逻辑锚点必须重置到回中位置:
-     * SetCursorPos 会把 wineserver 光标移到回中点, 游戏读差值的基准随之
-     * 重置; 锚点不重置会让游戏每周期多读一份历史累积位移 → 漂移贴边。
+     * 相对指针增量基准 (zwp_relative_pointer_v1): wine 相对模式 (隐藏光标 +
+     * 约束, wayland_pointer.c needs_relative) 丢弃绝对 motion, 光标位置 =
+     * 基线 + 增量累积。host 不做模式判断 — 始终发绝对 motion, 同时把注入
+     * 坐标序列差分出增量, 有 relative 对象就入队 REL_MOTION。
+     * 增量在 surface 局部坐标空间 (与绝对 motion 同空间, 见 SendPointerEvent)。
+     * 仅 SendPointerEvent 所在线程 (ArkTS NAPI) 访问, 无需加锁。
      */
-    std::mutex warpMutex_;
-    bool warpActive_ = false;
-    wl_resource* warpSurface_ = nullptr;           // 哪个 surface 激活了 warp (NULL=无)
-    double warpLogicalX_ = 0, warpLogicalY_ = 0;   // 逻辑指针位置
-    double lastUserX_ = 0, lastUserY_ = 0;         // 上一次用户输入 (增量基准)
-    bool hasLastUser_ = false;
-    // warp 共用的坐标处理 (warpMutex_ 已持有): 输入用户坐标, 输出逻辑坐标
-    // (并更新增量基准)。warpSurface_ 非 NULL 时仅对该 surface 生效。
-    void ApplyWarpLogicLocked(wl_resource* surface, double userX, double userY,
-                              bool isPress, double& outX, double& outY);
+    double lastLocalX_ = 0, lastLocalY_ = 0;
+    bool hasLastLocal_ = false;
 
     // 最近一次按下时刻 (ACT_RELEASE 的脉冲拉伸计时, 见 input_manager.cpp)
     std::atomic<uint32_t> lastPressMs_{0};

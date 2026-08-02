@@ -60,6 +60,7 @@ add_library(entry SHARED
     viewporter-server-protocol.c
     pointer-warp-v1-protocol.c
     pointer-constraints-unstable-v1-protocol.c
+    relative-pointer-unstable-v1-protocol.c
 )
 
 target_link_libraries(entry PUBLIC
