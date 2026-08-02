@@ -1,6 +1,6 @@
 # 合成管线统一抽象方案（Compositor Layer Unification）
 
-> 状态: 阶段 1-2 已实施（feature/compositor-layers @76a2cd4/@d5deed7），阶段 3+ 未实施
+> 状态: 阶段 1-3 已实施（feature/compositor-layers @76a2cd4/@d5deed7/@d18a8c0），阶段 4 未实施
 > 日期: 2026-08-01（更新: 2026-08-02）
 > 范围: desktop（Pad）与 PC（模拟器）两种模式
 > 关联: `ARCHITECTURE_OVERVIEW.md`、`OPENGL_VIRGL_DESIGN.md`、`CROSS_FORK_CONTRACTS.md`
@@ -182,13 +182,36 @@ fs-pick、subsurface 命中、toplevel 命中合并为一个循环；S3 的"两�
 
 已实机验证: 层级遮挡 ✓ 全屏 ✓ 菜单 ✓（Pad, 2026-08-02）
 
-### 阶段 3：PC 窗口内收敛
+### 阶段 3：PC 窗口内收敛 ✅ 已实施
+
+> 提交: `feature/compositor-layers` @d18a8c0（仅代码，未 push）
 
 - PC 窗口内合成也用 Layer 列表（Root=窗口帧 + Subsurface + ZC Layer），
   窗口内层序统一；窗口间仍交系统合成器（不接管）。
 - ZC fallback 状态机收敛到 `CompositorLayer::zcActive` 单一字段
   （`zeroCopySurfaceKeys_` / ready marker / attached 三处合并）。
 - 验收：PC 双窗口 + 各窗口 GL 渲染回归。
+
+实施要点（与文档的差异, 均为实测/工程约束所定）:
+- **窗口内 subsurface 当前恒空**: PC 模式 subsurface 全部转 popup 伪
+  toplevel（`UpdatePopupOnCommit`）, `BuildWindowLayerListLocked` 的
+  Subsurface 循环是预留结构（zIndex 紧随 Root, 窗口局部坐标）;
+  窗口内合成输出 = 窗口 SHM 帧, 行为不变。
+- **zcActive = 状态消费单一字段**: 合成/输入/遮挡重绘只读
+  `CompositorLayer::zcActive`（由 compositor `zeroCopySurfaceKeys_` 派生,
+  该集合是唯一权威）。broker 的 attached 集合（IPC 簿记, detach 命令
+  依据）与 ready marker 文件（guest 跨进程选路通道, `opengl_readback.c`
+  读取）机制保留, 不参与合成判定。
+- **发布点收敛**: 三处状态的更新收敛到 `PublishZeroCopyActive` /
+  `UnpublishZeroCopyReady` / `ClearZeroCopyCompositorKey` 三个幂等方法
+  （egl_renderer 私有）, 替换原 4 个分散调用点; Release 路径不再无条件
+  清理未发布的状态。
+- **fallback 两步时序保留**: 先撤 ready（guest 立即切 SHM）→ 等
+  shmCommitSerial 越过基线（新 SHM 帧已到）→ 再撤 compositor key（恢复
+  合成）。不可合并为单次调用 — 合并会在追赶窗口期合成到 ZC 前的旧 SHM
+  帧（文档 §2.3 S5 的"追赶"是协议设计, 非缺陷）。
+
+验收（PC 模式需要模拟器, 当前未在线）: PC 双窗口 + 各窗口 GL 渲染回归。
 
 ### 阶段 4（可选）：全屏目标单一化
 
