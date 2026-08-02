@@ -1,6 +1,6 @@
 # 合成管线统一抽象方案（Compositor Layer Unification）
 
-> 状态: 阶段 1 已实施（feature/compositor-layers @76a2cd4），阶段 2+ 未实施
+> 状态: 阶段 1-2 已实施（feature/compositor-layers @76a2cd4/@d5deed7），阶段 3+ 未实施
 > 日期: 2026-08-01（更新: 2026-08-02）
 > 范围: desktop（Pad）与 PC（模拟器）两种模式
 > 关联: `ARCHITECTURE_OVERVIEW.md`、`OPENGL_VIRGL_DESIGN.md`、`CROSS_FORK_CONTRACTS.md`
@@ -155,7 +155,9 @@ fs-pick、subsurface 命中、toplevel 命中合并为一个循环；S3 的"两�
 - 全屏独占（isZcGame 填黑 / SHM 黑边 / fs-pick）与遮挡相关判定原样保留,
   仅遍历源统一为 Layer 列表。
 
-### 阶段 2：ZC 入层（修复双 GL 实例 bug）
+### 阶段 2：ZC 入层（修复双 GL 实例 bug）✅ 已实施
+
+> 提交: `feature/compositor-layers` @d5deed7（仅代码，未 push）
 
 - egl_renderer 绘制顺序改为：CPU 帧（ZC 区域留空）→ ZC Layer（按 zIndex
   位置画）→ zIndex 更高的 Layer 区域从 CPU 帧贴回（= 现有遮挡重绘，但语义
@@ -168,6 +170,17 @@ fs-pick、subsurface 命中、toplevel 命中合并为一个循环；S3 的"两�
 - 保留"被完全覆盖的层跳过合成"作为性能优化（一般化 `isZcGame` 跳过，按
   遮挡关系裁剪，`7c04cfe` 已有先例）。
 - 验收：双 GL 实例全屏/非全屏互叠场景 + 单实例回归 + 输入命中回归。
+
+实施要点（超出文档的两个扩展, 均由实测驱动）:
+- **subsurface zIndex 挂父 toplevel 层内**（文档 §4.2 设计）: 实测发现
+  GL 画面（readback subsurface）永远置顶、无法被其它窗口遮挡 — 这是旧
+  合成"subsurface 最后画"的固有行为, 阶段 1 为行为等价保留。阶段 2 按
+  §4.2 落地: subsurface 紧跟父窗口 zIndex, z-order 更高的 toplevel 自然
+  盖住; parent=root/不在 z-order 的层保持尾部置顶（任务栏等, 防沉底）。
+- **GetZeroCopyOccluders 按新层序过滤**: 仅父窗口 z-order 不低于 ZC 窗口
+  的 subsurface 贴回（同窗口菜单仍在 ZC 层之上), 与 Layer 层序一致。
+
+已实机验证: 层级遮挡 ✓ 全屏 ✓ 菜单 ✓（Pad, 2026-08-02）
 
 ### 阶段 3：PC 窗口内收敛
 
