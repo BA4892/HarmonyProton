@@ -117,6 +117,15 @@ public:
     std::vector<CompositorLayer> BuildWindowLayerListLocked(uint32_t toplevelId,
                                                             int winW, int winH);
 
+    // 全屏目标选取 (阶段 4, S3 收敛): 渲染 (TakeToplevelFrame) 与输入
+    // (FindInputTargetAt) 共用的唯一实现 — 可见全屏窗口中取 fsPriority
+    // 最大者, 返回其 toplevelId (0 = 无全屏窗口)。多窗口可同时 fullscreen
+    // (显示模式切换时 Wine 会把足够大的旧窗口连带标记, 请求到达顺序不定 —
+    // 2026-07 实测 notepad 被连带标记并压在游戏上), 规则原因/局限见
+    // ToplevelState::fsPriority 注释。调用方须已持有 tmgr mutex;
+    // 返回 id 对应的 state 由调用方锁内查询 (pick 时已确认非空)。
+    uint32_t PickFullscreenLayerLocked(const std::vector<CompositorLayer>& layers) const;
+
     // -- Zero-copy layer 管理 --
     bool GetZeroCopyLayerInfo(uint64_t surfaceKey, uint32_t rendererToplevelId,
                               int fallbackWidth, int fallbackHeight,

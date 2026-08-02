@@ -50,20 +50,14 @@ bool InputResolver::FindInputTargetAt(int x, int y, InputTarget& out)
      * (调用方只吞 PRESS, MOVE/RELEASE 照常透传)
      */
     {
-        // 全屏目标选取与渲染侧 (TakeToplevelFrame) 同规则: 可见全屏窗口中取
-        // fsPriority 最大者。多窗口可同时 fullscreen (显示模式切换时 Wine 会
-        // 把足够大的旧窗口连带标记, 且请求到达顺序不定 — 2026-07 实测 notepad
-        // 被连带标记并压在游戏上, 第一下点击切走前台导致游戏掉出全屏),
+        // 全屏目标选取与渲染侧 (TakeToplevelFrame) 同规则 — 阶段 4 起共用
+        // PickFullscreenLayerLocked 单一实现 (S3 收敛): 可见全屏窗口中取
+        // fsPriority 最大者 (多窗口可同时 fullscreen, 显示模式切换时 Wine
+        // 会连带标记旧窗口 — 2026-07 实测 notepad 被连带标记并压在游戏上),
         // 规则原因/局限见 ToplevelState::fsPriority 注释
-        const ToplevelManager::ToplevelState* zst = nullptr;
-        uint32_t fullscreenId = 0;
-        for (const auto& layer : layers) {
-            if (layer.type != DesktopCompositor::CompositorLayer::Type::Toplevel ||
-                !layer.visible || !layer.fullscreen) continue;
-            const auto* cand = tmgr_.FindToplevelLocked(layer.toplevelId);
-            if (!cand) continue;
-            if (!zst || cand->fsPriority > zst->fsPriority) { zst = cand; fullscreenId = layer.toplevelId; }
-        }
+        const uint32_t fullscreenId = compositor_.PickFullscreenLayerLocked(layers);
+        const ToplevelManager::ToplevelState* zst =
+            fullscreenId ? tmgr_.FindToplevelLocked(fullscreenId) : nullptr;
         // 逆变换尺寸必须与渲染一致: ZC 游戏用全屏前尺寸 (游戏分辨率),
         // SHM 游戏用实际 buffer 尺寸 (geometry.h SelectFullscreenContentSize)
         int contentW = 0, contentH = 0;

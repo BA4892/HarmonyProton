@@ -271,6 +271,27 @@ DesktopCompositor::BuildWindowLayerListLocked(uint32_t toplevelId, int winW, int
     return layers;
 }
 
+uint32_t DesktopCompositor::PickFullscreenLayerLocked(
+    const std::vector<CompositorLayer>& layers) const
+{
+    // 全屏目标选取 (阶段 4, S3 收敛): 渲染与输入共用的唯一实现, 遍历
+    // 同一 Layer 列表 — 可见全屏窗口中取 fsPriority 最大者 (多窗口可
+    // 同时 fullscreen, 规则原因/局限见 ToplevelState::fsPriority 注释)
+    uint32_t picked = 0;
+    const ToplevelManager::ToplevelState* best = nullptr;
+    for (const auto& layer : layers) {
+        if (layer.type != CompositorLayer::Type::Toplevel ||
+            !layer.visible || !layer.fullscreen) continue;
+        const auto* cand = tmgr_.FindToplevelLocked(layer.toplevelId);
+        if (!cand) continue;
+        if (!best || cand->fsPriority > best->fsPriority) {
+            best = cand;
+            picked = layer.toplevelId;
+        }
+    }
+    return picked;
+}
+
 void DesktopCompositor::ResolveSubsurfaceLayerPositionLocked(
     const SubsurfaceLayer& layer, int& x, int& y) const
 {
@@ -560,17 +581,13 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
         // ZC 游戏 (画面在 zero-copy GL 层): 全屏独占输出, 见下方填黑分支
         bool isZcGame = false;
         int fullscreenX = 0, fullscreenY = 0;
-        // 全屏选取与输入侧 (FindInputTargetAt) 同规则: 可见全屏窗口中取
-        // fsPriority 最大者 — 多窗口可同时 fullscreen (显示模式切换时 Wine
-        // 会把足够大的旧窗口连带标记, 请求到达顺序不定), 规则原因/局限见
-        // ToplevelState::fsPriority 注释
-        const ToplevelManager::ToplevelState* fsWin = nullptr;
-        for (const auto& layer : layers) {
-            if (layer.type != CompositorLayer::Type::Toplevel || !layer.visible || !layer.fullscreen) continue;
-            const auto* zst = tmgr_.FindToplevelLocked(layer.toplevelId);
-            if (!zst) continue;
-            if (!fsWin || zst->fsPriority > fsWin->fsPriority) { fsWin = zst; fullscreenId = layer.toplevelId; }
-        }
+        // 全屏目标选取 (阶段 4, S3 收敛): 与输入侧 (FindInputTargetAt) 共用
+        // PickFullscreenLayerLocked 单一实现 — 可见全屏窗口中取 fsPriority
+        // 最大者 (多窗口可同时 fullscreen, 规则原因/局限见
+        // ToplevelState::fsPriority 注释)
+        fullscreenId = PickFullscreenLayerLocked(layers);
+        const ToplevelManager::ToplevelState* fsWin =
+            fullscreenId ? tmgr_.FindToplevelLocked(fullscreenId) : nullptr;
         if (fsWin) {
             fullscreenX = fsWin->x;
             fullscreenY = fsWin->y;
