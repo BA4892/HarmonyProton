@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "display_policy.h"
+#include "geometry.h"
 
 class ToplevelManager;
 
@@ -87,6 +88,13 @@ public:
         int x = 0, y = 0, w = 0, h = 0;  // 坐标 (桌面合成: 桌面坐标; 窗口内: 窗口局部坐标)
         bool fullscreen = false; // Toplevel: 全屏标记
         const SubsurfaceLayer* sub = nullptr;  // Type==Subsurface 时引用原层
+
+        // 该层是否参与 CPU 合成/命中: ZC 层 (GPU 自绘, 合成/输入/覆盖判定
+        // 跳过) 或不可见层 (不显示不命中)。消费方判跳过一律用此谓词, 不要
+        // 直接摸 zcActive/visible — 规则变更只改这里 (等价性: desktop 模式
+        // toplevel 层 zcActive 恒 false; 全屏窗口的 subsurface visible 恒
+        // true — 父窗口已被 fs-pick 确认可见)。
+        bool ShouldSkipCpu() const { return !visible || zcActive; }
     };
 
     // 构造: 注入 ToplevelManager + 桌面合成配置 (由 WaylandServer 持有,
@@ -125,6 +133,13 @@ public:
     // ToplevelState::fsPriority 注释。调用方须已持有 tmgr mutex;
     // 返回 id 对应的 state 由调用方锁内查询 (pick 时已确认非空)。
     uint32_t PickFullscreenLayerLocked(const std::vector<CompositorLayer>& layers) const;
+
+    // 全屏内容 fit 几何 (渲染/输入共用): 内部做全屏内容尺寸选择
+    // (SelectFullscreenContentSize: ZC 游戏用 preFs 分辨率, SHM 用 buffer
+    // 尺寸) + ComputeFitRect — 该规则的唯一实现, 替换两侧各自组合。
+    // 调用方须已持有 tmgr mutex; 找不到 toplevel state 返回 false。
+    bool ComputeFullscreenFitLocked(uint32_t toplevelId, int rootW, int rootH,
+                                    FitRect& out) const;
 
     // -- Zero-copy layer 管理 --
     bool GetZeroCopyLayerInfo(uint64_t surfaceKey, uint32_t rendererToplevelId,
@@ -165,10 +180,6 @@ public:
 
     // Increment root frame serial (called from surface_commit when root commits)
     void IncrementDesktopRootFrameSerial() { ++desktopRootFrameSerial_; }
-
-    // -- 只读 accessors --
-    const std::vector<SubsurfaceLayer>& subsurfaceLayers() const { return subsurfaceLayers_; }
-    const std::unordered_set<uint64_t>& zeroCopySurfaceKeys() const { return zeroCopySurfaceKeys_; }
 
     // toplevel 是否有 zero-copy GL 层 (ZC 游戏判定: 全屏渲染/输入映射分流用,
     // 调用方须已持有 tmgr mutex)

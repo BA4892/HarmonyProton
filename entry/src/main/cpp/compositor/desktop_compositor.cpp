@@ -292,6 +292,25 @@ uint32_t DesktopCompositor::PickFullscreenLayerLocked(
     return picked;
 }
 
+bool DesktopCompositor::ComputeFullscreenFitLocked(uint32_t toplevelId, int rootW, int rootH,
+                                                   FitRect& out) const
+{
+    // 全屏内容尺寸选择 (ZC 游戏用 preFs 分辨率, SHM 用 buffer 尺寸) +
+    // 保比例 fit 的唯一实现 — 替换渲染 (TakeToplevelFrame) 与输入
+    // (FindInputTargetAt / SurfaceLocalToDesktop) 各自的组合。
+    // 注: 合成侧此前直接用 buffer 尺寸 (ZC 分支填黑不消费 transform,
+    // SHM 分支与 SelectFullscreenContentSize 结果等价); 统一后 ZC 游戏
+    // 的 transform 按 preFs 计算 — 与输入命中/GPU 层几何一致 (修正而非
+    // 回归: 输入侧一直用 preFs, 见 input_resolver 全屏分支注释)。
+    const auto* st = tmgr_.FindToplevelLocked(toplevelId);
+    if (!st) return false;
+    int contentW = 0, contentH = 0;
+    SelectFullscreenContentSize(st->preFsW, st->preFsH, st->w, st->h,
+                                HasZeroCopyLayerForToplevelLocked(toplevelId),
+                                contentW, contentH);
+    return ComputeFitRect(rootW, rootH, contentW, contentH, out);
+}
+
 void DesktopCompositor::ResolveSubsurfaceLayerPositionLocked(
     const SubsurfaceLayer& layer, int& x, int& y) const
 {
@@ -584,14 +603,15 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
         // 全屏目标选取 (阶段 4, S3 收敛): 与输入侧 (FindInputTargetAt) 共用
         // PickFullscreenLayerLocked 单一实现 — 可见全屏窗口中取 fsPriority
         // 最大者 (多窗口可同时 fullscreen, 规则原因/局限见
-        // ToplevelState::fsPriority 注释)
+        // ToplevelState::fsPriority 注释); fit 几何同样共用
+        // ComputeFullscreenFitLocked (含内容尺寸选择, 见该函数注释)
         fullscreenId = PickFullscreenLayerLocked(layers);
         const ToplevelManager::ToplevelState* fsWin =
             fullscreenId ? tmgr_.FindToplevelLocked(fullscreenId) : nullptr;
         if (fsWin) {
             fullscreenX = fsWin->x;
             fullscreenY = fsWin->y;
-            hasFullscreen = ComputeFitRect(rootW, rootH, fsWin->w, fsWin->h, transform);
+            hasFullscreen = ComputeFullscreenFitLocked(fullscreenId, rootW, rootH, transform);
             isZcGame = HasZeroCopyLayerForToplevelLocked(fullscreenId);
         }
 
@@ -603,7 +623,7 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
             for (const auto& layer : layers) {
                 if (layer.type != CompositorLayer::Type::Subsurface) continue;
                 if (layer.toplevelId != fullscreenId) continue;
-                if (layer.zcActive) continue;
+                if (layer.ShouldSkipCpu()) continue;
                 const auto& sl = *layer.sub;
                 if (sl.w <= 0 || sl.h <= 0) continue;
                 if (sl.shmFormat == 0 && !sl.opaque) continue;
@@ -673,7 +693,7 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
         // toplevel 循环 + subsurface 循环的两段顺序 (Layer zIndex 分配保证)。
         // 全屏独占/跳过特判原样保留 (等价形式), 行为不变。
         auto blitToplevel = [&](const CompositorLayer& layer) {
-            if (!layer.visible) return;
+            if (layer.ShouldSkipCpu()) return;
             // 跳过非主全屏的 toplevel: SHM 游戏只跳过被连带标 fullscreen 的
             // 旧窗口 (notepad/explorer 等, 显示模式切换时 winewayland 批量
             // 标记, fsPriority 选了游戏但它仍在 z-order 高位, 普通 blit 会
@@ -768,8 +788,7 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
             }
         };
         auto blitSubsurface = [&](const CompositorLayer& layer) {
-            if (layer.zcActive) return;
-            if (!layer.visible) return;
+            if (layer.ShouldSkipCpu()) return;
             if (layer.w <= 0 || layer.h <= 0) return;
             if (hasFullscreen && layer.toplevelId != fullscreenId) return;
             const auto& sl = *layer.sub;
@@ -940,7 +959,7 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
             case CompositorLayer::Type::Toplevel:
                 break;  // 窗口内 ZC 整窗口层: GPU 自绘, CPU 帧跳过
             case CompositorLayer::Type::Subsurface:
-                if (layer.zcActive) break;  // 窗口内 ZC 子表面层: 同上
+                if (layer.ShouldSkipCpu()) break;  // ZC 子表面 (GPU 自绘) / 不可见: 同上
                 blitWindowSubsurface(layer);
                 break;
         }

@@ -58,17 +58,11 @@ bool InputResolver::FindInputTargetAt(int x, int y, InputTarget& out)
         const uint32_t fullscreenId = compositor_.PickFullscreenLayerLocked(layers);
         const ToplevelManager::ToplevelState* zst =
             fullscreenId ? tmgr_.FindToplevelLocked(fullscreenId) : nullptr;
-        // 逆变换尺寸必须与渲染一致: ZC 游戏用全屏前尺寸 (游戏分辨率),
-        // SHM 游戏用实际 buffer 尺寸 (geometry.h SelectFullscreenContentSize)
-        int contentW = 0, contentH = 0;
+        // fit 几何与渲染侧 (TakeToplevelFrame) 共用 ComputeFullscreenFitLocked
+        // 单一实现: ZC 游戏用全屏前尺寸 (游戏分辨率), SHM 游戏用 buffer 尺寸
         FitRect transform;
-        bool fsGeometryOk = false;
-        if (zst) {
-            SelectFullscreenContentSize(zst->preFsW, zst->preFsH, zst->w, zst->h,
-                                        compositor_.HasZeroCopyLayerForToplevelLocked(fullscreenId),
-                                        contentW, contentH);
-            fsGeometryOk = ComputeFitRect(rootW, rootH, contentW, contentH, transform);
-        }
+        bool fsGeometryOk = zst &&
+            compositor_.ComputeFullscreenFitLocked(fullscreenId, rootW, rootH, transform);
         if (fsGeometryOk) {
             // 诊断: 全屏输入目标选取 (仅目标变化时输出 — 多窗口同时全屏时
             // 选错窗口的点击路由问题靠它定位, 例如旧窗口被连带标记压在游戏上)
@@ -80,12 +74,13 @@ bool InputResolver::FindInputTargetAt(int x, int y, InputTarget& out)
                     " preFs=%{public}dx%{public}d buf=%{public}dx%{public}d → content=%{public}dx%{public}d",
                     fullscreenId, static_cast<unsigned long long>(zst->fsPriority),
                     compositor_.HasZeroCopyLayerForToplevelLocked(fullscreenId) ? 1 : 0,
-                    zst->preFsW, zst->preFsH, zst->w, zst->h, contentW, contentH);
+                    zst->preFsW, zst->preFsH, zst->w, zst->h,
+                    transform.srcW, transform.srcH);
             }
             // 该窗口的 subsurface 层绘制在窗口内容之上, 先命中 (同一变换)
             for (auto it = layers.rbegin(); it != layers.rend(); ++it) {
                 if (it->type != DesktopCompositor::CompositorLayer::Type::Subsurface) continue;
-                if (it->zcActive) continue;
+                if (it->ShouldSkipCpu()) continue;
                 if (it->toplevelId != fullscreenId || it->w <= 0 || it->h <= 0) continue;
                 const auto& sl = *it->sub;
                 const int layerDispW = sl.vpDstW > 0 ? std::min(sl.vpDstW, sl.w) : sl.w;
@@ -139,13 +134,12 @@ bool InputResolver::FindInputTargetAt(int x, int y, InputTarget& out)
      */
     for (auto it = layers.rbegin(); it != layers.rend(); ++it) {
         if (it->type == DesktopCompositor::CompositorLayer::Type::Subsurface) {
-            // zero-copy GL 层不参与置顶命中: 渲染时它按窗口 z 位被遮挡重绘压回
-            // (egl_renderer occluder redraw), 命中同样交给下方 toplevel z-order,
-            // 否则被挡住的 GL 窗口仍会收到点击。zcActive 由实时集合
+            // 跳过 GPU 自绘/不可见层: zero-copy GL 层不参与置顶命中 (渲染时
+            // 它按窗口 z 位被遮挡重绘压回, 命中同样交给下方 toplevel z-order,
+            // 否则被挡住的 GL 窗口仍会收到点击); zcActive 由实时集合
             // zeroCopySurfaceKeys_ 派生: GPU→CPU fallback 时 key 被移出,
             // 该层自动恢复为普通 subsurface (CPU 合成置顶, 命中也置顶), 无需特判
-            if (it->zcActive) continue;
-            if (!it->visible) continue;
+            if (it->ShouldSkipCpu()) continue;
             if (it->w <= 0 || it->h <= 0) continue;
             const auto& sl = *it->sub;
             if (x >= it->x && x < it->x + it->w && y >= it->y && y < it->y + it->h) {
@@ -163,7 +157,7 @@ bool InputResolver::FindInputTargetAt(int x, int y, InputTarget& out)
                 return out.surface != nullptr;
             }
         } else if (it->type == DesktopCompositor::CompositorLayer::Type::Toplevel) {
-            if (!it->visible) continue;
+            if (it->ShouldSkipCpu()) continue;
             if (x >= it->x && x < it->x + it->w && y >= it->y && y < it->y + it->h) {
                 wl_resource* surf = tmgr_.GetSurfaceForToplevel(it->toplevelId);
                 if (surf) {
@@ -210,17 +204,13 @@ bool InputResolver::SurfaceLocalToDesktop(wl_resource* surface, double lx, doubl
     const auto* st = tmgr_.FindToplevelLocked(tl);
     if (!st) return false;
     if (st->fullscreen) {
-        // 与 FindInputTargetAt 全屏分支同一几何 (SelectFullscreenContentSize
-        // + ComputeFitRect), 保证 warp 锚点与输入逆映射互为正反变换
+        // 与 FindInputTargetAt 全屏分支同一几何 (ComputeFullscreenFitLocked),
+        // 保证 warp 锚点与输入逆映射互为正反变换
         const auto* rootSt = tmgr_.FindToplevelLocked(desktopRootToplevelId_);
         const int rootW = (rootSt && rootSt->w > 0) ? rootSt->w : outputW_;
         const int rootH = (rootSt && rootSt->h > 0) ? rootSt->h : outputH_;
-        int contentW = 0, contentH = 0;
-        SelectFullscreenContentSize(st->preFsW, st->preFsH, st->w, st->h,
-                                    compositor_.HasZeroCopyLayerForToplevelLocked(tl),
-                                    contentW, contentH);
         FitRect transform;
-        if (!ComputeFitRect(rootW, rootH, contentW, contentH, transform)) return false;
+        if (!compositor_.ComputeFullscreenFitLocked(tl, rootW, rootH, transform)) return false;
         dx = transform.offX + lx * transform.scale;
         dy = transform.offY + ly * transform.scale;
         return true;
