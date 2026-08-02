@@ -1,6 +1,6 @@
 # 合成管线统一抽象方案（Compositor Layer Unification）
 
-> 状态: 阶段 1-3 已实施（feature/compositor-layers @76a2cd4/@d5deed7/@d18a8c0），阶段 4 未实施
+> 状态: 阶段 1-4 已实施（feature/compositor-layers @76a2cd4/@d5deed7/@6df338a/@c2bd0ee），全部未 push
 > 日期: 2026-08-01（更新: 2026-08-02）
 > 范围: desktop（Pad）与 PC（模拟器）两种模式
 > 关联: `ARCHITECTURE_OVERVIEW.md`、`OPENGL_VIRGL_DESIGN.md`、`CROSS_FORK_CONTRACTS.md`
@@ -213,9 +213,20 @@ fs-pick、subsurface 命中、toplevel 命中合并为一个循环；S3 的"两�
 
 验收（PC 模式需要模拟器, 当前未在线）: PC 双窗口 + 各窗口 GL 渲染回归。
 
-### 阶段 4（可选）：全屏目标单一化
+### 阶段 4（可选）：全屏目标单一化 ✅ 已实施
+
+> 提交: `feature/compositor-layers` @c2bd0ee（仅代码，未 push）
 
 fs-pick（渲染/输入）收敛为 Layer 列表上的纯函数，删除 S3 的重复实现。
+
+实施要点:
+- `PickFullscreenLayerLocked(layers)`：DesktopCompositor 成员，遍历同一
+  Layer 列表取可见全屏窗口中 fsPriority 最大者，返回 toplevelId（0=无）；
+  渲染侧（TakeToplevelFrame）与输入侧（FindInputTargetAt）两个调用点，
+  原两处 8 行循环删除。state 由调用方锁内按 id 查询（pick 时已确认非空）。
+- 行为等价（纯重构）：选取规则未变，输入侧 fs-pick 诊断日志保留。
+
+验收（实机回归推迟, 与阶段 3 一起补）: 全屏场景 + 双窗口全屏互叠 + 输入命中。
 
 ## 6. 收益
 
