@@ -110,6 +110,12 @@ WineHua/
 - **dosdevices symlink**: OHOS 沙箱禁止 symlink()，fallback 到 drive_c
 - **XKB 键盘**: xkeyboard-config 打包到 rawfile，通过 `XKB_CONFIG_ROOT` 指向
 
+## Contributtors
+
+* [hackeris](https://github.com/hackeris)：项目骨架，box64，wine, wayland compositor
+* [yifengling0](https://github.com/yifengling0)：音频，图形（OpenGL，DXVK）
+* [Y1yan](https://github.com/panedioic)：box64, wayland compositor
+
 ## 日志
 
 Wine 输出（stdout + stderr）重定向到 hilog + 文件：
