@@ -320,7 +320,9 @@ static void AppendStableDesktopDxvkEnv(std::vector<std::string>& env,
      * this through runWineProgram's per-process environment. */
     env.push_back("DXVK_LOG_LEVEL=warn");
     env.push_back("DXVK_LOG_PATH=C:\\windows\\temp");
+#ifdef __aarch64__
     env.push_back("BOX64_DYNAREC_WEAKBARRIER=0");
+#endif
     env.push_back("WINEHUA_PERF_PROFILE=" + selectedProfile);
     env.push_back("DXVK_WINEHUA_PRECISE_SHADOW=1");
     if (selectedProfile == "shadow-precise-dirty-ring-inline-upload-descriptor-serialized") {

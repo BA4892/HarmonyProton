@@ -151,7 +151,10 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
         "WINEHUA_VULKAN_RUNTIME=1",
         "WINEHUA_VULKAN_LOADER_ARCH=x86_64",
         "WINEHUA_VENUS_ICD_ARCH=x86_64",
+#ifdef __aarch64__
         "USE_LIBBOX64=1",
+#endif
+#ifdef __aarch64__
         "BOX64_LD_LIBRARY_PATH=" + box64LibraryPath,
         "BOX64_EMULATED_LIBS=libvulkan.so:libvulkan.so.1:"
             "libEGL.so:libEGL.so.1:libGLESv2.so:libGLESv2.so.2:"
@@ -159,6 +162,7 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
             "libwayland-client.so:libwayland-client.so.0:libwayland-server.so:"
             "libwayland-server.so.0:libwayland-egl.so:libwayland-egl.so.1:"
             "libdrm.so:libdrm.so.2:libffi.so:libffi.so.8",
+#endif
         "VK_DRIVER_FILES=" + guestVulkanIcd,
         "VK_ICD_FILENAMES=" + guestVulkanIcd,
         "VN_DEBUG=vtest",

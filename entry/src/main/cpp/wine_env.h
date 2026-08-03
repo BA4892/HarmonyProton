@@ -12,6 +12,7 @@
 #include "wine_constants.h"
 
 // -- Box64 性能调优 (static inline, 供 napi_init / wine_child 共用) --
+#ifdef __aarch64__
 static inline void SetBox64PerfEnv() {
     setenv("BOX64_LOG", "0", 1);
     setenv("BOX64_NOBANNER", "1", 1);
@@ -53,6 +54,10 @@ inline void AppendBox64PerfStrings(std::vector<std::string>& env) {
     // (box64 pe_tools.c 对 DOS MZ exe 无边界检查 → explorer 浏览目录挂死)
     env.push_back("BOX64_DYNAREC_VOLATILE_METADATA=0");
 }
+#else
+static inline void SetBox64PerfEnv() {}
+static inline void AppendBox64PerfStrings(std::vector<std::string>& env) { (void)env; }
+#endif
 
 // -- Wine 环境变量构建 --
 std::vector<std::string> BuildWineEnv(const std::string& sockDir,

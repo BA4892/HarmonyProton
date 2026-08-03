@@ -875,11 +875,13 @@ void GraphicsBroker::AppendWineEnv(std::vector<std::string>& env) const
             env.push_back("EGL_PLATFORM=wayland");
             if (FileExists(guestLibDir + "/libEGL.so"))
                 env.push_back("WINEHUA_EGL_LIBRARY_PATH=" + guestLibDir + "/libEGL.so");
+#ifdef __aarch64__
             env.push_back("BOX64_EMULATED_LIBS=libEGL.so:libEGL.so.1:libGLESv2.so:libGLESv2.so.2:"
                           "libGLESv1_CM.so:libGLESv1_CM.so.1:libGL.so:libGL.so.1:"
                           "libwayland-client.so:libwayland-client.so.0:libwayland-server.so:"
                           "libwayland-server.so.0:libwayland-egl.so:libwayland-egl.so.1:"
                           "libdrm.so:libdrm.so.2:libffi.so:libffi.so.8");
+#endif
             if (DirExists(guestLibDir + "/dri")) env.push_back("LIBGL_DRIVERS_PATH=" + guestLibDir + "/dri");
             if (DirExists(guestLibDir + "/egl")) env.push_back("EGL_DRIVERS_PATH=" + guestLibDir + "/egl");
         }
