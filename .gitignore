@@ -42,6 +42,7 @@ out/
 /.ohos
 /entry/libs
 /build-profile.json5
+.claude/rules/local.md
 
 # Third-party submodule build artifacts
 thirdparty/wine/build-*/
