@@ -1,4 +1,5 @@
 #include "wine_launch.h"
+#include "wine_exe.h"
 #include "wine_process.h"
 #include "wine_env.h"
 #include "wine_constants.h"
@@ -522,7 +523,46 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
         ws->SetDesktopRootRecognitionEnabled(true);
         ws->PromotePendingDesktopRoot();
     } else {
-        OH_LOG_INFO(LOG_APP, "[Launch-Async] prefix already initialized, skipping wineboot");
+        /* 二启 (prefix 已初始化): 显式播种 wineboot boot 事件。
+         * 每个新 wineserver 会话的内核对象全空, 第一个客户端 (explorer) 会
+         * 在 ntdll run_wineboot 里触发 wineboot --init——该路径继承 appspawn
+         * 环境 (LD_PRELOAD=libappspawn_helper.z.so 等), 实测 wineboot 卡死
+         * (注册表已写但 .update-timestamp 不更新), SetEvent 永不执行, 之后
+         * 所有 Wine 进程都卡在 boot 事件等待, 窗口全部出不来。这里用与首启
+         * 相同的 NCP 干净环境显式跑一次 wineboot: 正常完成后事件 signaled,
+         * explorer 的 run_wineboot 检查事件已存在, 立即放行。
+         * 参数必须用 --init: wineboot.c 的 wWinMain 传 update_wineprefix(update),
+         * 而 update_wineprefix 的参数名就是 force——--update 会让 force=true,
+         * 无条件重装 wine.inf 并弹出 "Setting up Wine" 等待窗; --init 传
+         * force=false, 仅当 wine.inf 时间戳变化 (升级) 才重装。 */
+        OH_LOG_INFO(LOG_APP, "[Launch-Async] prefix ready; seeding wineboot boot event (--init)...");
+        std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|" +
+            "wine|wineboot|--init|__env=WINEPREFIX=" + p->prefixDir;
+        NativeChildProcess_Args childArgs = {};
+        childArgs.entryParams = const_cast<char*>(entryParams.c_str());
+        NativeChildProcess_Options options = {};
+        options.isolationMode = NCP_ISOLATION_MODE_NORMAL;
+        int32_t childPid = -1;
+        auto ret = OH_Ability_StartNativeChildProcess(
+            "libwine_child.so:Main", childArgs, options, &childPid);
+        if (ret != NCP_NO_ERROR) {
+            OH_LOG_ERROR(LOG_APP, "[Launch-Async] wineboot --init FAILED ret=%{public}d",
+                         (int)ret);
+        } else {
+            OH_LOG_INFO(LOG_APP, "[Launch-Async] wineboot --init pid=%{public}d", childPid);
+            /* 与首启相同的等待纪律: wineboot 活着就继续等, 大超时仅作挂死
+             * 安全网。wineboot 退出即 SetEvent, explorer 即可放行。 */
+            char procPath[64];
+            snprintf(procPath, sizeof(procPath), "/proc/%d", childPid);
+            constexpr int kWinebootHangMs = 3 * 60 * 1000;
+            int aliveMs = 0;
+            while (IsProcessAliveNotZombie(childPid) && aliveMs < kWinebootHangMs) {
+                usleep(500000);
+                aliveMs += 500;
+            }
+            OH_LOG_INFO(LOG_APP, "[Launch-Async] wineboot --init done (%{public}d ms)",
+                        aliveMs);
+        }
     }
 
     // -- explorer desktop shell (仅 desktop 模式) --
@@ -579,22 +619,19 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
     }
     else
     {
-        // 非桌面模式: 启动 explorer 文件管理器窗口
-#ifdef __aarch64__
-        std::string exEntry = p->homeDir + "|" + p->winehuaBin + serializedEnv + "|explorer";
-#else
-        std::string exEntry = p->homeDir + "|" + p->winehuaBin + serializedEnv + "|wine|explorer";
-#endif
-        AppendDesktopD3dEntryEnv(exEntry, *p);
-        NativeChildProcess_Args exArgs = {};
-        exArgs.entryParams = const_cast<char*>(exEntry.c_str());
-        NativeChildProcess_Options exOpts = {};
-        exOpts.isolationMode = NCP_ISOLATION_MODE_NORMAL;
-        int32_t exPid = -1;
-        auto exRet = OH_Ability_StartNativeChildProcess(
-            "libwine_child.so:Main", exArgs, exOpts, &exPid);
-        OH_LOG_INFO(LOG_APP, "[Launch-Async] explorer window pid=%{public}d ret=%{public}d",
-                    exPid, (int)exRet);
+        // 非桌面模式: 启动 explorer 文件管理器窗口 — 与 Index.ets 手动启动
+        // explorer (runWineProgram → SpawnWineProgram) 走完全相同的 broker
+        // 路径 (绝对路径 + per-process env + broker 通道)。早期 NCP 直启
+        // 裸名 "wine explorer" 在非桌面模式被 Wine 当作 shell 启动, 不创建
+        // 文件管理器窗口。
+        ProgramOptions options;
+        options.windowsExePath = "C:\\windows\\explorer.exe";
+        options.prefixMode = (p->prefixDir == WINE_SMOKE_PREFIX) ? "clean" : "reuse";
+        options.d3dBackend = p->d3dBackend;
+        options.automationMode = false;
+        int32_t exPid = SpawnWineProgram(options);
+        OH_LOG_INFO(LOG_APP, "[Launch-Async] explorer window pid=%{public}d (broker path)",
+                    exPid);
     }
     return true;
 }

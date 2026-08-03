@@ -195,7 +195,7 @@ jobs:
           NATIVE_ARCH: arm64-v8a
           BUILD_GUEST_GFX: '1'
           BUILD_GUEST_VULKAN: '1'
-          BUILD_WINE_MONO: '0'
+          BUILD_WINE_MONO: '1'
         run: |
           set -euxo pipefail
           make NATIVE_ARCH=arm64-v8a hap

@@ -36,17 +36,6 @@ extern napi_threadsafe_function gStateTsfn;
 
 namespace {
 
-struct ProgramOptions {
-    std::string windowsExePath;
-    std::vector<std::string> argv;
-    std::vector<std::string> environment;
-    std::string workingDirectory;
-    std::string prefixMode = "reuse";
-    std::string d3dBackend = "dxvk_legacy";
-    std::string presentBackend = "virgl_compositor";
-    bool automationMode = false;
-};
-
 struct GuestProgramOptions {
     std::string executablePath;
     std::vector<std::string> argv;
@@ -289,7 +278,7 @@ static napi_value MakeProcessObject(napi_env env, const WineProcessEntry* entry,
     return object;
 }
 
-static pid_t SpawnWineProgram(const ProgramOptions& options)
+static int SpawnWineProgramImpl(const ProgramOptions& options)
 {
     if (options.windowsExePath.empty() || HasUnsafeProtocolChar(options.windowsExePath)) return -1;
     for (const std::string& arg : options.argv) if (HasUnsafeProtocolChar(arg)) return -1;
@@ -490,6 +479,13 @@ static pid_t SpawnHostProgram(const HostProgramOptions& options)
 }
 
 } // namespace
+
+// 公开入口 (wine_launch.cpp 自动拉起 explorer 复用): 转发到匿名
+// namespace 内的实现, 后者依赖 PrefixForMode/SpawnViaBroker 等内部函数。
+int SpawnWineProgram(const ProgramOptions& options)
+{
+    return SpawnWineProgramImpl(options);
+}
 
 napi_value RunWineProgram(napi_env env, napi_callback_info info)
 {
