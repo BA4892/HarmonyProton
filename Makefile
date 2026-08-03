@@ -352,19 +352,6 @@ test:
 	    $(ROOT)/entry/src/main/cpp/compositor/geometry.cpp
 	$(HOST_TEST_DIR)/geometry_test
 
-# ============================================================
-# smoke-pe: Windows PE 探针 (mingw-w64 交叉编译 32 位, 诊断工具,
-# 打进 build/smoke-pe/, 不进 hap; 手动 push 到设备 Download 目录运行)
-# ============================================================
-SMOKE_PE_DIR := $(BUILD_DIR)/smoke-pe
-SMOKE_PE_MINGW ?= i686-w64-mingw32-gcc
-
-.PHONY: smoke-pe
-smoke-pe:
-	@mkdir -p $(SMOKE_PE_DIR)
-	$(SMOKE_PE_MINGW) -O2 -mwindows -o $(SMOKE_PE_DIR)/dinput_click_probe.exe \
-	    $(ROOT)/smoke/dinput_click_probe.c -ldinput8 -ldxguid -luser32 -lgdi32
-	@echo "PE 探针: $(SMOKE_PE_DIR)/dinput_click_probe.exe"
 
 # ============================================================
 # clean
